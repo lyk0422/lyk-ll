@@ -4,13 +4,19 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    url: ${DB_URL:jdbc:h2:mem:local_demo;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -31,3 +37,16 @@ management:
   endpoint:
     health:
       show-details: never
+
+sync:
+  lateness-ms: 500
+  window-ms:
+    LIDAR: 50
+    RADAR: 60
+    CAMERA: 40
+    IMU: 20
+  interpolation-window-ms:
+    LIDAR: 100
+    RADAR: 120
+    CAMERA: 80
+    IMU: 40
