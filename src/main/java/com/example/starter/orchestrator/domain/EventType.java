@@ -1,0 +1,25 @@
+package com.example.starter.orchestrator.domain;
+
+/**
+ * 写入 plan_event 的事件类型，构成可核验的编排事件序列。
+ */
+public enum EventType {
+    PLAN_SUBMITTED,
+    PLAN_STARTED,
+    PLAN_SUCCEEDED,
+    PLAN_FAILED,
+    CANCEL_REQUESTED,
+    PLAN_CANCELLED,
+    PLAN_RESUMED,
+    NODE_LAUNCHING,
+    NODE_STARTED,
+    NODE_START_FAILED,
+    HEALTH_CHECK_PASSED,
+    HEALTH_CHECK_FAILED,
+    NODE_SKIPPED,
+    NODE_CANCELLED,
+    COMPENSATE_STARTED,
+    COMPENSATE_SUCCEEDED,
+    COMPENSATE_FAILED,
+    NODE_COMPENSATED
+}
