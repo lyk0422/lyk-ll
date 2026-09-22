@@ -88,6 +88,28 @@ APP_BASE_NAME=${0##*/}
 # Discard cd standard output in case $CDPATH is set (https://github.com/gradle/gradle/issues/25036)
 APP_HOME=$( cd -P "${APP_HOME:-./}" > /dev/null && printf '%s\n' "$PWD" ) || exit
 
+# === 非 ASCII GRADLE_USER_HOME 兼容段(Windows 中文工作目录) ===
+# 当 worktree 路径含中文等非 ASCII 字符时,Gradle 测试 worker 的长命令行通过
+# @argfile 传递,Windows JVM launcher 按系统 ANSI 代码页解析会破坏其中的中文
+# 引导类路径,导致 ClassNotFoundException: GradleWorkerMain。
+# 这里把 runner 预填充的 GRADLE_USER_HOME 一次性复制到 ASCII 目录($HOME 下)
+# 并重定向环境变量,发行版与依赖缓存无需重新下载;仅在含非 ASCII 路径时生效。
+case "${GRADLE_USER_HOME:-}" in
+  *[!\ -~]*)
+    ASCII_GRADLE_HOME="$HOME/ros-registry-gradle-home-B"
+    if [ ! -f "$ASCII_GRADLE_HOME/.relocated" ]; then
+      mkdir -p "$ASCII_GRADLE_HOME"
+      cp -R "$GRADLE_USER_HOME/." "$ASCII_GRADLE_HOME/"
+      : > "$ASCII_GRADLE_HOME/.relocated"
+    fi
+    if command -v cygpath >/dev/null 2>&1; then
+      export GRADLE_USER_HOME=$(cygpath -m "$ASCII_GRADLE_HOME")
+    else
+      export GRADLE_USER_HOME="$ASCII_GRADLE_HOME"
+    fi
+    ;;
+esac
+
 # Use the maximum available, or set MAX_FD != -1 to use that value.
 MAX_FD=maximum
 

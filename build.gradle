@@ -6,6 +6,14 @@ plugins {
 group = 'com.example'
 version = '0.1.0'
 
+// 兼容项:本机工作目录含非 ASCII 字符(中文),Windows 上 Gradle 测试 worker 的
+// @argfile 按系统 ANSI 代码页解析,含中文路径的 classpath 会被破坏,导致
+// "找不到主类 worker.org.gradle.process.internal.worker.GradleWorkerMain"。
+// 将构建输出重定向到 ASCII 临时路径可消除该问题;测试报告/结果在 test 后
+// 复制回本 worktree 的 build/ 标准位置归档。源码与资源始终保留在 worktree 内。
+def asciiTempRoot = System.getenv('TEMP') ?: System.getProperty('java.io.tmpdir')
+layout.buildDirectory = file("${asciiTempRoot}/ros-registry-build-B")
+
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
@@ -23,14 +31,45 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     runtimeOnly 'com.mysql:mysql-connector-j'
+    runtimeOnly 'com.h2database:h2'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
 }
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
+tasks.named('test') {
+    useJUnitPlatform()
+    // 统一测试 JVM 编码,避免中文断言与日志在 GBK 环境乱码。
+    environment 'JDK_JAVA_OPTIONS', '-Dfile.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8'
+    jvmArgs '-Dfile.encoding=UTF-8', '-Dsun.jnu.encoding=UTF-8'
+
+    // 构建输出位于 ASCII 临时目录(见 layout.buildDirectory);测试完成后把
+    // JUnit XML 结果与 HTML 报告复制回本 worktree 的标准 build/ 位置归档。
+    doLast {
+        def archiveRoot = layout.projectDirectory.dir('build')
+        copy {
+            from(layout.buildDirectory.dir('test-results/test'))
+            into(archiveRoot.dir('test-results/test'))
+        }
+        copy {
+            from(layout.buildDirectory.dir('reports/tests/test'))
+            into(archiveRoot.dir('reports/tests/test'))
+        }
+    }
+}
+
 tasks.named('bootJar') {
     archiveFileName = 'app.jar'
+    // 构建输出位于 ASCII 临时目录(见 layout.buildDirectory);产物复制回 worktree
+    // 的标准 build/libs 位置,便于直接 java -jar 启动与归档。
+    doLast {
+        copy {
+            from(layout.buildDirectory.file('libs/app.jar'))
+            into(layout.projectDirectory.dir('build/libs'))
+        }
+    }
 }
 
 tasks.named('jar') {
