@@ -4,13 +4,19 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    url: ${DB_URL:jdbc:h2:mem:ros2_control_demo;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -31,3 +37,27 @@ management:
   endpoint:
     health:
       show-details: never
+
+# 仲裁服务可配置参数（单位、时区均显式标注）
+arbitration:
+  lease:
+    # 租约默认有效期（毫秒）；到期未续期视为控制器失联
+    ttl-ms: 5000
+  command:
+    # 指令允许的时戳偏移：未来指令容忍窗口（毫秒）
+    future-tolerance-ms: 500
+    # 指令过期窗口：时戳早于当前时间超过该值（毫秒）即过期
+    max-age-ms: 2000
+    # 待执行指令的执行超时（毫秒）
+    queue-timeout-ms: 10000
+  controller:
+    # 控制器心跳失联判定时间（毫秒），超过未上报心跳视为失联
+    heartbeat-timeout-ms: 8000
+  reaper:
+    # 后台扫描间隔（毫秒）
+    interval-ms: 200
+  safety:
+    # 默认降级动作：HOLD（保持）/ ZERO_VELOCITY（零速度）/ PRESET_POSITION（预设位置）
+    default-action: HOLD
+    # PRESET_POSITION 使用的预设位置（弧度，关节空间）
+    preset-position: 0.0

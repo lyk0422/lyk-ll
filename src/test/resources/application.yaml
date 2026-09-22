@@ -1,0 +1,22 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:ros2_control_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+
+arbitration:
+  lease:
+    ttl-ms: 500
+  command:
+    future-tolerance-ms: 200
+    max-age-ms: 1000
+    queue-timeout-ms: 2000
+  controller:
+    heartbeat-timeout-ms: 800
+  reaper:
+    # 测试中不依赖后台调度，统一显式调用 SafetyReaper.reapOnce()
+    interval-ms: 3600000
+  safety:
+    default-action: HOLD
+    preset-position: 0.0
