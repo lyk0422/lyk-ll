@@ -88,6 +88,50 @@ APP_BASE_NAME=${0##*/}
 # Discard cd standard output in case $CDPATH is set (https://github.com/gradle/gradle/issues/25036)
 APP_HOME=$( cd -P "${APP_HOME:-./}" > /dev/null && printf '%s\n' "$PWD" ) || exit
 
+# --- Windows 非 ASCII 路径兼容（本工程在中文目录下运行时必需）-----------------
+# Gradle 守护进程以 UTF-8 写测试 worker 的 @argfile，而 Windows JDK 启动器按系统
+# ANSI 代码页（GBK）读取它，导致含中文的引导 jar/类路径乱码，测试 worker 报
+# ClassNotFoundException: GradleWorkerMain。
+# 处理：为工程目录创建一个 ASCII junction（同一物理目录的别名，不复制文件），
+# 从 junction 路径重新执行本脚本；位于工程内的 GRADLE_USER_HOME 一并重映射。
+case "$( uname )" in
+  MSYS* | MINGW* )
+    if [ -z "${ROSBAG_ASCII_REEXEC:-}" ]; then
+      # 用可打印 ASCII 区间（空格到 ~）之外的字节判定非 ASCII 路径
+      case "$APP_HOME ${GRADLE_USER_HOME:-}" in
+        *[!\ -~]*)
+          if command -v cygpath >/dev/null 2>&1 && command -v md5sum >/dev/null 2>&1 \
+             && command -v cmd >/dev/null 2>&1; then
+            APP_HOME_WIN=$( cygpath -m "$APP_HOME" )
+            PATH_HASH=$( printf '%s' "$APP_HOME_WIN" | md5sum | cut -c1-16 )
+            TEMP_UNIX=$( cygpath -u "${TEMP:-/tmp}" 2>/dev/null || printf '%s' "${TEMP:-/tmp}" )
+            ASCII_ROOT_UNIX="$TEMP_UNIX/rosbag-ascii-$PATH_HASH"
+            ASCII_ROOT_WIN=$( cygpath -m "$ASCII_ROOT_UNIX" )
+            if [ ! -d "$ASCII_ROOT_UNIX" ]; then
+              mkdir -p "$( dirname "$ASCII_ROOT_UNIX" )"
+              cmd //c mklink //J "$( cygpath -w "$ASCII_ROOT_UNIX" )" "$( cygpath -w "$APP_HOME" )" >/dev/null || exit 1
+            fi
+            if [ -n "${GRADLE_USER_HOME:-}" ]; then
+              GUH_WIN=$( cygpath -m "$GRADLE_USER_HOME" )
+              case "$GUH_WIN" in
+                "$APP_HOME_WIN"/*)
+                  export GRADLE_USER_HOME="${ASCII_ROOT_WIN}${GUH_WIN#$APP_HOME_WIN}"
+                  ;;
+              esac
+            fi
+            # 供 build.gradle 将 buildDir 指到该 ASCII 别名（物理上仍是工程内 build/）
+            export ROSBAG_ASCII_ROOT="$ASCII_ROOT_WIN"
+            export ROSBAG_ASCII_REEXEC=1
+            cd "$ASCII_ROOT_UNIX" || exit 1
+            exec sh ./gradlew "$@"
+          fi
+          ;;
+      esac
+    fi
+    ;;
+esac
+# -----------------------------------------------------------------------------
+
 # Use the maximum available, or set MAX_FD != -1 to use that value.
 MAX_FD=maximum
 

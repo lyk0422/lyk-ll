@@ -6,6 +6,15 @@ plugins {
 group = 'com.example'
 version = '0.1.0'
 
+// Windows 非 ASCII 工程路径下，fork 测试 JVM 的 @argfile 会被按 GBK 解码而损坏含中文
+// 的类路径条目。gradlew 在该环境会为工程建立 ASCII junction 并导出 ROSBAG_ASCII_ROOT；
+// 这里把 build 目录的逻辑路径指到该 ASCII 别名（junction 指向工程根，物理文件仍写在
+// 工程内 build/），使测试 classpath 全部为 ASCII，同时不改变产物位置。
+def asciiRoot = System.getenv('ROSBAG_ASCII_ROOT')
+if (asciiRoot) {
+    layout.buildDirectory.set(new File(asciiRoot, 'build'))
+}
+
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
@@ -22,11 +31,20 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    runtimeOnly 'com.h2database:h2'
     runtimeOnly 'com.mysql:mysql-connector-j'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testRuntimeOnly 'com.h2database:h2'
 }
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    // 统一测试 JVM 字符集，避免系统 ANSI 代码页影响断言与 H2 文本处理
+    systemProperty 'file.encoding', 'UTF-8'
 }
 
 tasks.named('bootJar') {
