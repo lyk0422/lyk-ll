@@ -22,15 +22,67 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    runtimeOnly 'com.h2database:h2'
     runtimeOnly 'com.mysql:mysql-connector-j'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testRuntimeOnly 'com.h2database:h2'
 }
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
+// Windows 下 JDK 启动器按 ANSI 代码页解码测试 worker 的 @argfile；项目路径含非 ASCII 字符时
+// 构建输出目录也会进入 worker classpath 导致其失效。此场景把构建输出重定向到 ASCII 临时目录
+// （GRADLE_USER_HOME 已由 gradlew 经目录联接映射为 ASCII），测试完成后把报告复制回项目内。
+// ASCII 路径环境保持标准 build/ 布局，不受影响。
+def asciiBuildDir = null
+if (System.getProperty('os.name', '').toLowerCase().contains('win')) {
+    def projectPath = layout.projectDirectory.asFile.absolutePath
+    if (!java.nio.charset.StandardCharsets.US_ASCII.newEncoder().canEncode(projectPath)) {
+        asciiBuildDir = new File(System.getProperty('java.io.tmpdir'),
+                'sensor-sync-gradle/020-a/build')
+        layout.buildDirectory.set(asciiBuildDir)
+        logger.lifecycle('项目路径含非 ASCII 字符，构建输出重定向至: {}', asciiBuildDir)
+    }
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+    }
+    if (asciiBuildDir != null) {
+        // 无论成功失败都把标准报告复制回项目 build/ 目录，便于归档与核验
+        finalizedBy('copyTestReportsBack')
+    }
+}
+
+if (asciiBuildDir != null) {
+    tasks.register('copyTestReportsBack') {
+        doLast {
+            copy {
+                from(new File(asciiBuildDir, 'reports/tests/test'))
+                into(layout.projectDirectory.dir('build/reports/tests/test').asFile)
+            }
+            copy {
+                from(new File(asciiBuildDir, 'test-results/test'))
+                into(layout.projectDirectory.dir('build/test-results/test').asFile)
+            }
+        }
+    }
+}
+
 tasks.named('bootJar') {
     archiveFileName = 'app.jar'
+    if (asciiBuildDir != null) {
+        doLast {
+            copy {
+                from(new File(asciiBuildDir, 'libs'))
+                into(layout.projectDirectory.dir('build/libs').asFile)
+            }
+        }
+    }
 }
 
 tasks.named('jar') {

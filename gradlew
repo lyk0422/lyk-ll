@@ -114,6 +114,34 @@ case "$( uname )" in                #(
   NONSTOP* )        nonstop=true ;;
 esac
 
+# Windows 适配：JDK 启动器按系统 ANSI 代码页解码 @argfile，GRADLE_USER_HOME 或项目路径
+# 含非 ASCII 字符时测试 worker 的 classpath 会失效（ClassNotFoundException: GradleWorkerMain）。
+# 此时把 GRADLE_USER_HOME 经目录联接映射到 ASCII 临时路径，缓存无需迁移，JVM 看到的
+# 全部路径均为 ASCII。仅当 GRADLE_ASCII_HOME 未显式指定时生效。
+if "$msys" || "$cygwin" ; then
+    if printf '%s' "${GRADLE_USER_HOME:-$APP_HOME}" | LC_ALL=C grep -q '[^ -~]' ; then
+        if [ -z "$GRADLE_ASCII_HOME" ] ; then
+            _gsb_tmp=$( cygpath -u "${TEMP:-${TMP:-/tmp}}" )
+            _gsb_ascii_home="$_gsb_tmp/sensor-sync-gradle/020-a"
+            mkdir -p "$_gsb_ascii_home" 2>/dev/null || true
+            _gsb_real_home="${GRADLE_USER_HOME:-$APP_HOME/.gradle}"
+            mkdir -p "$_gsb_real_home" 2>/dev/null || true
+            if [ ! -e "$_gsb_ascii_home/user-home" ] ; then
+                _gsb_real_home_win=$( cygpath -w "$_gsb_real_home" )
+                _gsb_ascii_home_win=$( cygpath -w "$_gsb_ascii_home" )
+                powershell -NoProfile -ExecutionPolicy Bypass -Command \
+                    "New-Item -ItemType Junction -Path '$_gsb_ascii_home_win\\user-home' -Target '$_gsb_real_home_win' | Out-Null" \
+                    || warn "无法创建 GRADLE_USER_HOME 目录联接，测试 worker 可能无法启动"
+            fi
+            if [ -e "$_gsb_ascii_home/user-home" ] ; then
+                GRADLE_USER_HOME=$( cygpath -w "$_gsb_ascii_home/user-home" )
+                export GRADLE_USER_HOME
+                warn "GRADLE_USER_HOME 含非 ASCII 路径，已映射至 ASCII 联接：$GRADLE_USER_HOME"
+            fi
+        fi
+    fi
+fi
+
 CLASSPATH="\\\"\\\""
 
 
