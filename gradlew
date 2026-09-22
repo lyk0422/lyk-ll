@@ -204,6 +204,25 @@ fi
 # Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
 DEFAULT_JVM_OPTS='-Dfile.encoding=UTF-8 "-Xmx64m" "-Xms64m"'
 
+# Windows 下若 GRADLE_USER_HOME 含非 ASCII 字符，测试 worker 启动时按系统 ANSI 代码页解析
+# @argfile，会损坏其中的 distribution/依赖 jar 路径（ClassNotFoundException: GradleWorkerMain）。
+# 这里为该目录创建一个 ASCII 路径的目录联接（junction）并改指向它，内容与原目录完全共享。
+if { [ "$cygwin" = "true" ] || [ "$msys" = "true" ]; } && [ -n "$GRADLE_USER_HOME" ]; then
+    case "$GRADLE_USER_HOME" in
+        *[!\ -~]*)
+            ASCII_GUAH_WIN='C:\Users\Public\can-dbc-gradle-home'
+            ASCII_GUAH=$( cygpath -u "$ASCII_GUAH_WIN" )
+            if [ ! -e "$ASCII_GUAH" ]; then
+                cmd //c mklink //J "$ASCII_GUAH_WIN" "$( cygpath -w "$GRADLE_USER_HOME" )" >/dev/null
+            fi
+            if [ -e "$ASCII_GUAH" ]; then
+                export GRADLE_USER_HOME="$ASCII_GUAH"
+            fi
+            ;;
+    esac
+fi
+
+
 # Collect all arguments for the java command:
 #   * DEFAULT_JVM_OPTS, JAVA_OPTS, and optsEnvironmentVar are not allowed to contain shell fragments,
 #     and any embedded shellness will be escaped.

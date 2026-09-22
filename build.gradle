@@ -23,10 +23,52 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     runtimeOnly 'com.mysql:mysql-connector-j'
+    runtimeOnly 'com.h2database:h2'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
+}
+
+// Windows 且工程路径含非 ASCII 字符时，测试 worker 的 @argfile classpath 会被系统 ANSI 代码页
+// 损坏（报 ClassNotFoundException: GradleWorkerMain）。将构建输出重定向到 ASCII 临时路径规避。
+def asciiEncoder = java.nio.charset.StandardCharsets.US_ASCII.newEncoder()
+def pathHasNonAscii = !asciiEncoder.canEncode(layout.projectDirectory.asFile.absolutePath)
+def redirectBuild = System.getProperty('os.name', '').toLowerCase().contains('win') && pathHasNonAscii
+if (redirectBuild) {
+    def asciiBuildRoot = new File(System.getProperty('java.io.tmpdir'),
+            'can-dbc-build-' + project.name.replaceAll('[^a-zA-Z0-9-]', '_'))
+    layout.buildDirectory = asciiBuildRoot
+    logger.lifecycle("工程路径含非 ASCII 字符，buildDir 重定向到: ${asciiBuildRoot.absolutePath}")
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    jvmArgs '-Dfile.encoding=UTF-8', '-Dsun.jnu.encoding=UTF-8'
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+    }
+}
+
+// buildDir 被重定向到 ASCII 临时目录时，测试结束后（即使失败）把报告与结果拷回工程归档。
+tasks.register('archiveTestReports') {
+    onlyIf { redirectBuild }
+    doLast {
+        def archiveRoot = layout.projectDirectory.dir('build-archive')
+        copy {
+            from(layout.buildDirectory.dir('reports/tests'))
+            into(archiveRoot.dir('reports/tests'))
+        }
+        copy {
+            from(layout.buildDirectory.dir('test-results/test'))
+            into(archiveRoot.dir('test-results/test'))
+        }
+    }
+}
+tasks.named('test') {
+    finalizedBy 'archiveTestReports'
 }
 
 tasks.named('bootJar') {

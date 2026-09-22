@@ -1,0 +1,10 @@
+# 测试环境：使用独立命名的 H2 内存库（MySQL 兼容模式），每个测试上下文随 JVM 结束释放
+spring:
+  datasource:
+    url: jdbc:h2:mem:can_dbc_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
