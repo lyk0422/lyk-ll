@@ -1,0 +1,13 @@
+spring:
+  datasource:
+    # 默认测试内存库；各集成测试类通过属性覆盖为独立库名，避免并行 fork/上下文间串数据
+    url: jdbc:h2:mem:route_default;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  main:
+    # 允许测试用固定时钟 Bean 覆盖主配置的系统时钟 Bean
+    allow-bean-definition-overriding: true
+  sql:
+    init:
+      encoding: UTF-8
