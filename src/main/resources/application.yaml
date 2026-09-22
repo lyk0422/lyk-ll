@@ -4,23 +4,43 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    url: ${DB_URL:jdbc:h2:mem:perception_track;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      platform: h2
+      encoding: UTF-8
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
     timeout-per-shutdown-phase: 20s
 
+perception:
+  track:
+    # 低于该置信度的检测直接拒绝，不产生任何有效变化
+    confidence-threshold: 0.5
+    # 主动态目标关联门限（单位：米）
+    association-gate-meter: 2.0
+    # LOST 目标重识别门限（单位：米）
+    reidentification-gate-meter: 5.0
+    # TRACKING 多久无观测转 OCCLUDED（毫秒）
+    occlusion-gap-ms: 500
+    # OCCLUDED 多久无观测转 LOST（毫秒）
+    lost-gap-ms: 1500
+
 server:
   port: 8080
   shutdown: graceful
   error:
-    include-message: never
+    include-message: always
     include-stacktrace: never
 
 management:

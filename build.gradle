@@ -6,6 +6,10 @@ plugins {
 group = 'com.example'
 version = '0.1.0'
 
+// Windows 中文版系统下，fork 出的测试 worker 无法解析含中文的类路径
+// （GradleWorkerMain ClassNotFoundException），把构建输出重定向到工程内 ASCII 路径。
+layout.buildDirectory = file('.gradle/runner-user-home/build-out')
+
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
@@ -22,11 +26,21 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    runtimeOnly 'com.h2database:h2'
     runtimeOnly 'com.mysql:mysql-connector-j'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
 }
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+    }
 }
 
 tasks.named('bootJar') {

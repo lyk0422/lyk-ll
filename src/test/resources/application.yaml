@@ -1,0 +1,19 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:perception_track_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  sql:
+    init:
+      mode: always
+      platform: h2
+      encoding: UTF-8
+
+perception:
+  track:
+    confidence-threshold: 0.5
+    association-gate-meter: 2.0
+    reidentification-gate-meter: 5.0
+    occlusion-gap-ms: 500
+    lost-gap-ms: 1500
