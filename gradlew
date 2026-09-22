@@ -88,6 +88,30 @@ APP_BASE_NAME=${0##*/}
 # Discard cd standard output in case $CDPATH is set (https://github.com/gradle/gradle/issues/25036)
 APP_HOME=$( cd -P "${APP_HOME:-./}" > /dev/null && printf '%s\n' "$PWD" ) || exit
 
+# Windows 非 ASCII 工程路径适配：当 GRADLE_USER_HOME 位于非 ASCII 路径时，
+# 测试 worker 的 classpath（发行版 jar、依赖缓存）无法被启动器加载，
+# 报 GradleWorkerMain ClassNotFoundException。在 ASCII 路径下创建指向同一物理
+# 目录的 junction（无需管理员权限、复用已下载缓存），并切换 GRADLE_USER_HOME。
+case "$( uname )" in
+  MINGW* | MSYS* | CYGWIN*)
+    _guh=${GRADLE_USER_HOME:-$HOME/.gradle}
+    if printf '%s' "$_guh" | grep -q '[^ -~]'; then
+      _guh_win=$( cygpath -w "$_guh" )
+      _hash=$( printf '%s' "$_guh_win" | md5sum | cut -c1-8 )
+      _link_win="C:\\ProgramData\\gsb-gh-$_hash"
+      _link_unix=$( cygpath -u "$_link_win" )
+      if [ ! -e "$_link_unix" ]; then
+        mkdir -p /c/ProgramData 2>/dev/null
+        cmd //c mklink //J "$_link_win" "$_guh_win" >/dev/null
+      fi
+      if [ -e "$_link_unix" ]; then
+        export GRADLE_USER_HOME="$_link_win"
+      fi
+    fi
+    unset _guh _guh_win _hash _link_win _link_unix
+    ;;
+esac
+
 # Use the maximum available, or set MAX_FD != -1 to use that value.
 MAX_FD=maximum
 

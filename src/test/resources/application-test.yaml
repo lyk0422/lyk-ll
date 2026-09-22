@@ -1,0 +1,9 @@
+spring:
+  datasource:
+    # 测试使用独立的命名内存库，与本地运行库隔离；JVM 退出后数据消失。
+    url: jdbc:h2:mem:costmap_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+  sql:
+    init:
+      mode: embedded

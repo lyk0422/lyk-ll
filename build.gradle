@@ -6,6 +6,30 @@ plugins {
 group = 'com.example'
 version = '0.1.0'
 
+// Windows 下工作目录含非 ASCII 字符时，测试 worker 无法从非 ASCII 路径加载测试类
+// （ClassNotFoundException）。将 build 目录重定向到 ASCII 路径，仅影响构建产物
+// 位置，不改变源码与工程结构；GUH 的 junction 适配见 gradlew。
+if (System.getProperty('os.name', '').toLowerCase().contains('win')
+        && !(layout.projectDirectory.asFile.absolutePath.matches('\\A\\p{ASCII}*\\z'))) {
+    List<String> candidates = [
+            System.getenv('ProgramData'),
+            System.getProperty('java.io.tmpdir'),
+            'E:/tmp'
+    ].findAll { it != null && it.matches('\\A\\p{ASCII}*\\z') }
+    File asciiRoot = null
+    for (String c : candidates) {
+        File f = new File(c, 'gsb-gradle-builds')
+        if (f.exists() || f.mkdirs()) {
+            asciiRoot = f
+            break
+        }
+    }
+    if (asciiRoot != null) {
+        layout.buildDirectory = new File(asciiRoot, rootProject.name + '-022b')
+        println("[build] non-ASCII project path detected; buildDir -> ${layout.buildDirectory.get().asFile.absolutePath}")
+    }
+}
+
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
@@ -23,10 +47,31 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     runtimeOnly 'com.mysql:mysql-connector-j'
+    // 本地运行与测试使用的嵌入式 H2（MODE=MySQL），不升级 Spring Boot/Java
+    runtimeOnly 'com.h2database:h2'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
 }
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    jvmArgs '-Dfile.encoding=UTF-8'
+}
+
+// build 目录重定向到 ASCII 路径后，将测试报告同步回 worktree 内归档目录，
+// 便于在工程目录中直接查看（仅文件复制，不涉及测试 worker 类加载）。
+tasks.register('syncTestReports', Copy) {
+    dependsOn tasks.named('test')
+    from(layout.buildDirectory.dir('test-results/test'))
+    from(layout.buildDirectory.dir('reports/tests/test'))
+    into(layout.projectDirectory.dir('build/test-reports'))
+    includeEmptyDirs = false
+}
+tasks.named('test') {
+    finalizedBy tasks.named('syncTestReports')
 }
 
 tasks.named('bootJar') {
