@@ -1,0 +1,14 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:costmap_test;MODE=MySQL;DATABASE_TO_LOWER=1;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000
+    username: sa
+    password:
+    hikari:
+      maximum-pool-size: 8
+      minimum-idle: 1
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+  jackson:
+    time-zone: Asia/Shanghai
