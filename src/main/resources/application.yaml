@@ -4,8 +4,10 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    url: ${DB_URL:jdbc:h2:mem:lidar_index;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
@@ -16,11 +18,17 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: 20s
 
+# 本地点云服务配置：块文件写入目录、隔离目录与重建开关
+lidar:
+  storage:
+    # 块文件根目录（默认系统临时目录下的独立目录；测试通过属性覆盖为临时目录）
+    root-dir: ${LIDAR_STORAGE_ROOT:${java.io.tmpdir}/lidar-point-cloud}
+
 server:
   port: 8080
   shutdown: graceful
   error:
-    include-message: never
+    include-message: always
     include-stacktrace: never
 
 management:
