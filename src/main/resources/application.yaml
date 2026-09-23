@@ -1,11 +1,14 @@
 spring:
   application:
-    name: gitcangku1
+    name: calibration-service
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 默认使用嵌入式 H2（MySQL 兼容模式），无需外部数据库；可用 DB_URL 覆盖。
+    url: ${DB_URL:jdbc:h2:mem:calibration;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
@@ -20,7 +23,7 @@ server:
   port: 8080
   shutdown: graceful
   error:
-    include-message: never
+    include-message: always
     include-stacktrace: never
 
 management:
@@ -31,3 +34,7 @@ management:
   endpoint:
     health:
       show-details: never
+
+calibration:
+  # 外参旋转矩阵正交性校验容差（R^T*R 与单位矩阵各元素的最大偏差）
+  orthogonality-tolerance: 0.01
