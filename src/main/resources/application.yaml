@@ -1,16 +1,22 @@
 spring:
   application:
-    name: gitcangku1
+    name: ros-param-center
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 本地默认使用 H2(MODE=MySQL) 命名内存库，无需外部数据库；
+    # 生产可用 DB_URL/DB_USER/DB_PASSWORD 覆盖为 MySQL。
+    url: ${DB_URL:jdbc:h2:mem:ros_param_center;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      mode: always
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -31,3 +37,8 @@ management:
   endpoint:
     health:
       show-details: never
+
+# ROS 节点适配器默认校验超时（毫秒），请求中可携带 nodeTimeoutMs 覆盖
+ros:
+  node:
+    timeout-ms: 2000
