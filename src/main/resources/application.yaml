@@ -4,13 +4,18 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    url: ${DB_URL:jdbc:h2:mem:rosbridge;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      encoding: UTF-8
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -31,3 +36,15 @@ management:
   endpoint:
     health:
       show-details: never
+
+rosbridge:
+  # WebSocket 路径
+  path: /ws
+  # 客户端断连后的订阅/游标保留宽限期（毫秒），宽限期内同 clientId 重连可恢复游标
+  reconnect-grace-ms: 30000
+  # 单客户端默认速率上限（条/秒，topic 消息），0 表示不限速
+  default-rate-limit-per-second: 0
+  # 单客户端默认发送队列上限（条）
+  default-send-queue-capacity: 64
+  # Service 调用默认超时（毫秒）
+  service-timeout-ms: 5000

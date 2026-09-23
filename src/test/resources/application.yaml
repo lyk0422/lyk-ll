@@ -1,0 +1,25 @@
+# 测试环境：独立命名的 H2 内存库，MySQL 兼容模式。
+# 不设置 DB_CLOSE_DELAY：测试上下文关闭、连接池回收后内存库即释放，避免跨上下文残留。
+spring:
+  datasource:
+    url: jdbc:h2:mem:test_rosbridge;MODE=MySQL;DATABASE_TO_LOWER=TRUE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 0
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+  jackson:
+    time-zone: Asia/Shanghai
+
+rosbridge:
+  path: /ws
+  reconnect-grace-ms: 30000
+  default-rate-limit-per-second: 0
+  default-send-queue-capacity: 64
+  service-timeout-ms: 5000
+  message-retention-per-topic: 4096
