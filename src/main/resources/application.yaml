@@ -4,13 +4,22 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 本地默认使用嵌入式 H2（MySQL 兼容模式）；可通过 DB_URL 覆盖为外部 MySQL
+    url: ${DB_URL:jdbc:h2:mem:calib_demo;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      # H2 与 MySQL 使用各自方言的建表脚本，默认 H2（内存库，进程退出不保留）
+      platform: ${SQL_PLATFORM:h2}
+      encoding: UTF-8
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -31,3 +40,7 @@ management:
   endpoint:
     health:
       show-details: never
+
+# 标定参数校验配置：外参旋转矩阵正交性容差（R^T*R 与单位矩阵各元素最大允许偏差）
+calibration:
+  orthogonality-tolerance: 1.0E-4
