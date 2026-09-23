@@ -4,8 +4,9 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    url: ${DB_URL:jdbc:h2:mem:calibration;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
@@ -15,6 +16,11 @@ spring:
     time-zone: Asia/Shanghai
   lifecycle:
     timeout-per-shutdown-phase: 20s
+
+calibration:
+  validation:
+    # 外参旋转矩阵正交性校验容差：|R^T R - I| 各元素最大允许绝对误差
+    rotation-tolerance: 1.0E-4
 
 server:
   port: 8080

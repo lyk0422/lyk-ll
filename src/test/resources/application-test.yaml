@@ -1,0 +1,17 @@
+spring:
+  datasource:
+    # 测试使用独立命名的 H2 内存库（MySQL 兼容模式），场景间主动清表，避免顺序依赖
+    url: jdbc:h2:mem:calibration_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=5000
+    username: sa
+    password:
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 10000
+  sql:
+    init:
+      mode: always
+
+calibration:
+  validation:
+    rotation-tolerance: 1.0E-4
