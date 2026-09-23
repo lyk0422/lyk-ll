@@ -4,13 +4,20 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 本地默认使用嵌入式 H2（MySQL 兼容模式），数据仅在 JVM 生命周期内保留；
+    # 历史 MySQL 入口仍可通过 DB_URL/DB_USER/DB_PASSWORD 环境变量覆盖。
+    url: ${DB_URL:jdbc:h2:mem:refresh_token_demo;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      # 仅对嵌入式库（本地 H2）自动建表；历史 MySQL 入口保持外部建表方式不变。
+      mode: embedded
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -31,3 +38,9 @@ management:
   endpoint:
     health:
       show-details: never
+
+refresh-tokens:
+  # 本地合成测试密钥（HMAC-SHA256 派生用），非生产密钥。
+  derivation-key: ${TOKEN_DERIVATION_KEY:local-synthetic-derivation-key}
+  # 刷新令牌默认有效期（秒）；环境变量名按 Spring Boot 规则省略连字符。
+  default-ttl-seconds: ${REFRESH_TOKENS_DEFAULT_TTL_SECONDS:3600}
