@@ -4,8 +4,11 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 本地默认使用 H2 内存库（MySQL 兼容模式），无需外部数据库；
+    # compose 中仍可通过 DB_URL/DB_USER 覆盖为 MySQL，不影响该历史入口。
+    url: ${DB_URL:jdbc:h2:mem:ros_param_center;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
@@ -31,3 +34,8 @@ management:
   endpoint:
     health:
       show-details: never
+
+ros:
+  transaction:
+    # 节点候选配置校验的配置时限（毫秒）；超时即整笔回滚
+    timeout-ms: ${ROS_TX_TIMEOUT_MS:2000}
