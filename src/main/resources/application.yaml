@@ -4,8 +4,9 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    url: ${DB_URL:jdbc:h2:file:./data/forwarder-app;MODE=MySQL;DATABASE_TO_LOWER=TRUE}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
@@ -15,6 +16,20 @@ spring:
     time-zone: Asia/Shanghai
   lifecycle:
     timeout-per-shutdown-phase: 20s
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+
+forwarder:
+  # 全局存活消息容量上限（条）；超出后按最低优先级、最旧且非 in-flight 驱逐
+  capacity: ${FORWARDER_CAPACITY:1000}
+  # in-flight 超时（毫秒），超时后重新允许补发
+  in-flight-timeout-ms: ${FORWARDER_INFLIGHT_TIMEOUT_MS:30000}
+  # 单次调度最多补发条数
+  flush-batch-size: ${FORWARDER_FLUSH_BATCH:100}
+  # 补发调度间隔（毫秒）
+  flush-interval-ms: ${FORWARDER_FLUSH_INTERVAL_MS:1000}
 
 server:
   port: 8080

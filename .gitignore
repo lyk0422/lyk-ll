@@ -1,6 +1,8 @@
 .gradle/
 build/
 out/
+# 嵌入式 H2 文件库的本地工作目录
+data/
 .idea/
 .vscode/
 *.iml

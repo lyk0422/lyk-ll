@@ -2,15 +2,18 @@ package com.example.starter;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
- * 业务题目工程入口；当前仅提供 Web 服务及数据库健康检查，不包含题目业务实现。
+ * micro-ROS 边缘设备离线消息转发器入口。
+ * 默认使用工作目录下的嵌入式 H2 文件库（MODE=MySQL），无需外部数据库。
  */
 @SpringBootApplication
+@EnableScheduling
 public class StarterApplication {
 
     /**
-     * 使用外部提供的数据库连接配置启动服务。
+     * 启动边缘转发服务；可用 DB_URL 覆盖数据源指向外部 MySQL。
      */
     public static void main(String[] args) {
         SpringApplication.run(StarterApplication.class, args);
