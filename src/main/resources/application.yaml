@@ -1,16 +1,23 @@
 spring:
   application:
-    name: gitcangku1
+    name: autonomous-task-audit
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 本地默认使用嵌入式 H2（MySQL 兼容模式）；设置 DB_URL/DB_USER 可覆盖为外部 MySQL
+    url: ${DB_URL:jdbc:h2:mem:autonomous_audit;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -31,3 +38,7 @@ management:
   endpoint:
     health:
       show-details: never
+
+audit:
+  # 模拟阶段单步执行的固定耗时（毫秒），测试中可覆盖
+  step-delay-millis: 10
