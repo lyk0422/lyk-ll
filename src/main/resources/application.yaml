@@ -4,13 +4,20 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 本地默认使用嵌入式 H2（MySQL 兼容模式），无需外部数据库；
+    # 如需外部 MySQL，可通过 DB_URL/DB_USER/DB_PASSWORD 环境变量覆盖。
+    url: ${DB_URL:jdbc:h2:mem:rosbridge_gateway;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      # 仅对嵌入式库(H2)自动执行 schema.sql，外部 MySQL 不受影响
+      mode: embedded
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -31,3 +38,15 @@ management:
   endpoint:
     health:
       show-details: never
+
+rosbridge:
+  path: /rosbridge
+  # 最后一个客户端取消/断连后，上游订阅保留的宽限期（毫秒），期内重连可复用
+  grace-ms: 5000
+  # 每个共享订阅为断线重连保留的最近消息条数
+  retention: 256
+  # 新建客户端的默认限速（条/秒）与发送队列上限（条）
+  default-rate-per-sec: 100
+  default-queue-cap: 64
+  # Service 默认超时（毫秒）
+  default-timeout-ms: 30000
