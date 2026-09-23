@@ -4,8 +4,11 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 默认使用嵌入式 H2（MySQL 兼容模式），无需外部数据库；可用 DB_URL 等环境变量覆盖为外部库。
+    url: ${DB_URL:jdbc:h2:mem:ros_config;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
@@ -31,3 +34,10 @@ management:
   endpoint:
     health:
       show-details: never
+
+# 模拟 ROS 节点候选配置校验的时限（毫秒），节点在该时限内无响应视为超时。
+ros:
+  node:
+    validation-timeout-ms: 1500
+  event:
+    poll-wait-ms: 1000
