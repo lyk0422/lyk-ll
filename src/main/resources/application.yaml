@@ -1,11 +1,14 @@
 spring:
   application:
-    name: gitcangku1
+    name: micro-ros-offline-forwarder
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 默认使用工作目录下的嵌入式 H2 文件库（MySQL 兼容模式），保证跨进程恢复；
+    # 可用 DB_URL / DB_USER / DB_PASSWORD 覆盖为外部数据库。
+    url: ${DB_URL:jdbc:h2:file:./data/forwarder;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
@@ -20,7 +23,7 @@ server:
   port: 8080
   shutdown: graceful
   error:
-    include-message: never
+    include-message: always
     include-stacktrace: never
 
 management:
@@ -31,3 +34,25 @@ management:
   endpoint:
     health:
       show-details: never
+
+forwarder:
+  # 待发 + in-flight 消息的总容量上限（条数）；容量不足按优先级/最旧记录驱逐
+  capacity: ${FORWARDER_CAPACITY:10000}
+  # 单次补发批量
+  dispatch-batch-size: 200
+  # in-flight 超时毫秒，超时后允许重新补发
+  ack-timeout-ms: 5000
+  # 调度器轮询间隔毫秒
+  dispatch-interval-ms: 500
+  # 启动时是否默认联网（题目演示默认离线写入）
+  online-on-startup: false
+  # 各 Topic 的离线保留策略：DROP / LATEST / FIFO / BOUNDED(n)
+  topics:
+    - topic: "/sensor/drop"
+      policy: "DROP"
+    - topic: "/sensor/latest"
+      policy: "LATEST"
+    - topic: "/sensor/fifo"
+      policy: "FIFO"
+    - topic: "/sensor/bounded"
+      policy: "BOUNDED(3)"

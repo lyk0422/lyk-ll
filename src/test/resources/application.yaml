@@ -1,0 +1,26 @@
+# 测试隔离配置：使用独立目录的嵌入式 H2 文件库（MySQL 兼容模式），不依赖外部数据库。
+spring:
+  datasource:
+    url: jdbc:h2:file:./build/h2test/forwarder-test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 1
+
+forwarder:
+  capacity: 10000
+  dispatch-batch-size: 200
+  ack-timeout-ms: 5000
+  # 测试中由用例显式驱动 dispatchOnce，后台调度间隔设到极大避免干扰
+  dispatch-interval-ms: 3600000
+  online-on-startup: false
+  topics:
+    - topic: "/sensor/drop"
+      policy: "DROP"
+    - topic: "/sensor/latest"
+      policy: "LATEST"
+    - topic: "/sensor/fifo"
+      policy: "FIFO"
+    - topic: "/sensor/bounded"
+      policy: "BOUNDED(3)"

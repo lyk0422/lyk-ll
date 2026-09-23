@@ -4,13 +4,14 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 /**
- * 业务题目工程入口；当前仅提供 Web 服务及数据库健康检查，不包含题目业务实现。
+ * micro-ROS 边缘设备离线消息转发器入口；默认使用工作目录下的嵌入式 H2 文件库
+ * （MODE=MySQL），无需 Docker 或外部数据库即可本地启动。
  */
 @SpringBootApplication
 public class StarterApplication {
 
     /**
-     * 使用外部提供的数据库连接配置启动服务。
+     * 启动转发服务；数据源默认 ./data/forwarder（H2 文件库），可用 DB_URL 等环境变量覆盖。
      */
     public static void main(String[] args) {
         SpringApplication.run(StarterApplication.class, args);
