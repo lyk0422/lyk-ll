@@ -4,13 +4,20 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    url: ${DB_URL:jdbc:h2:mem:slam_pose_graph;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+      continue-on-error: false
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -31,3 +38,25 @@ management:
   endpoint:
     health:
       show-details: never
+
+slam:
+  queue:
+    # 工作线程轮询间隔（毫秒），提交时会主动唤醒
+    poll-millis: 50
+    # 可重试失败的最大尝试次数（含首次）
+    max-attempts: 3
+  loop:
+    # 默认回环阈值（v0 基线）
+    min-score: 0.75
+    max-residual: 0.5
+    max-covariance: 0.1
+    # 版本化阈值覆盖：高版本使用更严格阈值
+    version-overrides:
+      1:
+        min-score: 0.75
+        max-residual: 0.5
+        max-covariance: 0.1
+      2:
+        min-score: 0.85
+        max-residual: 0.25
+        max-covariance: 0.05
