@@ -1,0 +1,15 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:ct_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+
+ct:
+  observer:
+    # 与测试夹具 TestKeys 中私钥配对的合成公钥。
+    public-key: MCowBQYDK2VwAyEAD1W7AOjc8G4yP4oYkPo8J6XPHerh/RiwhP7Vm/nuy0o=
