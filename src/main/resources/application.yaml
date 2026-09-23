@@ -4,8 +4,12 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 默认使用嵌入式 H2（MySQL 兼容模式），本地运行与测试无需外部 MySQL；
+    # 仍可通过 DB_URL / DB_USER / DB_PASSWORD 环境变量覆盖为外部数据库。
+    url: ${DB_URL:jdbc:h2:mem:spectrum_lease;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
@@ -31,3 +35,9 @@ management:
   endpoint:
     health:
       show-details: never
+
+# 频谱租约协调业务配置：
+# shared-eirp-limit-mw: 共享模式下，任意实际重叠的时间×频率×区域片段内，
+# 生效租约 EIRP（请求以 mW 毫瓦线性功率给出）总和的上限（单位 mW，默认 1000mW=1W）。
+spectrum:
+  shared-eirp-limit-mw: 1000.0
