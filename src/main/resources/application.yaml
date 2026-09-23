@@ -4,13 +4,15 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
-    hikari:
-      maximum-pool-size: 5
-      minimum-idle: 1
-      connection-timeout: 10000
-      validation-timeout: 3000
+    # 默认使用嵌入式 H2（MySQL 兼容模式），仅在 JVM 生命周期内保留数据；
+    # 可用 DB_URL/DB_USER/DB_PASSWORD 环境变量覆盖为外部数据库。
+    url: ${DB_URL:jdbc:h2:mem:refresh_token;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
+  sql:
+    init:
+      mode: always
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -31,3 +33,10 @@ management:
   endpoint:
     health:
       show-details: never
+
+# 刷新令牌业务配置
+refresh-token:
+  # 合成测试密钥（仅本地/测试使用），可用环境变量覆盖
+  signing-key: ${RT_SIGNING_KEY:local-synthetic-signing-key-do-not-use-in-prod}
+  # 刷新令牌有效期（秒）
+  ttl-seconds: ${RT_TTL_SECONDS:3600}

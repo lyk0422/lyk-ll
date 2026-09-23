@@ -1,0 +1,15 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:rt_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  sql:
+    init:
+      mode: always
+  jackson:
+    time-zone: UTC
+
+refresh-token:
+  signing-key: test-synthetic-signing-key
+  ttl-seconds: 3600
