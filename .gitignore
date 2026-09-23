@@ -9,6 +9,7 @@ out/
 .env.*
 .secrets/
 .runtime/
+data/
 __pycache__/
 *.pyc
 .DS_Store

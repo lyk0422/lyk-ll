@@ -1,0 +1,22 @@
+spring:
+  datasource:
+    # 测试使用独立命名内存库（MySQL 兼容模式），不依赖外部数据库；JVM 退出后数据消失。
+    url: jdbc:h2:mem:forwarder_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  sql:
+    init:
+      mode: always
+  jackson:
+    time-zone: Asia/Shanghai
+
+server:
+  port: 0
+
+forwarder:
+  data-dir: ./build/test-data
+  queue-capacity: 100
+  inflight-timeout-ms: 30000
+  # 测试中把自动补发间隔调到极大，由用例显式触发 dispatchOnce，避免后台干扰。
+  dispatch-interval-ms: 3600000

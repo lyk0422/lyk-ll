@@ -1,18 +1,22 @@
 package com.example.starter;
 
+import com.example.starter.config.DataDirInitializer;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
- * 业务题目工程入口；当前仅提供 Web 服务及数据库健康检查，不包含题目业务实现。
+ * micro-ROS 边缘设备离线消息转发器入口。
+ * 默认使用工作目录下嵌入式 H2 文件库（MODE=MySQL），无需外部数据库。
  */
 @SpringBootApplication
+@EnableScheduling
 public class StarterApplication {
 
-    /**
-     * 使用外部提供的数据库连接配置启动服务。
-     */
     public static void main(String[] args) {
-        SpringApplication.run(StarterApplication.class, args);
+        SpringApplication application = new SpringApplication(StarterApplication.class);
+        // 在数据源创建前确保 H2 文件库目录存在。
+        application.addListeners(new DataDirInitializer());
+        application.run(args);
     }
 }
