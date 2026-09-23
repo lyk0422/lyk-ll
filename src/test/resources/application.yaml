@@ -1,0 +1,25 @@
+# 隔离测试配置：独立命名的 H2 内存库（MySQL 兼容模式），不依赖任何外部数据库。
+spring:
+  datasource:
+    url: jdbc:h2:mem:broadcast_playout_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ""
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+  jackson:
+    time-zone: UTC
+
+server:
+  port: 0
+  shutdown: graceful
+  error:
+    include-message: always
+    include-stacktrace: never
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health

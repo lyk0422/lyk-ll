@@ -4,13 +4,14 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 /**
- * 业务题目工程入口；当前仅提供 Web 服务及数据库健康检查，不包含题目业务实现。
+ * 本地频道播出编排服务入口：版本化播单、直播插播与 as-run 播出日志。
+ * 默认使用嵌入式 H2 内存库（MODE=MySQL）与合成时钟，不连接真实广电设备。
  */
 @SpringBootApplication
 public class StarterApplication {
 
     /**
-     * 使用外部提供的数据库连接配置启动服务。
+     * 启动 Web 服务；可通过 DB_URL/DB_USER 环境变量覆盖数据源。
      */
     public static void main(String[] args) {
         SpringApplication.run(StarterApplication.class, args);
