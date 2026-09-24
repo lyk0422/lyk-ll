@@ -1,0 +1,14 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:berth_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    driver-class-name: org.h2.Driver
+    hikari:
+      maximum-pool-size: 12
+      minimum-idle: 1
+  jackson:
+    time-zone: UTC
+
+app:
+  scheduling:
+    enabled: false
