@@ -1,0 +1,7 @@
+# 历史 MySQL 配置（保留）：通过 --spring.profiles.active=mysql 并提供 DB_URL/DB_USER/DB_PASSWORD 启用。
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
