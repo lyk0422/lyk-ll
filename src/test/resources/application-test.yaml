@@ -1,0 +1,19 @@
+spring:
+  main:
+    # 测试以可控固定时钟覆盖生产 applicationClock Bean
+    allow-bean-definition-overriding: true
+  datasource:
+    # 测试使用独立命名的内存库，与本地运行库隔离；随测试上下文关闭释放
+    url: jdbc:h2:mem:gas_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+  jackson:
+    time-zone: UTC
