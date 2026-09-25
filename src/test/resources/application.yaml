@@ -1,0 +1,36 @@
+spring:
+  application:
+    name: gitcangku1-test
+  datasource:
+    # 测试专用命名内存库，与本地运行库隔离
+    url: jdbc:h2:mem:forestry_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+    hikari:
+      maximum-pool-size: 8
+      minimum-idle: 1
+      connection-timeout: 10000
+      validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:/schema.sql
+      # 测试不加载演示数据，夹具由各用例自行准备
+      data-locations: optional:classpath:/test-data.sql
+  jackson:
+    time-zone: Asia/Shanghai
+
+server:
+  port: 0
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+forestry:
+  blacklist-days: 365
+  harvest-window-days: 90
+  acceptance-pass-rate: 85
