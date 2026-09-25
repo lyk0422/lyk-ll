@@ -1,11 +1,15 @@
 spring:
   application:
-    name: gitcangku1
+    name: cutover-window
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 默认使用嵌入式 H2（MySQL 兼容模式），数据仅保留在 JVM 生命周期内；
+    # 可用环境变量 DB_URL/DB_USER/DB_PASSWORD 覆盖为其他数据库。
+    url: ${DB_URL:jdbc:h2:mem:cutover_demo;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
@@ -13,6 +17,10 @@ spring:
       validation-timeout: 3000
   jackson:
     time-zone: Asia/Shanghai
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
   lifecycle:
     timeout-per-shutdown-phase: 20s
 
@@ -20,7 +28,7 @@ server:
   port: 8080
   shutdown: graceful
   error:
-    include-message: never
+    include-message: always
     include-stacktrace: never
 
 management:
@@ -31,3 +39,9 @@ management:
   endpoint:
     health:
       show-details: never
+
+cutover:
+  # 单个割接窗口最大时长（分钟），恰 4 小时合法
+  max-window-minutes: 240
+  # 关键验证点超时（分钟），恰满 10 分钟判定为超时
+  verification-timeout-minutes: 10
