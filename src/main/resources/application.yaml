@@ -4,13 +4,18 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 本地默认使用 H2 内存库（MySQL 兼容模式）；可通过 DB_URL/DB_USER/DB_PASSWORD 覆盖
+    url: ${DB_URL:jdbc:h2:mem:slope_radar;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+      # H2 默认锁等待仅 1 秒；并发同键/同槽位请求需要等待先到事务提交
+      connection-init-sql: "SET LOCK_TIMEOUT 20000"
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -20,7 +25,7 @@ server:
   port: 8080
   shutdown: graceful
   error:
-    include-message: never
+    include-message: always
     include-stacktrace: never
 
 management:
