@@ -1,18 +1,28 @@
 spring:
   application:
-    name: gitcangku1
+    name: fishery-quota
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 默认嵌入式 H2（MySQL 兼容模式），数据仅在 JVM 生命周期内保留；可用 DB_URL/DB_USER/DB_PASSWORD 覆盖。
+    url: ${DB_URL:jdbc:h2:mem:fishery_local;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
-      maximum-pool-size: 5
+      maximum-pool-size: 10
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+      encoding: UTF-8
   jackson:
-    time-zone: Asia/Shanghai
+    time-zone: UTC
+    serialization:
+      write-dates-as-timestamps: false
   lifecycle:
     timeout-per-shutdown-phase: 20s
 
@@ -20,7 +30,7 @@ server:
   port: 8080
   shutdown: graceful
   error:
-    include-message: never
+    include-message: always
     include-stacktrace: never
 
 management:
