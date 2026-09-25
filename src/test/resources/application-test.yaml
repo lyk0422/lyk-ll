@@ -1,0 +1,19 @@
+# 测试环境：独立命名的 H2 内存库（MySQL 兼容模式），与本地运行库隔离。
+# DB_CLOSE_DELAY=0：上下文结束、连接池关闭后随即释放内存库；minimum-idle 保活避免提前消失。
+spring:
+  datasource:
+    url: jdbc:h2:mem:crew_legality_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=0
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 2
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema.sql
+
+app:
+  clock:
+    fixed: "2026-09-25T00:00:00Z"
