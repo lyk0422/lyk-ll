@@ -4,13 +4,21 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 本地默认使用嵌入式 H2（MySQL 兼容模式），数据仅在 JVM 生命周期内保留；
+    # 如需连接外部 MySQL，可通过 DB_URL/DB_USER/DB_PASSWORD 环境变量覆盖。
+    url: ${DB_URL:jdbc:h2:mem:rebate_local;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    # 不显式指定驱动：Spring Boot 按 URL 自动推断（本地 H2 / 外部 MySQL 均可）。
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -20,7 +28,7 @@ server:
   port: 8080
   shutdown: graceful
   error:
-    include-message: never
+    include-message: always
     include-stacktrace: never
 
 management:
