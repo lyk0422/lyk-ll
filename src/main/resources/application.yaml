@@ -4,15 +4,21 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    url: ${DB_URL:jdbc:h2:mem:marpol;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      # 仅对嵌入式 H2 自动执行 schema.sql/data.sql；历史外部 MySQL 配置不受影响
+      mode: embedded
   jackson:
-    time-zone: Asia/Shanghai
+    time-zone: UTC
   lifecycle:
     timeout-per-shutdown-phase: 20s
 
@@ -20,7 +26,7 @@ server:
   port: 8080
   shutdown: graceful
   error:
-    include-message: never
+    include-message: always
     include-stacktrace: never
 
 management:
@@ -31,3 +37,9 @@ management:
   endpoint:
     health:
       show-details: never
+
+marpol:
+  # 垃圾排放距最近陆地的最小海里数，恰 12 海里合法
+  garbage-min-distance-nm: 12
+  # 违规整改期限（自然日），核查日 + 14，恰第 14 日关闭有效
+  rectification-days: 14
