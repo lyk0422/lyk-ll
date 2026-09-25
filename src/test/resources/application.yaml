@@ -1,0 +1,9 @@
+spring:
+  datasource:
+    # 测试使用独立命名内存库，与本地运行库隔离；LOCK_TIMEOUT 放宽以支撑并发用例
+    url: jdbc:h2:mem:test_demo;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000
+    username: sa
+    driver-class-name: org.h2.Driver
+  sql:
+    init:
+      mode: always
