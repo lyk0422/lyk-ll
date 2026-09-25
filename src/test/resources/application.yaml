@@ -1,0 +1,17 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:bonded_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+      data-locations: classpath:data.sql
+
+bonded:
+  sweep:
+    # 测试中关闭定时扫描，超时场景由可控时钟 + 显式 sweepExpired() 驱动
+    fixed-delay-ms: 3600000
+    initial-delay-ms: 3600000
