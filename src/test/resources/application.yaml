@@ -1,0 +1,16 @@
+spring:
+  main:
+    # 测试用可控时钟替换主配置的 clock Bean。
+    allow-bean-definition-overriding: true
+  datasource:
+    # 测试使用独立命名内存库，与本地运行库 local_demo 隔离。
+    url: jdbc:h2:mem:weight_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+  jackson:
+    time-zone: UTC
