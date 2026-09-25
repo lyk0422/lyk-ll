@@ -1,16 +1,24 @@
 spring:
   application:
-    name: gitcangku1
+    name: cement-kiln-cofiring
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    url: ${DB_URL:jdbc:h2:mem:cement_kiln;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema.sql
+      data-locations: classpath:db/data.sql
+      encoding: UTF-8
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -20,7 +28,7 @@ server:
   port: 8080
   shutdown: graceful
   error:
-    include-message: never
+    include-message: always
     include-stacktrace: never
 
 management:
@@ -31,3 +39,23 @@ management:
   endpoint:
     health:
       show-details: never
+
+# 水泥窑掺烧业务合成参数（单位见字段注释），均可通过环境变量覆盖
+cement:
+  # 替代燃料热量替代率上限，恰等于合法（0.40 表示 40%）
+  max-substitution-rate: 0.40
+  # 降掺保底比例（强制降掺目标，0.10 表示 10%）
+  floor-substitution-rate: 0.10
+  # 入窑氯总量限值，单位 kg（按各燃料质量加权求和）
+  chlorine-limit-kg: 800.0
+  # 入窑硫总量限值，单位 kg
+  sulfur-limit-kg: 15000.0
+  # 降掺指令下发后确认时限，单位分钟，恰满未确认即升级
+  command-confirm-timeout-minutes: 30
+  # 连续小时均值超标达到该次数即当日禁烧，恰等于触发
+  consecutive-exceed-ban: 3
+  # 各污染物小时均值排放限值，单位 mg/Nm3，恰等于判达标
+  emission-limits:
+    NOX: 400.0
+    SO2: 200.0
+    DUST: 30.0
