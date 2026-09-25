@@ -1,0 +1,10 @@
+# 历史 MySQL 配置保留为 mysql profile: 仅当显式指定 --spring.profiles.active=mysql 时生效,
+# 不影响默认的嵌入式 H2 本地入口。schema 初始化在该 profile 下关闭, 由外部 MySQL 自行管理。
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  sql:
+    init:
+      mode: never
