@@ -1,0 +1,8 @@
+# 测试隔离配置：使用独立命名的 H2 内存库（MODE=MySQL），不依赖外部 MySQL/Docker。
+# LOCK_TIMEOUT 放宽到 10 秒，使真实并发下唯一键竞争等待先提交事务后稳定判定，而非锁超时误报。
+spring:
+  datasource:
+    url: jdbc:h2:mem:test_pump;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
