@@ -1,16 +1,25 @@
 spring:
   application:
-    name: gitcangku1
+    name: tailings-flood-control
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 本地默认使用嵌入式 H2（MySQL 兼容模式），数据仅在 JVM 生命周期内保留；
+    # 如需外部 MySQL，可通过 DB_URL/DB_USER/DB_PASSWORD 环境变量覆盖。
+    url: ${DB_URL:jdbc:h2:mem:tailings_demo;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  # 建表脚本仅对嵌入式库（H2）自动执行（Spring Boot sql.init 默认 embedded 模式）；
+  # 外部 MySQL 不运行该 H2 方言脚本，由其既有迁移体系管理。
+  sql:
+    init:
+      encoding: UTF-8
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -20,7 +29,7 @@ server:
   port: 8080
   shutdown: graceful
   error:
-    include-message: never
+    include-message: always
     include-stacktrace: never
 
 management:
@@ -31,3 +40,9 @@ management:
   endpoint:
     health:
       show-details: never
+
+flood-control:
+  # 指令签收时限（分钟），恰好达到该时长未签收即自动升级值班领导
+  sign-timeout-minutes: 15
+  # 回执实际泄量与方案泄量允许的偏差比例（含边界），恰 10% 视为一致
+  receipt-deviation-ratio: 0.10

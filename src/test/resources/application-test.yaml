@@ -1,0 +1,14 @@
+# 供 @ActiveProfiles("test") 扩展测试使用；标准 ./gradlew test 默认加载同目录 application.yaml。
+spring:
+  datasource:
+    url: jdbc:h2:mem:tailings_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  sql:
+    init:
+      encoding: UTF-8
+
+flood-control:
+  sign-timeout-minutes: 15
+  receipt-deviation-ratio: 0.10
