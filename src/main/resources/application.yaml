@@ -4,8 +4,9 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    url: ${DB_URL:jdbc:h2:mem:local_demo;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
@@ -15,6 +16,18 @@ spring:
     time-zone: Asia/Shanghai
   lifecycle:
     timeout-per-shutdown-phase: 20s
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+
+runway:
+  # 合成低能见度阈值（RVR，单位：米）：最新读数低于该值时巡检须双人执行
+  low-visibility-rvr-threshold: 550
+  # 巡检开始时限（分钟）：关闭后恰满该分钟数仍未开始即判定迟延并升级
+  inspection-start-limit-minutes: 15
+  # 道面摩擦系数合格阈值：低于该值须持续关闭，恰等于该值判定合格
+  friction-pass-threshold: 0.35
 
 server:
   port: 8080
