@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: gitcangku1-test
+  datasource:
+    url: jdbc:h2:mem:berth_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 1
+      connection-timeout: 10000
+      validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+  jackson:
+    time-zone: UTC
+
+server:
+  port: 0
+
+berth:
+  activation:
+    # 测试关闭定时任务，使用可控时钟手动触发生效
+    scheduler-enabled: false
