@@ -1,0 +1,9 @@
+spring:
+  datasource:
+    # 测试专用具名内存库（MySQL 兼容模式），与本地运行库隔离；JVM 退出即释放。
+    url: jdbc:h2:mem:reinsurance_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jackson:
+    time-zone: UTC
