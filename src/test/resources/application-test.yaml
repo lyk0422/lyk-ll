@@ -1,0 +1,15 @@
+# 测试隔离配置：独立命名的 H2 内存库（MySQL 兼容模式），随测试 JVM 结束释放
+spring:
+  datasource:
+    url: jdbc:h2:mem:deice_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 1
+  sql:
+    init:
+      mode: always
+  jackson:
+    time-zone: UTC
