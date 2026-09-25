@@ -1,18 +1,26 @@
 spring:
   application:
-    name: gitcangku1
+    name: deicing-queue
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    url: ${DB_URL:jdbc:h2:mem:deicing_demo;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    # 不固定驱动类：按 URL 自动识别 H2（本地默认）或 MySQL（compose 覆盖）
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
   jackson:
-    time-zone: Asia/Shanghai
+    time-zone: UTC
+    serialization:
+      write-dates-as-timestamps: false
+  # 建表与合成数据由 H2SchemaInitConfig 在 H2 URL 下条件执行，避免在 MySQL 覆盖入口误跑 H2 方言
+  sql:
+    init:
+      mode: never
   lifecycle:
     timeout-per-shutdown-phase: 20s
 
@@ -20,7 +28,7 @@ server:
   port: 8080
   shutdown: graceful
   error:
-    include-message: never
+    include-message: always
     include-stacktrace: never
 
 management:
