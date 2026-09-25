@@ -1,0 +1,20 @@
+spring:
+  datasource:
+    # 测试专用命名内存库（MySQL 兼容模式），随测试上下文结束关闭；不依赖任何外部数据库。
+    url: jdbc:h2:mem:waterlogging_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=60000
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+
+server:
+  error:
+    include-message: always
+    include-stacktrace: never
