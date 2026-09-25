@@ -1,0 +1,17 @@
+# 测试环境独立 H2 内存库（MySQL 兼容模式），与本地运行库 crane_demo 隔离。
+# 场景间在 @BeforeEach 中清表，避免顺序依赖；DB_CLOSE_DELAY=-1 仅在测试 JVM 生命周期内保留。
+spring:
+  datasource:
+    url: jdbc:h2:mem:crane_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000
+    username: sa
+    password:
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+  sql:
+    init:
+      mode: always
+  jackson:
+    time-zone: UTC
+    serialization:
+      write-dates-as-timestamps: false
