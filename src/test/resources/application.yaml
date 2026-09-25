@@ -1,0 +1,11 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:radiotherapy_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+  sql:
+    init:
+      mode: always

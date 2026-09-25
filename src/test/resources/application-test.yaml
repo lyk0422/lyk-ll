@@ -1,0 +1,2 @@
+# 测试配置统一使用 src/test/resources/application.yaml（独立 H2 库 radiotherapy_test）。
+# 本文件保留为空，不激活任何额外 profile。
