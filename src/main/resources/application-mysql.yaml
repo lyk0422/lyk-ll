@@ -1,0 +1,10 @@
+# 历史 MySQL 配置保留在 mysql 激活档下：--spring.profiles.active=mysql 并提供 DB_URL/DB_USER/DB_PASSWORD。
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  sql:
+    init:
+      mode: never
