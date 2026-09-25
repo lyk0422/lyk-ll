@@ -1,0 +1,25 @@
+spring:
+  datasource:
+    # 测试独立内存库（MySQL 兼容模式），与本地运行库名隔离；DB_CLOSE_DELAY 仅保证同 JVM 跨连接可见。
+    url: jdbc:h2:mem:tunnel_vent_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=15000
+    username: sa
+    password:
+    hikari:
+      maximum-pool-size: 8
+      minimum-idle: 1
+      connection-timeout: 10000
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+
+ventilation:
+  feedback-timeout-seconds: 60
+  scheduler:
+    # 测试关闭后台调度，超时行为通过可控时钟 + 显式 scanTimeouts 确定性验证
+    enabled: false
+    fixed-delay-ms: 1000
+
+server:
+  error:
+    include-message: always
