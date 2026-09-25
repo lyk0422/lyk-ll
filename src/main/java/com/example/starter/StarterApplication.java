@@ -4,14 +4,17 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 /**
- * 业务题目工程入口；当前仅提供 Web 服务及数据库健康检查，不包含题目业务实现。
+ * 生猪屠宰同步检疫与无害化处理服务入口。
+ *
+ * <p>本地默认使用嵌入式 H2（{@code MODE=MySQL}），无需 MySQL、Docker 或外部系统，
+ * 数据仅在 JVM 生命周期内保留；建表脚本 {@code classpath:schema.sql} 启动时自动执行。
+ * 可通过 {@code DB_URL}/{@code DB_USER}/{@code DB_PASSWORD} 覆盖为外部数据库。
+ *
+ * <p>本地启动：{@code ./gradlew bootRun}，或 {@code java -jar build/libs/app.jar}。
  */
 @SpringBootApplication
 public class StarterApplication {
 
-    /**
-     * 使用外部提供的数据库连接配置启动服务。
-     */
     public static void main(String[] args) {
         SpringApplication.run(StarterApplication.class, args);
     }
