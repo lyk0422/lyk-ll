@@ -1,0 +1,19 @@
+# 本地运行 profile：嵌入式 H2（MODE=MySQL），自动建表并写入合成门站；
+# 数据仅在 JVM 生命周期内保留，无需 MySQL、Docker 或外部系统。
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:h2:mem:gate_station;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 1
+      connection-timeout: 10000
+      validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema-h2.sql
+      data-locations: classpath:db/data-h2.sql
+      continue-on-error: false

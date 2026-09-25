@@ -3,14 +3,10 @@ spring:
     name: gitcangku1
   config:
     import: "optional:configtree:/run/secrets/"
-  datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
-    hikari:
-      maximum-pool-size: 5
-      minimum-idle: 1
-      connection-timeout: 10000
-      validation-timeout: 3000
+  # 本地默认 local profile：嵌入式 H2 + 自动建表与合成种子；
+  # 接入外部 MySQL 时设置 SPRING_PROFILES_ACTIVE（非 local）并提供 DB_URL/DB_USER/DB_PASSWORD。
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:local}
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
