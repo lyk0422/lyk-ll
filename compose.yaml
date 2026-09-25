@@ -8,6 +8,8 @@ services:
     environment:
       DB_URL: "jdbc:mysql://db:3306/taskdb?sslMode=DISABLED&allowPublicKeyRetrieval=true&connectionTimeZone=Asia/Shanghai&forceConnectionTimeZoneToSession=true&connectTimeout=10000&socketTimeout=30000"
       DB_USER: taskuser
+      # MySQL 入口由外部库管理表结构，不执行内置 H2(MODE=MySQL) 建表脚本。
+      SQL_INIT_MODE: "never"
     secrets:
       - source: db_password
         target: spring.datasource.password
