@@ -1,16 +1,25 @@
 spring:
   application:
-    name: gitcangku1
+    name: cement-kiln-co-firing
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 本地默认使用嵌入式 H2（MySQL 兼容模式），数据仅在 JVM 生命周期内保留；
+    # 历史 compose 入口可通过 DB_URL/DB_USER/DB_DRIVER 覆盖为 MySQL。
+    url: ${DB_URL:jdbc:h2:mem:cement_kiln;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      # embedded：仅对嵌入式 H2 执行 schema.sql/data.sql；历史 compose 的 MySQL 入口不受影响。
+      mode: embedded
+      encoding: UTF-8
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -31,3 +40,23 @@ management:
   endpoint:
     health:
       show-details: never
+
+# 掺烧业务合成限值（本地服务默认值，均可被环境变量覆盖）
+cement:
+  # 入窑氯总量限值，单位 kg/h
+  chlorine-limit-kg-h: 0.6000
+  # 入窑硫总量限值，单位 kg/h
+  sulfur-limit-kg-h: 12.0000
+  # 替代燃料热量替代率上限（含边界，恰 40% 合法）
+  max-heat-ratio: 0.4000
+  # 单次降掺步长（热量替代率绝对降幅），保底比例见方案申报
+  reduction-step: 0.1000
+  # 降掺指令下发后确认时限，单位分钟
+  confirm-deadline-minutes: 30
+  # 连续多少个小时均值超标触发当日禁烧（恰连续 3 次触发）
+  consecutive-exceedance-ban: 3
+  # 各污染物小时均值标准限值，单位 mg/m3，恰等于限值判达标
+  emission-limits:
+    NOX: 400
+    SO2: 200
+    PARTICULATE: 30

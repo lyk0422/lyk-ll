@@ -1,0 +1,22 @@
+spring:
+  datasource:
+    # 测试独立命名内存库：MySQL 兼容模式，JVM 退出即清空，不依赖任何外部数据库。
+    url: jdbc:h2:mem:cement_kiln_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+    hikari:
+      # 并发受理测试需要多连接同时在途
+      maximum-pool-size: 16
+      minimum-idle: 1
+  sql:
+    init:
+      mode: embedded
+
+cement:
+  # 测试中关闭定时扫描的实际触发，超时升级通过可控时钟显式调用验证。
+  command-sweep-delay-ms: 3600000
+
+logging:
+  level:
+    org.springframework.jdbc: WARN
