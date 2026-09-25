@@ -1,18 +1,24 @@
 spring:
   application:
-    name: gitcangku1
+    name: greenhouse-climate
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    # 本地默认嵌入式 H2（MODE=MySQL）；设置 DB_URL/DB_USER 可切回 MySQL（密码仍由 configtree secret 注入）。
+    # 不指定 driver-class-name 与 password：驱动按 URL 自动探测，密码交由环境/secret 提供，H2 用默认 sa/空密码。
+    url: ${DB_URL:jdbc:h2:mem:greenhouse;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
   jackson:
-    time-zone: Asia/Shanghai
+    time-zone: UTC
   lifecycle:
     timeout-per-shutdown-phase: 20s
 
@@ -20,7 +26,7 @@ server:
   port: 8080
   shutdown: graceful
   error:
-    include-message: never
+    include-message: always
     include-stacktrace: never
 
 management:
