@@ -1,0 +1,12 @@
+spring:
+  datasource:
+    # 测试使用独立命名内存库，与本地运行库隔离
+    url: jdbc:h2:mem:cutover_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000
+    username: sa
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 1
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
