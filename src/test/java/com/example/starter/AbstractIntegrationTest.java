@@ -5,6 +5,10 @@ import java.time.LocalDate;
 import java.util.List;
 
 import com.example.starter.web.dto.ApiDtos.ArriveRequest;
+import com.example.starter.web.dto.ApiDtos.AttemptCompleteRequest;
+import com.example.starter.web.dto.ApiDtos.AttemptDispatchRequest;
+import com.example.starter.web.dto.ApiDtos.AttemptItemsRequest;
+import com.example.starter.web.dto.ApiDtos.AttemptStartRequest;
 import com.example.starter.web.dto.ApiDtos.CloseRequest;
 import com.example.starter.web.dto.ApiDtos.DispatchRequest;
 import com.example.starter.web.dto.ApiDtos.ElevatorRecheckRequest;
@@ -13,6 +17,7 @@ import com.example.starter.web.dto.ApiDtos.MaintenanceRequest;
 import com.example.starter.web.dto.ApiDtos.RecheckRequest;
 import com.example.starter.web.dto.ApiDtos.ReportRequest;
 import com.example.starter.web.dto.ApiDtos.RescueRequest;
+import com.example.starter.web.dto.ApiDtos.ScanRequest;
 import com.example.starter.web.dto.ApiDtos.StaffRequest;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -63,6 +68,9 @@ public abstract class AbstractIntegrationTest {
         jdbc.update("DELETE FROM rescue_event");
         jdbc.update("DELETE FROM rescue_staff");
         jdbc.update("DELETE FROM stop_resume_chain");
+        jdbc.update("DELETE FROM maintenance_attempt_item");
+        jdbc.update("DELETE FROM maintenance_attempt");
+        jdbc.update("DELETE FROM maintenance_obligation");
         jdbc.update("DELETE FROM maintenance_record");
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM rescue_order");
@@ -178,5 +186,60 @@ public abstract class AbstractIntegrationTest {
             }
         }
         return false;
+    }
+
+    // ---------------------------------------------------------------- 履约续派辅助
+
+    protected Resp scan(String requestId, Instant scannedAt) throws Exception {
+        return postJson("/api/maintenance-obligations/scan", new ScanRequest(requestId, scannedAt));
+    }
+
+    protected Resp obligations(long elevatorId) throws Exception {
+        return getJson("/api/maintenance-obligations?elevatorId=" + elevatorId);
+    }
+
+    protected Resp obligation(long obligationId) throws Exception {
+        return getJson("/api/maintenance-obligations/" + obligationId);
+    }
+
+    protected Resp obligationAttempts(long obligationId) throws Exception {
+        return getJson("/api/maintenance-obligations/" + obligationId + "/attempts");
+    }
+
+    protected Resp dispatchAttempt(String requestId, long obligationId, long expectedVersion,
+                                   List<Long> staffIds, Instant windowStart, Instant windowEnd) throws Exception {
+        return postJson("/api/maintenance-obligations/" + obligationId + "/dispatch",
+                new AttemptDispatchRequest(requestId, expectedVersion, staffIds, windowStart, windowEnd));
+    }
+
+    protected Resp attempt(long attemptId) throws Exception {
+        return getJson("/api/maintenance-attempts/" + attemptId);
+    }
+
+    protected Resp startAttempt(String requestId, long attemptId, long expectedVersion,
+                                Instant startedAt) throws Exception {
+        return postJson("/api/maintenance-attempts/" + attemptId + "/start",
+                new AttemptStartRequest(requestId, expectedVersion, startedAt));
+    }
+
+    protected Resp reportItems(String requestId, long attemptId, long expectedVersion,
+                               List<String> items) throws Exception {
+        return postJson("/api/maintenance-attempts/" + attemptId + "/items",
+                new AttemptItemsRequest(requestId, expectedVersion, items, null));
+    }
+
+    protected Resp completeAttempt(String requestId, long attemptId, long expectedVersion,
+                                   List<Long> confirmStaffIds, Instant completedAt) throws Exception {
+        return postJson("/api/maintenance-attempts/" + attemptId + "/complete",
+                new AttemptCompleteRequest(requestId, expectedVersion, confirmStaffIds, completedAt));
+    }
+
+    /** 扫描并返回该梯当前 OPEN 义务 ID（断言恰一项）。 */
+    protected long scanOpenObligation(String keyPrefix, long elevatorId, Instant scannedAt) throws Exception {
+        Resp s = scan(keyPrefix + "-scan", scannedAt);
+        assert s.status() == 200 : "scan failed: " + s.status() + " " + s.body();
+        Resp list = obligations(elevatorId);
+        assert list.body().size() == 1 : "expect exactly 1 obligation: " + list.body();
+        return list.body().get(0).get("id").asLong();
     }
 }

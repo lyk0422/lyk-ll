@@ -129,6 +129,78 @@ COMMENT ON COLUMN maintenance_record.due_day IS '应维保截止日（UTC 日）
 COMMENT ON COLUMN maintenance_record.result IS '结果：COMPLIANT 合规 / OVERDUE 逾期（锁定并重点监察） / LATE_EVENT 迟到事件（不变更状态）';
 COMMENT ON COLUMN maintenance_record.note IS '备注';
 
+CREATE TABLE IF NOT EXISTS maintenance_obligation (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    elevator_id BIGINT NOT NULL,
+    base_day DATE NOT NULL,
+    due_day DATE NOT NULL,
+    due_at TIMESTAMP NOT NULL,
+    dispatch_open_at TIMESTAMP NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'OPEN',
+    version INT NOT NULL DEFAULT 1,
+    settled_by VARCHAR(16),
+    settled_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_obligation_cycle UNIQUE (elevator_id, due_day),
+    CONSTRAINT fk_obligation_elevator FOREIGN KEY (elevator_id) REFERENCES elevator (id)
+);
+COMMENT ON TABLE maintenance_obligation IS '维保履约义务：绑定电梯、上次有效维保基准日与固定UTC到期时刻，同电梯同到期周期唯一';
+COMMENT ON COLUMN maintenance_obligation.base_day IS '周期基准日（UTC 日）：上次有效维保日，无则投运日';
+COMMENT ON COLUMN maintenance_obligation.due_day IS '应维保截止日（UTC 日）= 基准日 + 15 日';
+COMMENT ON COLUMN maintenance_obligation.due_at IS '固定UTC到期时刻 = due_day 00:00:00 UTC';
+COMMENT ON COLUMN maintenance_obligation.dispatch_open_at IS '可派发起点（UTC）= due_at - 24 小时，恰在起点允许派发';
+COMMENT ON COLUMN maintenance_obligation.status IS '状态：OPEN 待履约 / FULFILLED 尝试完成 / SETTLED 手工登记结清';
+COMMENT ON COLUMN maintenance_obligation.version IS '乐观锁版本，从 1 开始，每次成功变更加 1';
+COMMENT ON COLUMN maintenance_obligation.settled_by IS '结清方式：ATTEMPT 尝试完成 / MANUAL 手工登记；未结清为 NULL';
+COMMENT ON COLUMN maintenance_obligation.settled_at IS '结清时间（UTC），未结清为 NULL';
+COMMENT ON COLUMN maintenance_obligation.created_at IS '创建时间（UTC）';
+
+CREATE TABLE IF NOT EXISTS maintenance_attempt (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    obligation_id BIGINT NOT NULL,
+    elevator_id BIGINT NOT NULL,
+    staff1_id BIGINT NOT NULL,
+    staff2_id BIGINT NOT NULL,
+    window_start TIMESTAMP NOT NULL,
+    window_end TIMESTAMP NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'SCHEDULED',
+    version INT NOT NULL DEFAULT 1,
+    maintenance_record_id BIGINT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    suspended_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    CONSTRAINT fk_attempt_obligation FOREIGN KEY (obligation_id) REFERENCES maintenance_obligation (id),
+    CONSTRAINT fk_attempt_elevator FOREIGN KEY (elevator_id) REFERENCES elevator (id),
+    CONSTRAINT fk_attempt_staff1 FOREIGN KEY (staff1_id) REFERENCES staff (id),
+    CONSTRAINT fk_attempt_staff2 FOREIGN KEY (staff2_id) REFERENCES staff (id)
+);
+COMMENT ON TABLE maintenance_attempt IS '履约尝试：同一义务可多次续派；两名持证人员占半开作业窗，同窗不可重叠';
+COMMENT ON COLUMN maintenance_attempt.obligation_id IS '所属履约义务';
+COMMENT ON COLUMN maintenance_attempt.elevator_id IS '冗余电梯ID，救援接报时按梯原子挂起';
+COMMENT ON COLUMN maintenance_attempt.staff1_id IS '作业人员1（合成持证人员）';
+COMMENT ON COLUMN maintenance_attempt.staff2_id IS '作业人员2（合成持证人员）';
+COMMENT ON COLUMN maintenance_attempt.window_start IS '作业窗起点（UTC，含），半开区间 [start, end)';
+COMMENT ON COLUMN maintenance_attempt.window_end IS '作业窗终点（UTC，不含），半开区间 [start, end)';
+COMMENT ON COLUMN maintenance_attempt.status IS '状态：SCHEDULED 已派 / IN_PROGRESS 作业中 / SUSPENDED 救援挂起 / COMPLETED 完成 / LATE_REPORTED 迟到回报 / CANCELLED 手工结清取消';
+COMMENT ON COLUMN maintenance_attempt.version IS '乐观锁版本，从 1 开始，每次成功变更加 1';
+COMMENT ON COLUMN maintenance_attempt.maintenance_record_id IS '完成时登记的维保记录ID，未完成为 NULL';
+COMMENT ON COLUMN maintenance_attempt.created_at IS '派发时间（UTC）';
+COMMENT ON COLUMN maintenance_attempt.started_at IS '开始作业时间（UTC），未开始为 NULL';
+COMMENT ON COLUMN maintenance_attempt.suspended_at IS '救援挂起时间（UTC），未挂起为 NULL';
+COMMENT ON COLUMN maintenance_attempt.completed_at IS '完成/迟到回报时间（UTC），未终结为 NULL';
+
+CREATE TABLE IF NOT EXISTS maintenance_attempt_item (
+    attempt_id BIGINT NOT NULL,
+    item VARCHAR(32) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (attempt_id, item),
+    CONSTRAINT fk_item_attempt FOREIGN KEY (attempt_id) REFERENCES maintenance_attempt (id)
+);
+COMMENT ON TABLE maintenance_attempt_item IS '履约尝试已完成清单项，救援挂起后保留';
+COMMENT ON COLUMN maintenance_attempt_item.item IS '清单项编码（合成规则固定集合）';
+COMMENT ON COLUMN maintenance_attempt_item.created_at IS '回报时间（UTC）';
+
 CREATE TABLE IF NOT EXISTS idempotency_record (
     scope VARCHAR(32) NOT NULL,
     request_id VARCHAR(64) NOT NULL,
@@ -139,7 +211,7 @@ CREATE TABLE IF NOT EXISTS idempotency_record (
     PRIMARY KEY (scope, request_id)
 );
 COMMENT ON TABLE idempotency_record IS '幂等受理记录：同键同参返回首次结果，同键异参 409';
-COMMENT ON COLUMN idempotency_record.scope IS '业务边界：REPORT/DISPATCH/CLOSE/MAINTENANCE';
+COMMENT ON COLUMN idempotency_record.scope IS '业务边界：REPORT/DISPATCH/CLOSE/MAINTENANCE/MAINT_SCAN/MAINT_DISPATCH/MAINT_START/MAINT_ITEMS/MAINT_COMPLETE';
 COMMENT ON COLUMN idempotency_record.fingerprint IS '幂等指纹：requestId 与全部业务字段的 SHA-256';
 COMMENT ON COLUMN idempotency_record.response_status IS '首次受理返回的 HTTP 状态';
 COMMENT ON COLUMN idempotency_record.response_body IS '首次受理返回的报文';

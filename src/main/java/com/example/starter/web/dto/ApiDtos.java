@@ -81,4 +81,47 @@ public final class ApiDtos {
     /** 救援时间线事件 */
     public record EventView(long id, String event, String detail, Instant createdAt) {
     }
+
+    /** 履约义务扫描请求；scannedAt 缺省取服务端 UTC 当前时间 */
+    public record ScanRequest(@NotBlank String requestId, Instant scannedAt) {
+    }
+
+    /** 履约尝试派发请求：两名持证人员 + 半开作业窗 [windowStart, windowEnd) */
+    public record AttemptDispatchRequest(@NotBlank String requestId, @NotNull Long expectedVersion,
+                                         @NotEmpty List<Long> staffIds,
+                                         @NotNull Instant windowStart, @NotNull Instant windowEnd) {
+    }
+
+    /** 履约尝试开始请求；startedAt 缺省取服务端 UTC 当前时间 */
+    public record AttemptStartRequest(@NotBlank String requestId, @NotNull Long expectedVersion,
+                                      Instant startedAt) {
+    }
+
+    /** 清单回报请求：items 为本次回报的清单项编码集合 */
+    public record AttemptItemsRequest(@NotBlank String requestId, @NotNull Long expectedVersion,
+                                      @NotEmpty List<String> items, Instant reportedAt) {
+    }
+
+    /** 完成确认请求：须两名作业人员共同确认；completedAt 缺省取服务端 UTC 当前时间 */
+    public record AttemptCompleteRequest(@NotBlank String requestId, @NotNull Long expectedVersion,
+                                         @NotEmpty List<Long> confirmStaffIds, Instant completedAt) {
+    }
+
+    /** 履约义务视图 */
+    public record ObligationView(long id, long elevatorId, LocalDate baseDay, LocalDate dueDay,
+                                 Instant dueAt, Instant dispatchOpenAt, String status, long version,
+                                 String settledBy, Instant settledAt, Instant createdAt) {
+    }
+
+    /** 履约尝试视图（含已做清单轨迹） */
+    public record AttemptView(long id, long obligationId, long elevatorId, List<Long> staffIds,
+                              Instant windowStart, Instant windowEnd, String status, long version,
+                              List<String> doneItems, Long maintenanceRecordId,
+                              Instant createdAt, Instant startedAt, Instant suspendedAt,
+                              Instant completedAt) {
+    }
+
+    /** 扫描结果视图 */
+    public record ScanView(int created, List<ObligationView> obligations) {
+    }
 }

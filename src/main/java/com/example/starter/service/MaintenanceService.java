@@ -59,23 +59,36 @@ public class MaintenanceService {
             List<String> status = jdbc.query("SELECT status FROM rescue_order WHERE request_id=?",
                     (rs, i) -> rs.getString(1), req.rescueRequestId());
             if (!status.isEmpty() && RescueStatus.CLOSED.name().equals(status.get(0))) {
-                return insertRecord(ev.id(), req, null, MaintenanceResult.LATE_EVENT,
-                        "关联救援单已结案，迟到维保仅记事件");
+                return insertRecord(ev.id(), req.requestId(), performedDay, null,
+                        MaintenanceResult.LATE_EVENT, "关联救援单已结案，迟到维保仅记事件");
             }
         }
         // 乱序/重复补录：执行日未晚于最近有效维保日，仅记迟到事件
         if (ev.lastMaintenanceDay() != null && !performedDay.isAfter(ev.lastMaintenanceDay())) {
-            return insertRecord(ev.id(), req, null, MaintenanceResult.LATE_EVENT,
-                    "执行日不晚于最近维保日，按迟到事件记录");
+            return insertRecord(ev.id(), req.requestId(), performedDay, null,
+                    MaintenanceResult.LATE_EVENT, "执行日不晚于最近维保日，按迟到事件记录");
         }
 
+        MaintenanceView v = registerEffective(ev, req.requestId(), performedDay, req.note());
+        // 旧手工入口兼容：有效登记后将该梯对应未完成履约义务结清一次
+        settleOpenObligation(ev.id());
+        return v;
+    }
+
+    /**
+     * 登记有效维保（合规/逾期）并同步电梯台账；逾期锁定电梯并列入重点监察。
+     * 供旧手工入口与履约尝试完成共用，调用方须已锁定电梯行并处于事务内。
+     */
+    public MaintenanceView registerEffective(ElevatorRow ev, String requestId,
+                                             LocalDate performedDay, String note) {
         LocalDate base = ev.lastMaintenanceDay() != null ? ev.lastMaintenanceDay() : ev.commissionedDay();
         LocalDate dueDay = base.plusDays(CYCLE_DAYS);
         if (performedDay.isAfter(dueDay)) {
             // 逾期：锁定电梯并列入重点监察；维保事实仍入账
             jdbc.update("UPDATE elevator SET key_supervision=TRUE, last_maintenance_day=? WHERE id=?",
                     performedDay, ev.id());
-            MaintenanceView v = insertRecord(ev.id(), req, dueDay, MaintenanceResult.OVERDUE, req.note());
+            MaintenanceView v = insertRecord(ev.id(), requestId, performedDay, dueDay,
+                    MaintenanceResult.OVERDUE, note);
             boolean alreadyLocked = elevatorService.openStops(ev.id()).stream()
                     .anyMatch(s -> StopReason.MAINTENANCE_OVERDUE.name().equals(s.reason()));
             if (!alreadyLocked) {
@@ -91,14 +104,37 @@ public class MaintenanceService {
         }
         // 周期内（含恰第 15 日）：合规
         jdbc.update("UPDATE elevator SET last_maintenance_day=? WHERE id=?", performedDay, ev.id());
-        return insertRecord(ev.id(), req, dueDay, MaintenanceResult.COMPLIANT, req.note());
+        return insertRecord(ev.id(), requestId, performedDay, dueDay, MaintenanceResult.COMPLIANT, note);
     }
 
-    private MaintenanceView insertRecord(long elevatorId, MaintenanceRequest req, LocalDate dueDay,
-                                         MaintenanceResult result, String note) {
+    /** 登记迟到事件（不变更电梯台账状态），供挂起尝试的迟到回报与手工入口共用。 */
+    public MaintenanceView insertLateEvent(long elevatorId, String requestId,
+                                           LocalDate performedDay, String note) {
+        return insertRecord(elevatorId, requestId, performedDay, null, MaintenanceResult.LATE_EVENT, note);
+    }
+
+    /**
+     * 将该梯 OPEN 状态的履约义务结清一次（手工有效登记兼容）：
+     * 义务置 SETTLED，其未终结尝试取消并释放人员窗口。
+     */
+    private void settleOpenObligation(long elevatorId) {
+        Instant now = Instant.now(clock);
+        List<Long> ids = jdbc.query(
+                "SELECT id FROM maintenance_obligation WHERE elevator_id=? AND status='OPEN'",
+                (rs, i) -> rs.getLong(1), elevatorId);
+        for (Long obligationId : ids) {
+            jdbc.update("UPDATE maintenance_obligation SET status='SETTLED', settled_by='MANUAL', "
+                    + "settled_at=?, version=version+1 WHERE id=?", ElevatorService.ts(now), obligationId);
+            jdbc.update("UPDATE maintenance_attempt SET status='CANCELLED', version=version+1 "
+                    + "WHERE obligation_id=? AND status IN ('SCHEDULED','IN_PROGRESS')", obligationId);
+        }
+    }
+
+    private MaintenanceView insertRecord(long elevatorId, String requestId, LocalDate performedDay,
+                                         LocalDate dueDay, MaintenanceResult result, String note) {
         jdbc.update("INSERT INTO maintenance_record(elevator_id, request_id, performed_day, due_day, result, note) "
                         + "VALUES (?,?,?,?,?,?)",
-                elevatorId, req.requestId(), req.performedDay(), dueDay, result.name(), note);
+                elevatorId, requestId, performedDay, dueDay, result.name(), note);
         long id = jdbc.queryForObject("SELECT MAX(id) FROM maintenance_record WHERE elevator_id=?",
                 Long.class, elevatorId);
         return jdbc.queryForObject("SELECT * FROM maintenance_record WHERE id=?", this::mapView, id);
