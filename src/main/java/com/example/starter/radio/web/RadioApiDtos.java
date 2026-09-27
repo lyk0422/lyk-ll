@@ -84,4 +84,28 @@ public final class RadioApiDtos {
     /** 迟到测量数据请求。 */
     public record MeasurementRequest(@NotBlank String payload) {
     }
+
+    /**
+     * 给药时刻变更候选提交请求：requestId 幂等；expectedVersion/expectedPrescriptionVersion 为乐观版本，
+     * 从 1 开始；newAdministrationTime 为新的 UTC 给药时刻（ISO-8601），须晚于母液参考时刻。
+     */
+    public record ChangeSubmitRequest(
+            @NotBlank String requestId,
+            @NotNull Long dispensingId,
+            @Positive int expectedVersion,
+            @Positive int expectedPrescriptionVersion,
+            @NotBlank String newAdministrationTime) {
+
+        public long newAdministrationTimeEpoch() {
+            return Instant.parse(newAdministrationTime).getEpochSecond();
+        }
+    }
+
+    /** 变更候选双人复核请求。 */
+    public record ChangeReviewRequest(@NotBlank String reviewer) {
+    }
+
+    /** 变更候选作废请求：requestId 幂等。 */
+    public record ChangeVoidRequest(@NotBlank String requestId) {
+    }
 }

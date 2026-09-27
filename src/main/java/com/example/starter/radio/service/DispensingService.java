@@ -12,6 +12,7 @@ import com.example.starter.radio.model.Nuclide;
 import com.example.starter.radio.model.Prescription;
 import com.example.starter.radio.model.ReconciliationLedger;
 import com.example.starter.radio.repository.CalibratorRepository;
+import com.example.starter.radio.repository.ChangeOrderRepository;
 import com.example.starter.radio.repository.DispensingRepository;
 import com.example.starter.radio.repository.MotherLiquorRepository;
 import com.example.starter.radio.repository.NuclideRepository;
@@ -24,6 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
  * 分装计算、双人核对与发药勾稽。
  * 分装活度按衰变公式推算至给药时刻（UTC），与处方偏差恰 10% 合法、超过 10% 拒绝；
  * 发药与母液活度扣减在同一事务内完成；发药完成为终态，重复完成返回幂等成功。
+ * 每次计算（含变更生效后的重算）在 dispensing_version 留存不可变版本证据，核对链按版本隔离。
  */
 @Service
 public class DispensingService {
@@ -39,6 +41,7 @@ public class DispensingService {
     private final PrescriptionRepository prescriptions;
     private final CalibratorRepository calibrators;
     private final NuclideRepository nuclides;
+    private final ChangeOrderRepository changeOrders;
     private final DecayService decay;
     private final Clock clock;
 
@@ -47,6 +50,7 @@ public class DispensingService {
                              PrescriptionRepository prescriptions,
                              CalibratorRepository calibrators,
                              NuclideRepository nuclides,
+                             ChangeOrderRepository changeOrders,
                              DecayService decay,
                              Clock clock) {
         this.dispensings = dispensings;
@@ -54,6 +58,7 @@ public class DispensingService {
         this.prescriptions = prescriptions;
         this.calibrators = calibrators;
         this.nuclides = nuclides;
+        this.changeOrders = changeOrders;
         this.decay = decay;
         this.clock = clock;
     }
@@ -98,10 +103,14 @@ public class DispensingService {
             if (legal) {
                 long id = dispensings.insertDispensing(requestId, fingerprint, motherLiquorId, prescriptionId,
                         calibratorId, dispensedAtAdmin, deviation, DispensingStatus.CALCULATED, now);
+                dispensings.insertVersion(id, 1, prescriptionId, prescription.administrationTimeEpoch(),
+                        dispensedAtAdmin, deviation, "LEGAL", null, now);
                 return dispensings.findDispensingById(id).orElseThrow();
             }
             long id = dispensings.insertDispensing(requestId, fingerprint, motherLiquorId, prescriptionId,
                     calibratorId, null, deviation, DispensingStatus.REJECTED, now);
+            dispensings.insertVersion(id, 1, prescriptionId, prescription.administrationTimeEpoch(),
+                    null, deviation, "REJECTED", null, now);
             return dispensings.findDispensingById(id).orElseThrow();
         } catch (DuplicateKeyException e) {
             return dispensings.findDispensingByRequestId(requestId)
@@ -124,7 +133,7 @@ public class DispensingService {
         long now = clock.instant().getEpochSecond();
         if (dispensing.firstChecker() == null) {
             dispensings.updateChecker(dispensingId, "first_checker", checker, now);
-            dispensings.insertCheck(dispensingId, checker, 1, now);
+            dispensings.insertCheck(dispensingId, dispensing.versionNo(), checker, 1, now);
             return dispensings.findDispensingById(dispensingId).orElseThrow();
         }
         if (dispensing.firstChecker().equals(checker)) {
@@ -134,7 +143,7 @@ public class DispensingService {
             throw new BusinessException("双人核对已完成，禁止重复核对");
         }
         dispensings.updateChecker(dispensingId, "second_checker", checker, now);
-        dispensings.insertCheck(dispensingId, checker, 2, now);
+        dispensings.insertCheck(dispensingId, dispensing.versionNo(), checker, 2, now);
         dispensings.updateStatus(dispensingId, DispensingStatus.CHECKED, now);
         return dispensings.findDispensingById(dispensingId).orElseThrow();
     }
@@ -164,6 +173,12 @@ public class DispensingService {
             throw new BusinessException("分装批次未完成双人核对或已拒绝，禁止发药: " + dispensing.status());
         }
 
+        long now = clock.instant().getEpochSecond();
+        // 原版本抢先发药：挂起候选即时失效（SUPERSEDED）。已先持有分装行锁再锁候选行，与变更生效同一锁顺序，
+        // 因而“候选批准 vs 原版本发药”只有一方先提交。
+        changeOrders.findActiveByDispensingForUpdate(dispensingId)
+                .ifPresent(pending -> changeOrders.markSuperseded(pending.id(), now));
+
         MotherLiquor mother = motherLiquors.findById(dispensing.motherLiquorId()).orElseThrow();
         Nuclide nuclide = nuclides.findById(mother.nuclideId()).orElseThrow();
         ReconciliationLedger ledger = reconcile(dispensing, mother, nuclide,
@@ -175,7 +190,6 @@ public class DispensingService {
                     ledger.remainingActivityBq(), ledger.decayResidualBq()));
         }
 
-        long now = clock.instant().getEpochSecond();
         dispensings.insertLedger(ledger, now);
         dispensings.markDispensed(dispensingId, requestId, fingerprint, now);
         // 发药与母液活度扣减同事务：任一步失败整体回滚

@@ -123,6 +123,113 @@ class RadioApiTest extends IntegrationTestBase {
                 .andExpect(status().isBadRequest());
     }
 
+    @Test
+    void changeFlowOverHttp() throws Exception {
+        long calibratorId = postAndGetId("/api/calibrators",
+                "{\"code\":\"CAL-CHG-1\",\"name\":\"合成活度计\"}");
+        mvc.perform(post("/api/calibrators/daily-check").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"requestId\":\"REQ-CHG-CHK\",\"calibratorId\":" + calibratorId
+                                + ",\"checkDate\":\"2026-09-26\",\"referenceActivityBq\":1000.0,"
+                                + "\"measuredActivityBq\":1000.0}"))
+                .andExpect(status().isOk());
+        long motherId = postAndGetId("/api/mother-liquors",
+                "{\"batchCode\":\"ML-CHG-1\",\"nuclideCode\":\"SYN-1H\",\"initialActivityBq\":2200.0,"
+                        + "\"referenceTime\":\"2026-09-26T00:00:00Z\"}");
+        long prescriptionId = postAndGetId("/api/prescriptions",
+                "{\"code\":\"RX-CHG-1\",\"nuclideCode\":\"SYN-1H\",\"prescribedActivityBq\":1000.0,"
+                        + "\"administrationTime\":\"2026-09-26T01:00:00Z\"}");
+        long dispensingId = postAndGetId("/api/dispensings/calculate",
+                "{\"requestId\":\"REQ-CHG-CALC\",\"motherLiquorId\":" + motherId
+                        + ",\"prescriptionId\":" + prescriptionId + ",\"calibratorId\":" + calibratorId + "}");
+        mvc.perform(post("/api/dispensings/{id}/checks", dispensingId)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"checker\":\"alice\"}"))
+                .andExpect(status().isOk());
+        mvc.perform(post("/api/dispensings/{id}/checks", dispensingId)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"checker\":\"bob\"}"))
+                .andExpect(status().isOk());
+
+        // 提交候选：新时刻 T0+1.25h，活度 ~924.986，偏差 ~-7.5% 合法
+        long changeId = postChangeId(
+                "{\"requestId\":\"REQ-CHG-SUBMIT\",\"dispensingId\":" + dispensingId
+                        + ",\"expectedVersion\":1,\"expectedPrescriptionVersion\":1,"
+                        + "\"newAdministrationTime\":\"2026-09-26T01:15:00Z\"}");
+        mvc.perform(get("/api/dispensings/changes/{id}", changeId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PENDING"))
+                .andExpect(jsonPath("$.candidateVersionNo").value(2));
+
+        // 同键异参 → 409
+        mvc.perform(post("/api/dispensings/changes").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"requestId\":\"REQ-CHG-SUBMIT\",\"dispensingId\":" + dispensingId
+                                + ",\"expectedVersion\":1,\"expectedPrescriptionVersion\":1,"
+                                + "\"newAdministrationTime\":\"2026-09-26T01:30:00Z\"}"))
+                .andExpect(status().isConflict());
+        // 参数非法（expectedVersion=0）→ 400
+        mvc.perform(post("/api/dispensings/changes").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"requestId\":\"REQ-CHG-BAD\",\"dispensingId\":" + dispensingId
+                                + ",\"expectedVersion\":0,\"expectedPrescriptionVersion\":1,"
+                                + "\"newAdministrationTime\":\"2026-09-26T01:15:00Z\"}"))
+                .andExpect(status().isBadRequest());
+        // 已存在待复核候选时再次提交（含超偏差时刻 T0+2h）→ 422 业务拒绝
+        mvc.perform(post("/api/dispensings/changes").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"requestId\":\"REQ-CHG-REJECT\",\"dispensingId\":" + dispensingId
+                                + ",\"expectedVersion\":1,\"expectedPrescriptionVersion\":1,"
+                                + "\"newAdministrationTime\":\"2026-09-26T02:00:00Z\"}"))
+                .andExpect(status().isUnprocessableEntity());
+
+        // 双人复核：单人重复 → 409
+        mvc.perform(post("/api/dispensings/changes/{id}/reviews", changeId)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"reviewer\":\"carol\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.firstReviewer").value("carol"));
+        mvc.perform(post("/api/dispensings/changes/{id}/reviews", changeId)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"reviewer\":\"carol\"}"))
+                .andExpect(status().isConflict());
+        // 第二名不同人员复核 → 生效
+        mvc.perform(post("/api/dispensings/changes/{id}/reviews", changeId)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"reviewer\":\"dave\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("APPROVED"));
+
+        // 生效后分装版本=2、旧签认清除；版本证据两条
+        mvc.perform(get("/api/dispensings/{id}", dispensingId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.versionNo").value(2))
+                .andExpect(jsonPath("$.status").value("CALCULATED"))
+                .andExpect(jsonPath("$.firstChecker").value(org.hamcrest.Matchers.nullValue()))
+                .andExpect(jsonPath("$.secondChecker").value(org.hamcrest.Matchers.nullValue()))
+                .andExpect(jsonPath("$.versions.length()").value(2));
+        mvc.perform(get("/api/dispensings/{id}/versions", dispensingId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[1].versionNo").value(2))
+                .andExpect(jsonPath("$[1].changeOrderId").value(changeId));
+
+        // 新版本未重新核对直接发药 → 422（旧签认不得复用）
+        mvc.perform(post("/api/dispensings/dispense").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"requestId\":\"REQ-CHG-DISP0\",\"dispensingId\":" + dispensingId
+                                + ",\"remainingActivityBq\":0.0,\"measuredAt\":\"2026-09-26T01:15:00Z\"}"))
+                .andExpect(status().isUnprocessableEntity());
+
+        // 证据查询含复核链
+        mvc.perform(get("/api/dispensings/changes/{id}", changeId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reviewChain.length()").value(2));
+
+        // 变更单不存在 → 404
+        mvc.perform(get("/api/dispensings/changes/{id}", 999999))
+                .andExpect(status().isNotFound());
+    }
+
+    private long postChangeId(String body) throws Exception {
+        MvcResult result = mvc.perform(post("/api/dispensings/changes").contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andReturn();
+        String json = result.getResponse().getContentAsString();
+        return Long.parseLong(json.replaceAll(".*\"id\":(\\d+).*", "$1"));
+    }
+
     private long postAndGetId(String url, String body) throws Exception {
         MvcResult result = mvc.perform(post(url).contentType(MediaType.APPLICATION_JSON).content(body))
                 .andExpect(status().isOk())

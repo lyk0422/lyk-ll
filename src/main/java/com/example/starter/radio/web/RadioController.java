@@ -5,14 +5,17 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import com.example.starter.radio.model.ChangeOrder;
 import com.example.starter.radio.model.DailyCheck;
 import com.example.starter.radio.model.Dispensing;
 import com.example.starter.radio.model.DispensingCheck;
+import com.example.starter.radio.model.DispensingVersion;
 import com.example.starter.radio.model.MotherLiquor;
 import com.example.starter.radio.model.Prescription;
 import com.example.starter.radio.model.ReconciliationLedger;
 import com.example.starter.radio.repository.DispensingRepository;
 import com.example.starter.radio.service.CalibratorService;
+import com.example.starter.radio.service.ChangeOrderService;
 import com.example.starter.radio.service.DispensingService;
 import com.example.starter.radio.service.NotFoundException;
 import com.example.starter.radio.service.RegistrationService;
@@ -35,15 +38,18 @@ public class RadioController {
     private final CalibratorService calibratorService;
     private final DispensingService dispensingService;
     private final RegistrationService registrationService;
+    private final ChangeOrderService changeOrderService;
     private final DispensingRepository dispensings;
 
     public RadioController(CalibratorService calibratorService,
                            DispensingService dispensingService,
                            RegistrationService registrationService,
+                           ChangeOrderService changeOrderService,
                            DispensingRepository dispensings) {
         this.calibratorService = calibratorService;
         this.dispensingService = dispensingService;
         this.registrationService = registrationService;
+        this.changeOrderService = changeOrderService;
         this.dispensings = dispensings;
     }
 
@@ -139,11 +145,67 @@ public class RadioController {
         Map<String, Object> view = dispensingView(dispensing);
         List<DispensingCheck> checks = dispensings.findChecks(id);
         view.put("checkChain", checks.stream().map(c -> Map.of(
-                "checker", (Object) c.checker(),
+                "versionNo", (Object) c.versionNo(),
+                "checker", c.checker(),
                 "checkSeq", c.checkSeq(),
                 "checkedAt", Instant.ofEpochSecond(c.checkedAtEpoch()).toString())).toList());
+        view.put("versions", changeOrderService.versions(id).stream()
+                .map(this::versionView).toList());
         dispensings.findLedger(id).ifPresent(ledger -> view.put("ledger", ledgerView(ledger)));
         return view;
+    }
+
+    /**
+     * 提交给药时刻变更候选：只形成候选，不立即改有效分装。
+     */
+    @PostMapping("/dispensings/changes")
+    public Map<String, Object> submitChange(@Valid @RequestBody RadioApiDtos.ChangeSubmitRequest req) {
+        ChangeOrderService.SubmitResult result = changeOrderService.submit(req.requestId(),
+                req.dispensingId(), req.expectedVersion(), req.expectedPrescriptionVersion(),
+                req.newAdministrationTimeEpoch());
+        Map<String, Object> view = changeView(result.order());
+        view.put("replayed", result.replayed());
+        return view;
+    }
+
+    /**
+     * 变更候选双人复核；第二名不同人员复核通过即同事务生效。
+     */
+    @PostMapping("/dispensings/changes/{id}/reviews")
+    public Map<String, Object> reviewChange(@PathVariable long id,
+                                            @Valid @RequestBody RadioApiDtos.ChangeReviewRequest req) {
+        return changeView(changeOrderService.review(id, req.reviewer()));
+    }
+
+    /**
+     * 作废变更候选。
+     */
+    @PostMapping("/dispensings/changes/{id}/void")
+    public Map<String, Object> voidChange(@PathVariable long id,
+                                          @Valid @RequestBody RadioApiDtos.ChangeVoidRequest req) {
+        return changeView(changeOrderService.voidOrder(req.requestId(), id));
+    }
+
+    /**
+     * 变更候选与复核证据查询。
+     */
+    @GetMapping("/dispensings/changes/{id}")
+    public Map<String, Object> getChange(@PathVariable long id) {
+        ChangeOrderService.ChangeEvidence evidence = changeOrderService.evidence(id);
+        Map<String, Object> view = changeView(evidence.order());
+        view.put("reviewChain", evidence.reviews().stream().map(c -> Map.of(
+                "reviewer", (Object) c.reviewer(),
+                "reviewSeq", c.reviewSeq(),
+                "reviewedAt", Instant.ofEpochSecond(c.reviewedAtEpoch()).toString())).toList());
+        return view;
+    }
+
+    /**
+     * 分装版本计算证据查询：初始版本 + 历次变更版本。
+     */
+    @GetMapping("/dispensings/{id}/versions")
+    public List<Map<String, Object>> getVersions(@PathVariable long id) {
+        return changeOrderService.versions(id).stream().map(this::versionView).toList();
     }
 
     /**
@@ -164,10 +226,48 @@ public class RadioController {
         view.put("dispensedActivityBq", d.dispensedActivityBq());
         view.put("deviationRatio", d.deviationRatio());
         view.put("status", d.status().name());
+        view.put("versionNo", d.versionNo());
+        view.put("activeChangeOrderId", d.activeChangeOrderId());
         view.put("firstChecker", d.firstChecker());
         view.put("secondChecker", d.secondChecker());
         view.put("dispensedAt",
                 d.dispensedAtEpoch() == null ? null : Instant.ofEpochSecond(d.dispensedAtEpoch()).toString());
+        return view;
+    }
+
+    private Map<String, Object> changeView(ChangeOrder c) {
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("id", c.id());
+        view.put("requestId", c.requestId());
+        view.put("dispensingId", c.dispensingId());
+        view.put("expectedVersion", c.expectedVersion());
+        view.put("prescriptionVersion", c.prescriptionVersion());
+        view.put("newAdministrationTime",
+                Instant.ofEpochSecond(c.newAdministrationTimeEpoch()).toString());
+        view.put("candidateVersionNo", c.candidateVersionNo());
+        view.put("candidateActivityBq", c.candidateActivityBq());
+        view.put("candidateDeviationRatio", c.candidateDeviationRatio());
+        view.put("calcStatus", c.calcStatus());
+        view.put("status", c.status().name());
+        view.put("firstReviewer", c.firstReviewer());
+        view.put("secondReviewer", c.secondReviewer());
+        view.put("approvedAt",
+                c.approvedAtEpoch() == null ? null : Instant.ofEpochSecond(c.approvedAtEpoch()).toString());
+        view.put("voidedAt",
+                c.voidedAtEpoch() == null ? null : Instant.ofEpochSecond(c.voidedAtEpoch()).toString());
+        return view;
+    }
+
+    private Map<String, Object> versionView(DispensingVersion v) {
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("versionNo", v.versionNo());
+        view.put("prescriptionId", v.prescriptionId());
+        view.put("administrationTime",
+                Instant.ofEpochSecond(v.administrationTimeEpoch()).toString());
+        view.put("dispensedActivityBq", v.dispensedActivityBq());
+        view.put("deviationRatio", v.deviationRatio());
+        view.put("calcStatus", v.calcStatus());
+        view.put("changeOrderId", v.changeOrderId());
         return view;
     }
 
