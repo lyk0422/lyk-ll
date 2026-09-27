@@ -29,4 +29,9 @@ public class ApiException extends RuntimeException {
     public static ApiException badRequest(String message) {
         return new ApiException(HttpStatus.BAD_REQUEST, message);
     }
+
+    /** 422：参数可解析但业务规则拒绝（状态不符、整版报价不合规等） */
+    public static ApiException unprocessable(String message) {
+        return new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, message);
+    }
 }

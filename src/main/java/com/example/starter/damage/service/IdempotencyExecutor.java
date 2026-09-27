@@ -12,6 +12,8 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Supplier;
 
@@ -121,9 +123,15 @@ public class IdempotencyExecutor {
 
     private String fingerprint(String endpoint, String requestId, Object payload) {
         try {
-            String canonical = objectMapper.writeValueAsString(payload);
+            // 结构化信封：endpoint/requestId/payload 各自为独立 JSON 字段，
+            // 合法文本即使包含 "|" 等分隔符也无法跨字段伪造，指纹无歧义。
+            Map<String, Object> envelope = new LinkedHashMap<>();
+            envelope.put("endpoint", endpoint);
+            envelope.put("requestId", requestId);
+            envelope.put("payload", payload);
+            String canonical = objectMapper.writeValueAsString(envelope);
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest((endpoint + "|" + requestId + "|" + canonical).getBytes(StandardCharsets.UTF_8));
+            byte[] hash = digest.digest(canonical.getBytes(StandardCharsets.UTF_8));
             StringBuilder hex = new StringBuilder(hash.length * 2);
             for (byte b : hash) {
                 hex.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
