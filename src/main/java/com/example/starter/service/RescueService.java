@@ -94,6 +94,11 @@ public class RescueService {
         appendEvent(rescueId, "REPORTED", "接报困人", reportedAt);
         // 困人即停梯；已停梯（如维保锁定）则不重复落 RESCUE 停梯链
         elevatorService.stopIfRunning(ev, StopReason.RESCUE, rescueId, reportedAt);
+        // 接报救援：原子挂起该梯未完成维保尝试并释放人员，保留已做清单，不改变到期义务
+        jdbc.update("UPDATE maintenance_attempt SET status='SUSPENDED', suspended_at=?, suspend_rescue_id=?, "
+                        + "version=version+1 WHERE status='DISPATCHED' AND obligation_id IN "
+                        + "(SELECT id FROM maintenance_obligation WHERE elevator_id=? AND status='OPEN')",
+                ElevatorService.ts(reportedAt), rescueId, ev.id());
         // 90 日（UTC 日界）内第 2 次困人：强制停梯检查
         LocalDate windowStart = day.minusDays(INCIDENT_WINDOW_DAYS - 1);
         Integer incidents = jdbc.queryForObject(

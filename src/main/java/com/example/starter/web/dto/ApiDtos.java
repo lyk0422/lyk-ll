@@ -81,4 +81,55 @@ public final class ApiDtos {
     /** 救援时间线事件 */
     public record EventView(long id, String event, String detail, Instant createdAt) {
     }
+
+    /** 维保义务扫描请求；now 缺省取服务端 UTC 当前时间 */
+    public record PlanScanRequest(@NotBlank String requestId, @NotNull Long elevatorId, Instant now) {
+    }
+
+    /** 维保尝试派发请求：恰两名持证人员 + 半开作业窗 [windowStart, windowEnd) */
+    public record AttemptDispatchRequest(@NotBlank String requestId, @NotNull Long expectedVersion,
+                                         @NotEmpty List<Long> staffIds,
+                                         @NotNull Instant windowStart, @NotNull Instant windowEnd) {
+    }
+
+    /** 清单项回报请求；doneAt 缺省取服务端 UTC 当前时间 */
+    public record ChecklistRequest(@NotBlank String requestId, @NotNull Long expectedVersion,
+                                   @NotBlank String item, Instant doneAt) {
+    }
+
+    /** 完成确认请求：须双人共同确认；confirmedAt 缺省取服务端 UTC 当前时间 */
+    public record ConfirmRequest(@NotBlank String requestId, @NotNull Long expectedVersion,
+                                 @NotNull Long staffId, Instant confirmedAt) {
+    }
+
+    /** 维保履约义务视图 */
+    public record ObligationView(long id, long elevatorId, Long baseMaintenanceId, Instant dueAt,
+                                 String status, long version, Instant createdAt, Instant fulfilledAt) {
+    }
+
+    /** 维保履约尝试视图 */
+    public record AttemptView(long id, long obligationId, int attemptNo, String status,
+                              Instant windowStart, Instant windowEnd,
+                              int checklistTotal, int checklistDone,
+                              Instant suspendedAt, Long suspendRescueId, Instant completedAt,
+                              long version, Instant createdAt) {
+    }
+
+    /** 尝试人员确认条目 */
+    public record AttemptStaffView(long staffId, boolean confirmed, Instant confirmedAt) {
+    }
+
+    /** 清单项条目 */
+    public record ChecklistItemView(String item, boolean done, Instant doneAt) {
+    }
+
+    /** 尝试详情：含人员确认与清单轨迹 */
+    public record AttemptDetailView(AttemptView attempt, List<AttemptStaffView> staff,
+                                    List<ChecklistItemView> checklist) {
+    }
+
+    /** 扫描结果：created=false 表示尚未进入派发窗口（到期前 24 小时）未创建义务 */
+    public record ScanResultView(Long obligationId, long elevatorId, Instant dueAt, String status,
+                                 boolean created, Long version) {
+    }
 }

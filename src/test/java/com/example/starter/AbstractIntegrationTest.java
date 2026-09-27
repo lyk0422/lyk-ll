@@ -5,11 +5,15 @@ import java.time.LocalDate;
 import java.util.List;
 
 import com.example.starter.web.dto.ApiDtos.ArriveRequest;
+import com.example.starter.web.dto.ApiDtos.AttemptDispatchRequest;
+import com.example.starter.web.dto.ApiDtos.ChecklistRequest;
 import com.example.starter.web.dto.ApiDtos.CloseRequest;
+import com.example.starter.web.dto.ApiDtos.ConfirmRequest;
 import com.example.starter.web.dto.ApiDtos.DispatchRequest;
 import com.example.starter.web.dto.ApiDtos.ElevatorRecheckRequest;
 import com.example.starter.web.dto.ApiDtos.ElevatorRequest;
 import com.example.starter.web.dto.ApiDtos.MaintenanceRequest;
+import com.example.starter.web.dto.ApiDtos.PlanScanRequest;
 import com.example.starter.web.dto.ApiDtos.RecheckRequest;
 import com.example.starter.web.dto.ApiDtos.ReportRequest;
 import com.example.starter.web.dto.ApiDtos.RescueRequest;
@@ -63,6 +67,10 @@ public abstract class AbstractIntegrationTest {
         jdbc.update("DELETE FROM rescue_event");
         jdbc.update("DELETE FROM rescue_staff");
         jdbc.update("DELETE FROM stop_resume_chain");
+        jdbc.update("DELETE FROM maintenance_checklist_item");
+        jdbc.update("DELETE FROM maintenance_attempt_staff");
+        jdbc.update("DELETE FROM maintenance_attempt");
+        jdbc.update("DELETE FROM maintenance_obligation");
         jdbc.update("DELETE FROM maintenance_record");
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM rescue_order");
@@ -146,6 +154,42 @@ public abstract class AbstractIntegrationTest {
 
     protected Resp elevatorRecheck(long elevatorId, boolean passed) throws Exception {
         return postJson("/api/elevators/" + elevatorId + "/recheck", new ElevatorRecheckRequest(passed));
+    }
+
+    // ---------------------------------------------------------------- 维保计划编排辅助
+
+    protected Resp scan(String requestId, long elevatorId, Instant now) throws Exception {
+        return postJson("/api/maintenance/scan", new PlanScanRequest(requestId, elevatorId, now));
+    }
+
+    protected Resp dispatchAttempt(long obligationId, String requestId, long expectedVersion,
+                                   List<Long> staffIds, Instant windowStart, Instant windowEnd) throws Exception {
+        return postJson("/api/maintenance/obligations/" + obligationId + "/dispatch",
+                new AttemptDispatchRequest(requestId, expectedVersion, staffIds, windowStart, windowEnd));
+    }
+
+    protected Resp checklist(long attemptId, String requestId, long expectedVersion,
+                             String item, Instant doneAt) throws Exception {
+        return postJson("/api/maintenance/attempts/" + attemptId + "/checklist",
+                new ChecklistRequest(requestId, expectedVersion, item, doneAt));
+    }
+
+    protected Resp confirm(long attemptId, String requestId, long expectedVersion,
+                           long staffId, Instant confirmedAt) throws Exception {
+        return postJson("/api/maintenance/attempts/" + attemptId + "/confirm",
+                new ConfirmRequest(requestId, expectedVersion, staffId, confirmedAt));
+    }
+
+    protected Resp obligation(long obligationId) throws Exception {
+        return getJson("/api/maintenance/obligations/" + obligationId);
+    }
+
+    protected Resp attempts(long obligationId) throws Exception {
+        return getJson("/api/maintenance/obligations/" + obligationId + "/attempts");
+    }
+
+    protected Resp attemptDetail(long attemptId) throws Exception {
+        return getJson("/api/maintenance/attempts/" + attemptId);
     }
 
     /** 走完 接报→派单→到场→施救→复检→结案 全流程，返回救援单 ID。 */
