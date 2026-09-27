@@ -114,4 +114,18 @@ public class LevelReadingRepository {
                         rs.getBigDecimal("level")),
                 pumpdownId);
     }
+
+    /** 某站最新一条液位（跨预降事件），用于强排启泵时不放宽预降目标/安全下限；无数据返回空表。 */
+    public List<ReplayResult.LevelPoint> loadCurveLatestOfStation(String stationCode) {
+        return jdbc.query(
+                """
+                SELECT station_code, reading_time, level FROM level_reading
+                WHERE station_code = ? ORDER BY reading_time DESC, id DESC LIMIT 1
+                """,
+                (rs, n) -> new ReplayResult.LevelPoint(
+                        rs.getString("station_code"),
+                        rs.getObject("reading_time", LocalDateTime.class),
+                        rs.getBigDecimal("level")),
+                stationCode);
+    }
 }

@@ -3,11 +3,20 @@ package com.example.starter.pump.web;
 import com.example.starter.pump.service.PumpdownFacade;
 import com.example.starter.pump.web.dto.ArchiveRequest;
 import com.example.starter.pump.web.dto.ArchiveResult;
+import com.example.starter.pump.web.dto.CandidateConfirmRequest;
+import com.example.starter.pump.web.dto.CandidateConfirmResult;
+import com.example.starter.pump.web.dto.GateReceiptRequest;
+import com.example.starter.pump.web.dto.GateReceiptResult;
 import com.example.starter.pump.web.dto.LevelIngestRequest;
 import com.example.starter.pump.web.dto.LevelIngestResult;
 import com.example.starter.pump.web.dto.PumpCommandRequest;
 import com.example.starter.pump.web.dto.PumpCommandResult;
 import com.example.starter.pump.web.dto.ReplayResult;
+import com.example.starter.pump.web.dto.StrongDrainView;
+import com.example.starter.pump.web.dto.TideConfigRequest;
+import com.example.starter.pump.web.dto.TideConfigResult;
+import com.example.starter.pump.web.dto.TideReadingRequest;
+import com.example.starter.pump.web.dto.TideReadingResult;
 import com.example.starter.pump.web.dto.WarningRequest;
 import com.example.starter.pump.web.dto.WarningResult;
 import jakarta.validation.Valid;
@@ -65,5 +74,41 @@ public class PumpController {
     @GetMapping("/pumpdowns/{id}/replay")
     public ReplayResult replay(@PathVariable Long id) {
         return facade.replay(id);
+    }
+
+    // ============ 潮汐顶托工况切换与强排联锁（合成，新增） ============
+
+    /** 新增/修改分区潮汐控制配置（版本从1开始，成功变更加1）。 */
+    @PostMapping("/tide/configs")
+    @ResponseStatus(HttpStatus.OK)
+    public TideConfigResult tideConfig(@Valid @RequestBody TideConfigRequest request) {
+        return facade.handleTideConfig(request);
+    }
+
+    /** 潮位上送：按UTC时刻唯一，跨门槛生成强排候选。 */
+    @PostMapping("/tide/readings")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public TideReadingResult tideReading(@Valid @RequestBody TideReadingRequest request) {
+        return facade.handleTideReading(request);
+    }
+
+    /** 闸门合成到位回执：只归所报候选序列。 */
+    @PostMapping("/tide/gate-receipts")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public GateReceiptResult gateReceipt(@Valid @RequestBody GateReceiptRequest request) {
+        return facade.handleGateReceipt(request);
+    }
+
+    /** 候选确认：事务内联锁原子切换，任一不到位零切换。 */
+    @PostMapping("/tide/candidate-confirmations")
+    @ResponseStatus(HttpStatus.OK)
+    public CandidateConfirmResult confirmCandidate(@Valid @RequestBody CandidateConfirmRequest request) {
+        return facade.handleCandidateConfirm(request);
+    }
+
+    /** 潮位、候选确认及工况轨迹查询；未配置潮汐控制的分区 configured=false、保持原行为。 */
+    @GetMapping("/zones/{zoneCode}/tide")
+    public StrongDrainView tideView(@PathVariable String zoneCode) {
+        return facade.tideView(zoneCode);
     }
 }

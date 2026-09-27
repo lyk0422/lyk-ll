@@ -39,4 +39,39 @@ class FingerprintsTest {
     void nullAndEmptyAreStable() {
         assertThat(Fingerprints.sha256("r", null)).isEqualTo(Fingerprints.sha256("r", (Object) null));
     }
+
+    @Test
+    void structured_samePartsSameFingerprint() {
+        String a = Fingerprints.structured("TIDE_READING", "req-1", "ZN",
+                java.math.BigDecimal.ONE, 1);
+        String b = Fingerprints.structured("TIDE_READING", "req-1", "ZN",
+                java.math.BigDecimal.ONE, 1);
+        assertThat(a).isEqualTo(b).hasSize(64);
+    }
+
+    @Test
+    void structured_textContainingDelimitersCannotForgeFieldBoundary() {
+        // 朴素 '|' 拼接下两组都规范化为 a|b|c 会碰撞；长度前缀编码按字段边界区分，不会碰撞
+        String merged = Fingerprints.structured("a|b", "c");
+        String split = Fingerprints.structured("a", "b|c");
+        assertThat(merged).isNotEqualTo(split);
+    }
+
+    @Test
+    void structured_anyFieldOrVersionChange_differs() {
+        String base = Fingerprints.structured("CANDIDATE_CONFIRM", "req", 10L, 1, t);
+        assertThat(Fingerprints.structured("CANDIDATE_CONFIRM", "req", 10L, 2, t))
+                .isNotEqualTo(base);
+        assertThat(Fingerprints.structured("CANDIDATE_CONFIRM", "req", 11L, 1, t))
+                .isNotEqualTo(base);
+        assertThat(Fingerprints.structured("CANDIDATE_CONFIRM", "req2", 10L, 1, t))
+                .isNotEqualTo(base);
+    }
+
+    @Test
+    void structured_numberScaleIsCanonical() {
+        // 1.0 与 1.00 数值相等，规范化为同一串，保证同参同指纹
+        assertThat(Fingerprints.structured(new java.math.BigDecimal("1.0")))
+                .isEqualTo(Fingerprints.structured(new java.math.BigDecimal("1.00")));
+    }
 }
