@@ -34,6 +34,44 @@ public class IdempotencyService {
     private record Stored(int status, String fingerprint, String body) {
     }
 
+    /** 业务动作结果：携带冻结的 HTTP 状态与将被序列化的报文对象。 */
+    public record TryResult(int status, Object body) {
+        public static TryResult ok(Object body) {
+            return new TryResult(200, body);
+        }
+    }
+
+    /**
+     * 与 {@link #handle} 相同的同键仲裁，但允许业务动作以非 200 状态冻结结果；
+     * 业务抛出 {@link ApiException}（400/404/422/409 等）时事务回滚且不写受理记录（失败不占键）。
+     */
+    public ResponseEntity<String> handleResult(String scope, String requestId, String fingerprint,
+                                               Supplier<TryResult> business) {
+        Stored existing = find(scope, requestId);
+        if (existing != null) {
+            return replay(existing, fingerprint);
+        }
+        try {
+            return tx.execute(status -> {
+                TryResult result = business.get();
+                String body = toJson(result.body());
+                jdbc.update("INSERT INTO idempotency_record(scope, request_id, fingerprint, response_status, response_body) "
+                                + "VALUES (?,?,?,?,?)",
+                        scope, requestId, fingerprint, result.status(), body);
+                return ResponseEntity.status(result.status())
+                        .contentType(MediaType.APPLICATION_JSON).body(body);
+            });
+        } catch (DuplicateKeyException e) {
+            // 并发同键：本事务已回滚，回读胜出方的首次结果
+            Stored winner = find(scope, requestId);
+            if (winner != null) {
+                return replay(winner, fingerprint);
+            }
+            // 非幂等键唯一约束冲突（如电梯进行中救援占坑位、同周期义务唯一）
+            throw ApiException.conflict("STATE_CONFLICT", "并发请求冲突：重复提交或唯一资源竞争");
+        }
+    }
+
     /**
      * 在单事务内执行业务动作并落幂等记录；返回首次结果的 JSON 报文。
      *

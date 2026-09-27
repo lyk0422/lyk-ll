@@ -5,11 +5,16 @@ import java.time.LocalDate;
 import java.util.List;
 
 import com.example.starter.web.dto.ApiDtos.ArriveRequest;
+import com.example.starter.web.dto.ApiDtos.AttemptCompleteRequest;
+import com.example.starter.web.dto.ApiDtos.AttemptItemRequest;
 import com.example.starter.web.dto.ApiDtos.CloseRequest;
 import com.example.starter.web.dto.ApiDtos.DispatchRequest;
 import com.example.starter.web.dto.ApiDtos.ElevatorRecheckRequest;
 import com.example.starter.web.dto.ApiDtos.ElevatorRequest;
+import com.example.starter.web.dto.ApiDtos.MaintenanceItemInput;
 import com.example.starter.web.dto.ApiDtos.MaintenanceRequest;
+import com.example.starter.web.dto.ApiDtos.PlanAttemptRequest;
+import com.example.starter.web.dto.ApiDtos.PlanScanRequest;
 import com.example.starter.web.dto.ApiDtos.RecheckRequest;
 import com.example.starter.web.dto.ApiDtos.ReportRequest;
 import com.example.starter.web.dto.ApiDtos.RescueRequest;
@@ -63,6 +68,11 @@ public abstract class AbstractIntegrationTest {
         jdbc.update("DELETE FROM rescue_event");
         jdbc.update("DELETE FROM rescue_staff");
         jdbc.update("DELETE FROM stop_resume_chain");
+        jdbc.update("DELETE FROM maintenance_attempt_event");
+        jdbc.update("DELETE FROM maintenance_attempt_item");
+        jdbc.update("DELETE FROM maintenance_attempt_staff");
+        jdbc.update("DELETE FROM maintenance_attempt");
+        jdbc.update("DELETE FROM maintenance_obligation");
         jdbc.update("DELETE FROM maintenance_record");
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM rescue_order");
@@ -146,6 +156,57 @@ public abstract class AbstractIntegrationTest {
 
     protected Resp elevatorRecheck(long elevatorId, boolean passed) throws Exception {
         return postJson("/api/elevators/" + elevatorId + "/recheck", new ElevatorRecheckRequest(passed));
+    }
+
+    // ------------------------------------------------- 周期维保计划辅助
+
+    protected Resp planScan(String requestId, Instant at) throws Exception {
+        return postJson("/api/maintenance-plans/scan", new PlanScanRequest(requestId, at));
+    }
+
+    protected long firstObligationId(long elevatorId) throws Exception {
+        Resp r = getJson("/api/maintenance-plans?elevatorId=" + elevatorId);
+        assert r.status() == 200 : "query obligations failed: " + r.status();
+        return r.body().get(0).get("id").asLong();
+    }
+
+    protected Resp planDispatch(String requestId, long elevatorId, Long obligationId, List<Long> staff,
+                                List<MaintenanceItemInput> checklist, Instant windowStart,
+                                Instant windowEnd, Instant startedAt) throws Exception {
+        return postJson("/api/maintenance-plans/attempts", new PlanAttemptRequest(
+                requestId, elevatorId, obligationId, staff, checklist, windowStart, windowEnd, startedAt));
+    }
+
+    protected Resp reportItem(long attemptId, String requestId, String code, boolean done,
+                              int expectedVersion, Instant at) throws Exception {
+        return postJson("/api/maintenance-plans/attempts/" + attemptId + "/items",
+                new AttemptItemRequest(requestId, code, done, expectedVersion, at));
+    }
+
+    protected Resp planComplete(long attemptId, String requestId, List<Long> staff,
+                                int expectedVersion, Instant at) throws Exception {
+        return postJson("/api/maintenance-plans/attempts/" + attemptId + "/complete",
+                new AttemptCompleteRequest(requestId, staff, expectedVersion, at));
+    }
+
+    protected Resp planAttempt(long attemptId) throws Exception {
+        return getJson("/api/maintenance-plans/attempts/" + attemptId);
+    }
+
+    protected Resp planObligation(long obligationId) throws Exception {
+        return getJson("/api/maintenance-plans/obligations/" + obligationId);
+    }
+
+    protected Resp planAttemptsOf(long obligationId) throws Exception {
+        return getJson("/api/maintenance-plans/obligations/" + obligationId + "/attempts");
+    }
+
+    protected Resp planTimeline(long attemptId) throws Exception {
+        return getJson("/api/maintenance-plans/attempts/" + attemptId + "/timeline");
+    }
+
+    protected List<MaintenanceItemInput> twoItems() {
+        return List.of(new MaintenanceItemInput("I-1", "轿门检查"), new MaintenanceItemInput("I-2", "制动器检查"));
     }
 
     /** 走完 接报→派单→到场→施救→复检→结案 全流程，返回救援单 ID。 */

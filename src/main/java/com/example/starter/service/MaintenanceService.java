@@ -33,13 +33,16 @@ public class MaintenanceService {
     private final JdbcTemplate jdbc;
     private final ElevatorService elevatorService;
     private final IdempotencyService idempotency;
+    private final MaintenancePlanService maintenancePlanService;
     private final Clock clock;
 
     public MaintenanceService(JdbcTemplate jdbc, ElevatorService elevatorService,
-                              IdempotencyService idempotency, Clock clock) {
+                              IdempotencyService idempotency, MaintenancePlanService maintenancePlanService,
+                              Clock clock) {
         this.jdbc = jdbc;
         this.elevatorService = elevatorService;
         this.idempotency = idempotency;
+        this.maintenancePlanService = maintenancePlanService;
         this.clock = clock;
     }
 
@@ -76,6 +79,8 @@ public class MaintenanceService {
             jdbc.update("UPDATE elevator SET key_supervision=TRUE, last_maintenance_day=? WHERE id=?",
                     performedDay, ev.id());
             MaintenanceView v = insertRecord(ev.id(), req, dueDay, MaintenanceResult.OVERDUE, req.note());
+            // 旧手工有效维保结清对应的未完成周期义务一次（残留尝试终止）
+            maintenancePlanService.settleByManualMaintenance(ev.id(), performedDay, dueDay, Instant.now(clock));
             boolean alreadyLocked = elevatorService.openStops(ev.id()).stream()
                     .anyMatch(s -> StopReason.MAINTENANCE_OVERDUE.name().equals(s.reason()));
             if (!alreadyLocked) {
@@ -91,7 +96,10 @@ public class MaintenanceService {
         }
         // 周期内（含恰第 15 日）：合规
         jdbc.update("UPDATE elevator SET last_maintenance_day=? WHERE id=?", performedDay, ev.id());
-        return insertRecord(ev.id(), req, dueDay, MaintenanceResult.COMPLIANT, req.note());
+        MaintenanceView compliant = insertRecord(ev.id(), req, dueDay, MaintenanceResult.COMPLIANT, req.note());
+        // 旧手工有效维保结清对应的未完成周期义务一次（残留尝试终止）
+        maintenancePlanService.settleByManualMaintenance(ev.id(), performedDay, dueDay, Instant.now(clock));
+        return compliant;
     }
 
     private MaintenanceView insertRecord(long elevatorId, MaintenanceRequest req, LocalDate dueDay,

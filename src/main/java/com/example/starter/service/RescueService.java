@@ -55,13 +55,16 @@ public class RescueService {
     private final JdbcTemplate jdbc;
     private final ElevatorService elevatorService;
     private final IdempotencyService idempotency;
+    private final MaintenancePlanService maintenancePlanService;
     private final Clock clock;
 
     public RescueService(JdbcTemplate jdbc, ElevatorService elevatorService,
-                         IdempotencyService idempotency, Clock clock) {
+                         IdempotencyService idempotency, MaintenancePlanService maintenancePlanService,
+                         Clock clock) {
         this.jdbc = jdbc;
         this.elevatorService = elevatorService;
         this.idempotency = idempotency;
+        this.maintenancePlanService = maintenancePlanService;
         this.clock = clock;
     }
 
@@ -92,6 +95,8 @@ public class RescueService {
                 day, ev.id(), ElevatorService.ts(Instant.now(clock)));
         long rescueId = jdbc.queryForObject("SELECT id FROM rescue_order WHERE request_id=?", Long.class, req.requestId());
         appendEvent(rescueId, "REPORTED", "接报困人", reportedAt);
+        // 原子挂起该电梯未完成维保尝试并释放人员（保留清单，不改变到期义务）
+        maintenancePlanService.suspendForRescue(ev.id(), rescueId, reportedAt);
         // 困人即停梯；已停梯（如维保锁定）则不重复落 RESCUE 停梯链
         elevatorService.stopIfRunning(ev, StopReason.RESCUE, rescueId, reportedAt);
         // 90 日（UTC 日界）内第 2 次困人：强制停梯检查

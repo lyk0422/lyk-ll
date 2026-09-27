@@ -7,6 +7,7 @@ import java.util.List;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 
 /**
  * API 请求/响应报文。时间均为 UTC；日期为 UTC 日界。
@@ -80,5 +81,56 @@ public final class ApiDtos {
 
     /** 救援时间线事件 */
     public record EventView(long id, String event, String detail, Instant createdAt) {
+    }
+
+    // ------------------------------------------------- 周期维保计划与履约续派
+
+    /** 维保清单项输入（合成文本，允许含分隔符） */
+    public record MaintenanceItemInput(@NotBlank String code, String name) {
+    }
+
+    /** 周期扫描请求；at 缺省取服务端 UTC 当前时间 */
+    public record PlanScanRequest(String requestId, Instant at) {
+    }
+
+    /** 派发履约尝试：两名人员、半开作业窗、完整清单与精确时刻；obligationId 用于续派指定义务，缺省取最新到期义务 */
+    public record PlanAttemptRequest(@NotBlank String requestId, @NotNull Long elevatorId,
+                                     Long obligationId,
+                                     @NotNull @Size(min = 1) List<Long> staffIds,
+                                     @NotNull @Size(min = 1) List<MaintenanceItemInput> checklist,
+                                     @NotNull Instant windowStart, @NotNull Instant windowEnd,
+                                     Instant startedAt) {
+    }
+
+    /** 清单完成回报：携带尝试 expectedVersion 与精确时刻 */
+    public record AttemptItemRequest(@NotBlank String requestId, @NotBlank String itemCode,
+                                     @NotNull Boolean done, @NotNull Integer expectedVersion, Instant at) {
+    }
+
+    /** 双人共同确认完成：携带尝试 expectedVersion、确认双人集合与精确时刻 */
+    public record AttemptCompleteRequest(@NotBlank String requestId,
+                                         @NotNull @Size(min = 1) List<Long> staffIds,
+                                         @NotNull Integer expectedVersion, Instant completedAt) {
+    }
+
+    /** 履约义务视图 */
+    public record ObligationView(long id, long elevatorId, LocalDate baseDay, Instant dueAt,
+                                 String status, String settleSource, Long completedAttemptId,
+                                 int version, Instant createdAt, Instant updatedAt) {
+    }
+
+    /** 维保清单项视图 */
+    public record MaintenanceItemView(String code, String name, boolean done, Instant doneAt) {
+    }
+
+    /** 履约尝试视图 */
+    public record AttemptView(long id, long obligationId, long elevatorId, String requestId,
+                              String status, Instant windowStart, Instant windowEnd, Long rescueId,
+                              Instant startedAt, Instant suspendedAt, Instant completedAt, int version,
+                              List<Long> assignedStaffIds, List<MaintenanceItemView> items) {
+    }
+
+    /** 尝试轨迹事件视图 */
+    public record AttemptEventView(long id, long attemptId, String event, String detail, Instant createdAt) {
     }
 }
