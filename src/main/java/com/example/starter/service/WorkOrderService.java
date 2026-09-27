@@ -29,11 +29,14 @@ public class WorkOrderService {
     private final JdbcTemplate jdbc;
     private final WorkOrderStore store;
     private final EscalationService escalation;
+    private final GeneratorDispatchService generatorDispatches;
 
-    public WorkOrderService(JdbcTemplate jdbc, WorkOrderStore store, EscalationService escalation) {
+    public WorkOrderService(JdbcTemplate jdbc, WorkOrderStore store, EscalationService escalation,
+            GeneratorDispatchService generatorDispatches) {
         this.jdbc = jdbc;
         this.store = store;
         this.escalation = escalation;
+        this.generatorDispatches = generatorDispatches;
     }
 
     /**
@@ -66,9 +69,11 @@ public class WorkOrderService {
         long newId = store.insertOrder(feeder, faultPoint, affected, level, "PENDING", outageStart);
         store.addEvent(newId, "CREATED_BY_MERGE", "由工单" + ids + "合并生成");
         for (WorkOrderRow source : sources) {
-            jdbc.update("UPDATE work_order SET status = 'MERGED', merged_into_id = ? WHERE id = ?",
-                    newId, source.id());
+            jdbc.update("UPDATE work_order SET status = 'MERGED', merged_into_id = ?, version = version + 1"
+                    + " WHERE id = ?", newId, source.id());
             store.addEvent(source.id(), "MERGED", "合并至工单" + newId);
+            // 工单合并：原子撤销未结束发电车调度并释放车辆，保留供电证据
+            generatorDispatches.cancelForWorkOrder(source.id(), "工单合并至" + newId + ", 撤销未结束发电车调度");
         }
         return new MergeResponse(newId, ids);
     }
@@ -85,7 +90,7 @@ public class WorkOrderService {
         if (!"RESTORED".equals(order.status())) {
             throw new ConflictException("仅已复电工单可日结封存: " + order.status());
         }
-        jdbc.update("UPDATE work_order SET status = 'SEALED' WHERE id = ?", workOrderId);
+        jdbc.update("UPDATE work_order SET status = 'SEALED', version = version + 1 WHERE id = ?", workOrderId);
         store.addEvent(workOrderId, "SEALED", "日结封存");
         return new SealResponse(workOrderId, "SEALED", false);
     }
@@ -100,7 +105,7 @@ public class WorkOrderService {
         return new WorkOrderView(order.id(), order.feederId(), order.faultPoint(), order.affectedUsers(),
                 order.importantLevel(), order.status(), order.teamId(), order.outageStartAt(),
                 order.restoredAt(), order.mergedIntoId(), escalation.generatorStartedAt(workOrderId),
-                store.listEvents(workOrderId));
+                order.version(), store.listEvents(workOrderId));
     }
 
     /**

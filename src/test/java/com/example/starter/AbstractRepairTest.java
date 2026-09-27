@@ -26,6 +26,11 @@ public abstract class AbstractRepairTest {
 
     @BeforeEach
     void cleanBusinessData() {
+        jdbc.update("DELETE FROM generator_dispatch_event");
+        jdbc.update("DELETE FROM generator_dispatch_load");
+        jdbc.update("DELETE FROM generator_dispatch_truck");
+        jdbc.update("DELETE FROM generator_dispatch");
+        jdbc.update("DELETE FROM generator_idempotency");
         jdbc.update("DELETE FROM late_report_event");
         jdbc.update("DELETE FROM generator_event");
         jdbc.update("DELETE FROM load_recovery");
@@ -49,6 +54,13 @@ public abstract class AbstractRepairTest {
      */
     protected long teamId(String name) {
         return jdbc.queryForObject("SELECT id FROM repair_team WHERE name = ?", Long.class, name);
+    }
+
+    /**
+     * 按发电车编号查询车辆ID。
+     */
+    protected long truckId(String code) {
+        return jdbc.queryForObject("SELECT id FROM generator_truck WHERE truck_code = ?", Long.class, code);
     }
 
     /**

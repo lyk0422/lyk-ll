@@ -73,8 +73,8 @@ public class FaultReportService {
             // 重复接报：归并到首报工单，累计影响用户数
             workOrderId = prior.get()[1];
             merged = true;
-            jdbc.update("UPDATE work_order SET affected_users = affected_users + ? WHERE id = ?",
-                    req.affectedUsers(), workOrderId);
+            jdbc.update("UPDATE work_order SET affected_users = affected_users + ?, version = version + 1"
+                    + " WHERE id = ?", req.affectedUsers(), workOrderId);
             store.addEvent(workOrderId, "REPORTED",
                     "归并接报, 新增影响用户" + req.affectedUsers() + "户");
             reportId = insertReport(req, fingerprint, level, reportedAt, dedupKey, prior.get()[0], workOrderId);

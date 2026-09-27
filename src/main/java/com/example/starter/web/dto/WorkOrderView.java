@@ -17,6 +17,7 @@ import java.util.List;
  * @param restoredAt        复电时间，空表示未复电
  * @param mergedIntoId      合并目标工单ID，空表示未被合并
  * @param generatorStartedAt 发电车流程启动时间，空表示未启动
+ * @param version           工单版本，从1开始，成功变更加1
  * @param events            状态轨迹事件（按时间升序）
  */
 public record WorkOrderView(
@@ -31,5 +32,6 @@ public record WorkOrderView(
         LocalDateTime restoredAt,
         Long mergedIntoId,
         LocalDateTime generatorStartedAt,
+        int version,
         List<String> events) {
 }

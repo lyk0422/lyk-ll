@@ -54,7 +54,8 @@ public class WorkOrderStore {
                 team,
                 rs.getTimestamp("outage_start_at").toLocalDateTime(),
                 restored == null ? null : restored.toLocalDateTime(),
-                merged);
+                merged,
+                rs.getInt("version"));
     }
 
     /**

@@ -66,13 +66,13 @@ public class DispatchService {
         int executing = countExecuting(req.teamId());
         String result;
         if (executing == 0) {
-            jdbc.update("UPDATE work_order SET status = 'EXECUTING', team_id = ?, executing_team_id = ?"
-                    + " WHERE id = ?", req.teamId(), req.teamId(), req.workOrderId());
+            jdbc.update("UPDATE work_order SET status = 'EXECUTING', team_id = ?, executing_team_id = ?,"
+                    + " version = version + 1 WHERE id = ?", req.teamId(), req.teamId(), req.workOrderId());
             store.addEvent(req.workOrderId(), "DISPATCHED", "派单至班组" + req.teamId());
             result = "DISPATCHED";
         } else {
-            jdbc.update("UPDATE work_order SET status = 'QUEUED', team_id = ? WHERE id = ?",
-                    req.teamId(), req.workOrderId());
+            jdbc.update("UPDATE work_order SET status = 'QUEUED', team_id = ?, version = version + 1"
+                    + " WHERE id = ?", req.teamId(), req.workOrderId());
             store.addEvent(req.workOrderId(), "QUEUED", "班组" + req.teamId() + "资源冲突, 挂单等待");
             result = "QUEUED";
         }

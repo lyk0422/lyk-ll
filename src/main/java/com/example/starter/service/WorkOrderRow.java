@@ -15,6 +15,7 @@ import java.time.LocalDateTime;
  * @param outageStartAt    停电开始时间
  * @param restoredAt       复电时间，空表示未复电
  * @param mergedIntoId     合并目标工单ID，空表示未被合并
+ * @param version          工单版本，从1开始，成功变更加1
  */
 public record WorkOrderRow(
         long id,
@@ -26,5 +27,6 @@ public record WorkOrderRow(
         Long teamId,
         LocalDateTime outageStartAt,
         LocalDateTime restoredAt,
-        Long mergedIntoId) {
+        Long mergedIntoId,
+        int version) {
 }
