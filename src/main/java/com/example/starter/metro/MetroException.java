@@ -35,4 +35,9 @@ public class MetroException extends RuntimeException {
     public static MetroException badRequest(String code, String message) {
         return new MetroException(HttpStatus.BAD_REQUEST, code, message);
     }
+
+    /** 422 业务拒绝（语义可识别但当前业务状态不允许）。 */
+    public static MetroException unprocessable(String code, String message) {
+        return new MetroException(HttpStatus.UNPROCESSABLE_ENTITY, code, message);
+    }
 }
