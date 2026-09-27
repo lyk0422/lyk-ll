@@ -39,14 +39,22 @@ public abstract class AbstractIntegrationTest {
     protected DiveEventRepository eventRepository;
     @Autowired
     protected DiveService diveService;
+    @Autowired
+    protected com.example.starter.service.ControlledDiveService controlledDiveService;
 
     @BeforeEach
     void cleanBusinessTables() {
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM dive_event");
         jdbc.update("DELETE FROM speed_alert");
+        jdbc.update("DELETE FROM score_settlement");
         jdbc.update("DELETE FROM bottom_time_ledger");
+        jdbc.update("DELETE FROM dive_record_correction");
         jdbc.update("DELETE FROM dive_record");
+        jdbc.update("DELETE FROM controlled_plan_diver");
+        jdbc.update("DELETE FROM controlled_plan");
+        jdbc.update("DELETE FROM diver_dive_slot");
+        jdbc.update("DELETE FROM diver_score_account");
         jdbc.update("DELETE FROM dive_plan");
         jdbc.update("DELETE FROM dive");
     }

@@ -84,6 +84,33 @@ public final class Requests {
         return write(m, body);
     }
 
+    public static String controlledPlan(ObjectMapper m, String requestId, String diveRequestId,
+                                        int depth, int bottom, Instant at,
+                                        Map<String, Integer> expectedVersions) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("requestId", requestId);
+        body.put("diveRequestId", diveRequestId);
+        body.put("depthM", depth);
+        body.put("bottomMin", bottom);
+        body.put("at", at.toString());
+        body.put("expectedVersions", expectedVersions);
+        return write(m, body);
+    }
+
+    public static String correction(ObjectMapper m, String requestId, String diveRequestId,
+                                    String diver, int oldBottom, int newBottom, Instant correctedAt) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("requestId", requestId);
+        body.put("diveRequestId", diveRequestId);
+        body.put("diverCode", diver);
+        body.put("oldBottomMin", oldBottom);
+        body.put("newBottomMin", newBottom);
+        if (correctedAt != null) {
+            body.put("correctedAt", correctedAt.toString());
+        }
+        return write(m, body);
+    }
+
     private static String write(ObjectMapper m, Map<String, Object> body) {
         try {
             return m.writeValueAsString(body);

@@ -16,6 +16,7 @@ public record PlanRow(
         int ascentRateLimit,
         String profileJson,
         boolean frozen,
+        boolean scoreControlled,
         String fingerprint,
         Instant createdAtUtc) {
 }

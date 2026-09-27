@@ -56,11 +56,13 @@ public class DiveService {
     private final DiveEventRepository events;
     private final CatalogRepository catalog;
     private final IdempotencyService idempotency;
+    private final ControlledDiveService controlled;
     private final Clock clock;
 
     public DiveService(DiveRepository dives, PlanRepository plans, RecordRepository records,
                        AlertRepository alerts, DiveEventRepository events,
-                       CatalogRepository catalog, IdempotencyService idempotency, Clock clock) {
+                       CatalogRepository catalog, IdempotencyService idempotency,
+                       ControlledDiveService controlled, Clock clock) {
         this.dives = dives;
         this.plans = plans;
         this.records = records;
@@ -68,6 +70,7 @@ public class DiveService {
         this.events = events;
         this.catalog = catalog;
         this.idempotency = idempotency;
+        this.controlled = controlled;
         this.clock = clock;
     }
 
@@ -133,6 +136,11 @@ public class DiveService {
                     || "FROZEN".equals(latest.status())) {
                 throw new ApiException(409, "潜次已进入" + latest.status() + "阶段，减压方案不可变更");
             }
+            if (latest.currentPlanVersion() > 0
+                    && plans.getVersion(req.diveRequestId(), latest.currentPlanVersion())
+                            .scoreControlled()) {
+                throw new ApiException(422, "该潜次已启用反复潜水积分控制，旧减压方案入口不能改写受控方案");
+            }
             Instant now = Instant.now(clock);
             int newVersion = latest.currentPlanVersion() + 1;
             int frozenOld = 0;
@@ -152,7 +160,7 @@ public class DiveService {
                     }});
             plans.insert(new com.example.starter.dao.PlanRow(null, req.diveRequestId(),
                     newVersion, req.depthM(), req.bottomMin(), ndl, RATE_LIMIT, RATE_LIMIT,
-                    profileJson, false, planFingerprint, now));
+                    profileJson, false, false, planFingerprint, now));
             plans.bumpDiveVersion(req.diveRequestId(), newVersion, now);
 
             List<ApplyResult.Segment> segments = List.of(
@@ -236,6 +244,20 @@ public class DiveService {
                 } else {
                     speedAlert = settleSpeedPair(dive, plan,
                             records.getById(recordId), records.getById(peer.id()), now);
+                }
+                // 受控方案：成对下潜生效时重查来源未变并占用潜水员槽；成对水底时复核实际时长与积分上限
+                if (plan.scoreControlled()) {
+                    RecordRow mineRow = records.getById(recordId);
+                    RecordRow peerRow = records.getById(peer.id());
+                    if (Phase.DESCENT.name().equals(req.phase())) {
+                        controlled.onDescentPaired(dive, plan, mineRow, peerRow, now);
+                    } else if (Phase.BOTTOM.name().equals(req.phase())) {
+                        controlled.onBottomPaired(dive, plan, mineRow, peerRow, now);
+                    }
+                } else if (Phase.DESCENT.name().equals(req.phase())) {
+                    // 旧流程不建积分槽，但不得与占用该潜水员的受控潜次并发下潜
+                    controlled.onLegacyDescentPaired(dive, records.getById(recordId),
+                            records.getById(peer.id()));
                 }
                 dives.updateStatus(req.diveRequestId(), newStatus, now);
             }
@@ -335,6 +357,11 @@ public class DiveService {
             Instant surfacedAt = req.surfacedAt() != null ? req.surfacedAt() : Instant.now(clock);
             Instant now = Instant.now(clock);
             dives.markSurfaced(req.diveRequestId(), surfacedAt, "SURFACED", now);
+            // 受控方案：出水原子更新两人积分账、结算台账并释放潜水员占用槽（同一事务，失败整体回滚）
+            PlanRow currentPlan = plans.getVersion(req.diveRequestId(), latest.currentPlanVersion());
+            if (currentPlan.scoreControlled()) {
+                controlled.onSurface(latest, currentPlan, surfacedAt, now);
+            }
             Instant due = surfacedAt.plus(OBSERVATION);
             return IdempotencyService.FirstResult.ok(new ApplyResult.SurfaceResult(
                     req.diveRequestId(), surfacedAt.toString(), due.toString(), "SURFACED", false));
@@ -520,6 +547,8 @@ public class DiveService {
             ev.put("createdAtUtc", e.createdAtUtc().toString());
             return ev;
         }).toList());
+        // 反复潜水虚构积分控制（受控方案冻结项、出水结算、历史更正差异）
+        view.putAll(controlled.controlledRecompute(dive));
         return view;
     }
 

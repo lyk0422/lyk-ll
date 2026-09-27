@@ -25,6 +25,7 @@ public class PlanRepository {
             rs.getInt("ascent_rate_limit"),
             rs.getString("profile_json"),
             rs.getBoolean("frozen"),
+            rs.getBoolean("score_controlled"),
             rs.getString("fingerprint"),
             rs.getTimestamp("created_at_utc").toInstant());
 
@@ -38,11 +39,11 @@ public class PlanRepository {
         return jdbc.update("INSERT INTO dive_plan "
                         + "(dive_request_id, version, depth_m, bottom_min, ndl_limit_min, "
                         + "descent_rate_limit, ascent_rate_limit, profile_json, frozen, "
-                        + "fingerprint, created_at_utc) "
-                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        + "score_controlled, fingerprint, created_at_utc) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 row.diveRequestId(), row.version(), row.depthM(), row.bottomMin(),
                 row.ndlLimitMin(), row.descentRateLimit(), row.ascentRateLimit(),
-                row.profileJson(), row.frozen(), row.fingerprint(),
+                row.profileJson(), row.frozen(), row.scoreControlled(), row.fingerprint(),
                 Timestamp.from(row.createdAtUtc()));
     }
 
