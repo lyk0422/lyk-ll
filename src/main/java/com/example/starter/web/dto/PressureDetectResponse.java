@@ -15,6 +15,8 @@ import java.math.BigDecimal;
  * @param injectionRateBeforeMgM3 调节前加注速率折算浓度 mg/m3
  * @param injectionRateAfterMgM3  调节后加注速率折算浓度 mg/m3
  * @param injectionDoseMg         本次按比例加注量 mg
+ * @param injectionDispatched     加注是否真实下发：锁阀或储罐可用量不足时为 false，
+ *                                此时加注量为 0、速率维持不变，不伪报加注成功
  * @param late                    TRUE 表示日结封存后迟到，仅记事件不联动
  * @param idempotentReplay        是否为同键同参重放
  */
@@ -27,12 +29,14 @@ public record PressureDetectResponse(
         BigDecimal injectionRateBeforeMgM3,
         BigDecimal injectionRateAfterMgM3,
         BigDecimal injectionDoseMg,
+        boolean injectionDispatched,
         boolean late,
         boolean idempotentReplay) implements Replayable<PressureDetectResponse> {
 
     @Override
     public PressureDetectResponse withReplay(boolean replay) {
         return new PressureDetectResponse(grade, accepted, taskId, pressureBeforeMpa, pressureAfterMpa,
-                injectionRateBeforeMgM3, injectionRateAfterMgM3, injectionDoseMg, late, replay);
+                injectionRateBeforeMgM3, injectionRateAfterMgM3, injectionDoseMg,
+                injectionDispatched, late, replay);
     }
 }

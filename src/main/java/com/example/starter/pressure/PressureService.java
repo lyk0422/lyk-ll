@@ -6,6 +6,7 @@ import com.example.starter.idempotent.ReplayResult;
 import com.example.starter.reading.LateEventRepository;
 import com.example.starter.station.Station;
 import com.example.starter.station.StationRepository;
+import com.example.starter.tank.TankService;
 import com.example.starter.valve.ValveState;
 import com.example.starter.valve.ValveStateRepository;
 import com.example.starter.web.ResourceNotFoundException;
@@ -29,6 +30,9 @@ import java.time.LocalDate;
  *       未受理方返回 409；</li>
  *   <li>PRESSURE 调压（回归目标压力）与 INJECTION 比例加注调整在同一事务下发，
  *       任一失败整体回滚；</li>
+ *   <li>门站绑定储罐时，加注量先经储罐可用量闸控：可用量−消耗不得低于安全储备
+ *       （恰等允许），不足时调压照常执行但加注不下发、加注量记 0、速率维持不变，
+ *       不伪报加注成功，并生成待补液事件；未绑定储罐的旧门站行为不变；</li>
  *   <li>对应业务日期已封存时只落迟到事件，不联动。</li>
  * </ul>
  */
@@ -44,6 +48,7 @@ public class PressureService {
     private final LinkageTaskRepository linkageTaskRepository;
     private final AdjustmentIssueRepository adjustmentIssueRepository;
     private final IdempotencyService idempotencyService;
+    private final TankService tankService;
 
     public PressureService(StationRepository stationRepository,
                            ValveStateRepository valveStateRepository,
@@ -53,7 +58,8 @@ public class PressureService {
                            StationTaskLockRepository taskLockRepository,
                            LinkageTaskRepository linkageTaskRepository,
                            AdjustmentIssueRepository adjustmentIssueRepository,
-                           IdempotencyService idempotencyService) {
+                           IdempotencyService idempotencyService,
+                           TankService tankService) {
         this.stationRepository = stationRepository;
         this.valveStateRepository = valveStateRepository;
         this.readingRepository = readingRepository;
@@ -63,6 +69,7 @@ public class PressureService {
         this.linkageTaskRepository = linkageTaskRepository;
         this.adjustmentIssueRepository = adjustmentIssueRepository;
         this.idempotencyService = idempotencyService;
+        this.tankService = tankService;
     }
 
     public PressureDetectResponse detect(PressureDetectRequest request) {
@@ -85,7 +92,7 @@ public class PressureService {
             lateEventRepository.insert(station.id(), "PRESSURE", request.requestId(),
                     request.detectedAt(), request);
             return new PressureDetectResponse(grade, false, null,
-                    measured, measured, null, null, BigDecimal.ZERO, true, false);
+                    measured, measured, null, null, BigDecimal.ZERO, false, true, false);
         }
 
         ValveState state = valveStateRepository.selectForUpdate(station.id());
@@ -97,7 +104,7 @@ public class PressureService {
             return new PressureDetectResponse(grade, false, null,
                     measured, measured,
                     state.currentInjectionRateMgM3(), state.currentInjectionRateMgM3(),
-                    BigDecimal.ZERO, false, false);
+                    BigDecimal.ZERO, false, false, false);
         }
 
         if (taskLockRepository.existsAtSameInstant(station.id(), request.detectedAt())) {
@@ -120,16 +127,27 @@ public class PressureService {
         BigDecimal rateBefore = state.currentInjectionRateMgM3();
         BigDecimal rateAfter;
         BigDecimal dose;
+        boolean injectionDispatched;
         if (state.injectionLocked()) {
             // 加注阀锁定中：加注指令以“维持、零加注量”下发，调压仍执行
             rateAfter = rateBefore;
             dose = BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP);
+            injectionDispatched = false;
         } else {
             // 比例投加：联动后速率折算浓度回归目标浓度，本次加注量 = 流量 × 目标浓度
             rateAfter = station.targetConcentrationMgM3();
             dose = request.gasFlowM3()
                     .multiply(station.targetConcentrationMgM3())
                     .setScale(3, RoundingMode.HALF_UP);
+            // 绑定储罐的门站：加注量（mg 折算 kg，三位小数）先经储罐可用量闸控
+            BigDecimal doseKg = dose.movePointLeft(6).setScale(3, RoundingMode.HALF_UP);
+            injectionDispatched = tankService.consumeForLinkage(station.id(), doseKg, taskId,
+                    request.requestId(), request.detectedAt());
+            if (!injectionDispatched) {
+                // 储罐可用量低于安全储备：调压照常，加注不下发、不伪报加注成功
+                rateAfter = rateBefore;
+                dose = BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP);
+            }
         }
 
         // 调压与加注调整同事务下发（两条指令 + 状态更新 + 任务完成原子提交）
@@ -141,7 +159,8 @@ public class PressureService {
                 measured, grade, taskId);
 
         return new PressureDetectResponse(grade, true, taskId,
-                measured, targetPressure, rateBefore, rateAfter, dose, false, false);
+                measured, targetPressure, rateBefore, rateAfter, dose,
+                injectionDispatched, false, false);
     }
 
     private String grade(Station station, BigDecimal measured) {

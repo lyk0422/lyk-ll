@@ -11,7 +11,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 统一错误响应：409 幂等冲突/任务未受理、404 资源不存在、400 参数非法。
+ * 统一错误响应：409 幂等冲突/任务未受理/版本冲突、404 资源不存在、
+ * 400 参数非法、422 业务拒绝。
  */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -24,6 +25,16 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(TaskNotAcceptedException.class)
     public ResponseEntity<Map<String, Object>> handleNotAccepted(TaskNotAcceptedException ex) {
         return build(HttpStatus.CONFLICT, ex.getMessage());
+    }
+
+    @ExceptionHandler(VersionConflictException.class)
+    public ResponseEntity<Map<String, Object>> handleVersionConflict(VersionConflictException ex) {
+        return build(HttpStatus.CONFLICT, ex.getMessage());
+    }
+
+    @ExceptionHandler(BusinessRejectedException.class)
+    public ResponseEntity<Map<String, Object>> handleBusinessRejected(BusinessRejectedException ex) {
+        return build(HttpStatus.UNPROCESSABLE_ENTITY, ex.getMessage());
     }
 
     @ExceptionHandler(ResourceNotFoundException.class)

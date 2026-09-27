@@ -34,4 +34,25 @@ public class StationRepository {
                                 rs.getBigDecimal("concentration_tolerance_pct"))) : Optional.empty(),
                         stationCode);
     }
+
+    /**
+     * 按主键读取门站配置（储罐补液许可区间判定使用）。
+     */
+    public Optional<Station> findById(Long id) {
+        return jdbc.query("""
+                        SELECT id, station_code, name, pressure_low_limit_mpa, pressure_high_limit_mpa,
+                               pressure_target_mpa, target_concentration_mg_m3, concentration_tolerance_pct
+                        FROM station WHERE id = ?
+                        """,
+                        rs -> rs.next() ? Optional.of(new Station(
+                                rs.getLong("id"),
+                                rs.getString("station_code"),
+                                rs.getString("name"),
+                                rs.getBigDecimal("pressure_low_limit_mpa"),
+                                rs.getBigDecimal("pressure_high_limit_mpa"),
+                                rs.getBigDecimal("pressure_target_mpa"),
+                                rs.getBigDecimal("target_concentration_mg_m3"),
+                                rs.getBigDecimal("concentration_tolerance_pct"))) : Optional.empty(),
+                        id);
+    }
 }
