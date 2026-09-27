@@ -78,4 +78,27 @@ public final class TestFixtures {
         return "{\"requestId\":\"%s\",\"declarationNo\":\"%s\",\"invoiceNo\":\"%s\",\"note\":\"%s\"}"
                 .formatted(requestId, decl, inv, note);
     }
+
+    public static String chargebackSubmit(String requestId, String declNo, String correctionNo,
+                                          String reason, long amountCents, String submitter) {
+        return """
+                {"requestId":"%s","declarationNo":"%s","correctionNo":"%s","reason":"%s",
+                 "amountCents":%d,"submitter":"%s"}
+                """.formatted(requestId, declNo, correctionNo, reason, amountCents, submitter);
+    }
+
+    public static String chargebackReview(String requestId, int expectedVersion,
+                                          String action, String reviewer) {
+        return """
+                {"requestId":"%s","expectedVersion":%d,"action":"%s","reviewer":"%s"}
+                """.formatted(requestId, expectedVersion, action, reviewer);
+    }
+
+    public static String receipt(String requestId, int expectedVersion, String serial,
+                                 long receivedCents, String receivedAt) {
+        return """
+                {"requestId":"%s","expectedVersion":%d,"receiptSerial":"%s",
+                 "receivedCents":%d,"receivedAt":"%s"}
+                """.formatted(requestId, expectedVersion, serial, receivedCents, receivedAt);
+    }
 }

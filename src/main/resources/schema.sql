@@ -169,3 +169,96 @@ CREATE TABLE t_idempotent_record (
     completed_at TIMESTAMP NULL
 );
 COMMENT ON TABLE t_idempotent_record IS 'requestId 幂等记录：指纹覆盖 requestId 与全部业务字段';
+
+-- 追缴明细独立编号序列
+CREATE SEQUENCE IF NOT EXISTS seq_clawback_no START WITH 1;
+
+-- 结案后分批冲回：余额登记按 批次+报关单 一行，批准时在同一事务内条件累加占用
+CREATE TABLE t_chargeback_balance (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    declaration_no VARCHAR(64) NOT NULL,
+    frozen_cents BIGINT NOT NULL,
+    occupied_cents BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_chargeback_balance_decl UNIQUE (batch_id, declaration_no)
+);
+COMMENT ON TABLE t_chargeback_balance IS '结案后冲回余额：每张已结案批次内报关单一行，占用额为已批准冲回累计（单位：整数分）';
+COMMENT ON COLUMN t_chargeback_balance.frozen_cents IS '冻结退税额（结案批次内该报关单校验明细计税依据×100 四舍五入到整数分，单位：分）';
+COMMENT ON COLUMN t_chargeback_balance.occupied_cents IS '已批准冲回累计占用额（整数分）；驳回与待复核不占额，占用恰等于冻结即余额归零';
+
+CREATE TABLE t_chargeback_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    check_detail_id BIGINT NOT NULL,
+    declaration_no VARCHAR(64) NOT NULL,
+    correction_no VARCHAR(64) NOT NULL,
+    reason CLOB NOT NULL,
+    amount_cents BIGINT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    submitter VARCHAR(64) NOT NULL,
+    reviewer VARCHAR(64),
+    version_no INT NOT NULL DEFAULT 1,
+    submitted_at TIMESTAMP NOT NULL,
+    reviewed_at TIMESTAMP NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_chargeback_batch_correction UNIQUE (batch_id, correction_no)
+);
+COMMENT ON TABLE t_chargeback_order IS '冲回单：只引用已结案批次内一张报关单及其冻结退税额，不改原文库版本、核销流水或结案总额；状态 PENDING/APPROVED/REJECTED';
+COMMENT ON COLUMN t_chargeback_order.check_detail_id IS '引用结案批次内该报关单的关联校验明细（冻结退税额来源），不修改原明细';
+COMMENT ON COLUMN t_chargeback_order.correction_no IS '唯一外部更正编号（同批次内唯一）';
+COMMENT ON COLUMN t_chargeback_order.reason IS '冲回原因（合法文本，可含任意分隔符）';
+COMMENT ON COLUMN t_chargeback_order.amount_cents IS '冲回金额（正数整数分）；累计批准不得超过冻结退税额，恰归零合法';
+COMMENT ON COLUMN t_chargeback_order.status IS 'PENDING 待复核 / APPROVED 批准（占用余额并产生追缴明细）/ REJECTED 驳回（不占额）';
+COMMENT ON COLUMN t_chargeback_order.version_no IS '乐观版本，从 1 开始，每次成功变更加 1；写操作须携带匹配的 expectedVersion';
+
+CREATE INDEX idx_chargeback_order_decl ON t_chargeback_order (batch_id, declaration_no);
+
+CREATE TABLE t_clawback_detail (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id BIGINT NOT NULL,
+    batch_id BIGINT NOT NULL,
+    clawback_no VARCHAR(64) NOT NULL,
+    approved_cents BIGINT NOT NULL,
+    collected_cents BIGINT NOT NULL DEFAULT 0,
+    status VARCHAR(16) NOT NULL,
+    version_no INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL,
+    completed_at TIMESTAMP NULL,
+    CONSTRAINT uk_clawback_order UNIQUE (order_id),
+    CONSTRAINT uk_clawback_no UNIQUE (clawback_no)
+);
+COMMENT ON TABLE t_clawback_detail IS '追缴明细：冲回单批准时在同一事务内产生的独立明细，一单一条，不回写原批次';
+COMMENT ON COLUMN t_clawback_detail.clawback_no IS '追缴明细独立编号';
+COMMENT ON COLUMN t_clawback_detail.approved_cents IS '批准追缴金额（整数分），批准后不随后续余额变化重算';
+COMMENT ON COLUMN t_clawback_detail.collected_cents IS '累计实际收回（整数分），允许多笔部分到账，不超批准金额';
+COMMENT ON COLUMN t_clawback_detail.status IS 'COLLECTING 追缴中 / COMPLETED 已收齐（恰收齐即完成，此后只读）';
+COMMENT ON COLUMN t_clawback_detail.version_no IS '乐观版本，从 1 开始，每笔成功回执加 1；回执须携带匹配的 expectedVersion';
+
+CREATE TABLE t_clawback_receipt (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    detail_id BIGINT NOT NULL,
+    order_id BIGINT NOT NULL,
+    receipt_serial VARCHAR(64) NOT NULL,
+    received_cents BIGINT NOT NULL,
+    received_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_receipt_serial UNIQUE (receipt_serial)
+);
+COMMENT ON TABLE t_clawback_receipt IS '追缴回执：独立流水号，可多笔部分到账；同流水异金额拒绝，乱序到账不改变总额';
+COMMENT ON COLUMN t_clawback_receipt.receipt_serial IS '追缴回执独立流水号（全局唯一）';
+COMMENT ON COLUMN t_clawback_receipt.received_cents IS '本笔实际收回金额（正数整数分）';
+COMMENT ON COLUMN t_clawback_receipt.received_at IS '回执业务时刻(UTC，精确时刻，来自请求)';
+
+-- 冲回新写操作的 requestId 幂等：占坑、业务变更与结果回写同事务提交，业务失败随事务回滚即释放键
+CREATE TABLE t_chargeback_request (
+    request_id VARCHAR(64) PRIMARY KEY,
+    op_type VARCHAR(40) NOT NULL,
+    fingerprint VARCHAR(64) NOT NULL,
+    response_status INT,
+    response_body CLOB,
+    created_at TIMESTAMP NOT NULL
+);
+COMMENT ON TABLE t_chargeback_request IS '冲回写操作 requestId 幂等记录：业务、版本与幂等结果同事务；失败回滚不占键，同键同参重放首次结果，异参 409';

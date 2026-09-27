@@ -23,6 +23,11 @@ import org.springframework.test.web.servlet.MvcResult;
 public abstract class BaseApiTest {
 
     private static final List<String> TABLES = List.of(
+            "t_chargeback_request",
+            "t_clawback_receipt",
+            "t_clawback_detail",
+            "t_chargeback_order",
+            "t_chargeback_balance",
             "t_idempotent_record",
             "t_late_event",
             "t_treasury_writeoff",
