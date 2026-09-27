@@ -30,6 +30,7 @@ import com.example.starter.api.dto.MergeLotsRequest;
 import com.example.starter.api.dto.RecipeItemInput;
 import com.example.starter.api.dto.ScheduleLotRequest;
 import com.example.starter.api.dto.WeighingInput;
+import com.example.starter.domain.CompensationStatus;
 import com.example.starter.domain.LotStatus;
 import com.example.starter.domain.RecipeStatus;
 import com.example.starter.domain.Verdict;
@@ -212,6 +213,17 @@ public class DyeService {
             if (((BigDecimal) source.get("liquor_ratio")).compareTo((BigDecimal) target.get("liquor_ratio")) != 0) {
                 throw new ApiException(HttpStatus.CONFLICT, "浴比不同拒绝并缸");
             }
+            // 受控缸次并缸：补偿批次与补偿目标须完全相同，否则拒绝。
+            List<Map<String, Object>> sourceComp = activeCompensationSnapshot((Long) source.get("id"));
+            List<Map<String, Object>> targetComp = activeCompensationSnapshot((Long) target.get("id"));
+            if ((sourceComp == null) != (targetComp == null)) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "一方有生效中的补偿批准而另一方没有，拒绝并缸");
+            }
+            if (sourceComp != null && !sourceComp.equals(targetComp)) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "补偿批次与补偿目标不完全相同，拒绝并缸");
+            }
             Timestamp now = nowTs();
             BigDecimal combinedWeight = ((BigDecimal) source.get("fabric_weight_kg"))
                     .add((BigDecimal) target.get("fabric_weight_kg"));
@@ -254,6 +266,12 @@ public class DyeService {
         return idempotency.execute(req.requestId(), "FEED", payload, () -> {
             Map<String, Object> lot = requireLot(req.lotNo());
             requireStatus(lot, LotStatus.CREATED);
+            Integer controlled = jdbc.query("SELECT 1 FROM compensation WHERE lot_id = ? AND status = ?",
+                    rs -> rs.next() ? 1 : null, lot.get("id"), CompensationStatus.ACTIVE.name());
+            if (controlled != null) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "缸次 " + req.lotNo() + " 存在生效中的补偿批准，须走受控投料 /api/controlled-feedings");
+            }
 
             Long versionRecipeId = recipeId((String) lot.get("recipe_code"),
                     ((Number) lot.get("recipe_version")).intValue());
@@ -702,6 +720,30 @@ public class DyeService {
             case REPAIR -> "缸差超过 0.5，须回修（仅允许一次）";
             case DOWNGRADE -> "回修后缸差仍超过 0.5，转降级处置";
         };
+    }
+
+    /**
+     * 缸次生效中补偿批准的冻结快照（染料/批次/系数/补偿目标有序列表）；无批准返回 null。
+     */
+    private List<Map<String, Object>> activeCompensationSnapshot(Long lotId) {
+        List<Long> ids = jdbc.query("SELECT id FROM compensation WHERE lot_id = ? AND status = ?",
+                (rs, rowNum) -> rs.getLong(1), lotId, CompensationStatus.ACTIVE.name());
+        if (ids.isEmpty()) {
+            return null;
+        }
+        List<Map<String, Object>> snapshot = new ArrayList<>();
+        jdbc.query("SELECT dye_code, batch_no, potency, compensated_target_g FROM compensation_item "
+                        + "WHERE compensation_id = ? ORDER BY dye_code",
+                rs -> {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("dyeCode", rs.getString("dye_code"));
+                    row.put("batchNo", rs.getString("batch_no"));
+                    row.put("potency", rs.getBigDecimal("potency").stripTrailingZeros().toPlainString());
+                    row.put("compensatedTargetG",
+                            rs.getBigDecimal("compensated_target_g").stripTrailingZeros().toPlainString());
+                    snapshot.add(row);
+                }, ids.get(0));
+        return snapshot;
     }
 
     private Map<String, Object> recipeView(String code, int version) {

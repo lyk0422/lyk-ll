@@ -149,6 +149,94 @@ COMMENT ON COLUMN late_color_event.lot_id IS '归档缸次;归档后迟到测色
 COMMENT ON COLUMN late_color_event.delta_e IS '迟到测色ΔE';
 COMMENT ON COLUMN late_color_event.note IS '迟到说明';
 
+CREATE TABLE IF NOT EXISTS dye_batch (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_no VARCHAR(64) NOT NULL UNIQUE,
+    dye_code VARCHAR(64) NOT NULL,
+    potency DECIMAL(12, 6) NOT NULL,
+    potency_version INT NOT NULL,
+    available_g DECIMAL(14, 3) NOT NULL,
+    valid_until TIMESTAMP NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+COMMENT ON COLUMN dye_batch.batch_no IS '染料批次号(唯一)';
+COMMENT ON COLUMN dye_batch.dye_code IS '染料代码,须已登记于 dye';
+COMMENT ON COLUMN dye_batch.potency IS '效价系数,正数,仅按线性模型:补偿目标=原目标/系数';
+COMMENT ON COLUMN dye_batch.potency_version IS '系数版本,从1开始,修订成功加1';
+COMMENT ON COLUMN dye_batch.available_g IS '批次可用克重,单位g,受控投料原子扣减';
+COMMENT ON COLUMN dye_batch.valid_until IS '有效截止时刻(Asia/Shanghai);now<截止有效,恰在截止即失效';
+
+CREATE TABLE IF NOT EXISTS compensation (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    approval_no VARCHAR(64) NOT NULL UNIQUE,
+    request_id VARCHAR(64) NOT NULL UNIQUE,
+    lot_id BIGINT NOT NULL,
+    lot_no VARCHAR(64) NOT NULL,
+    recipe_code VARCHAR(64) NOT NULL,
+    recipe_version INT NOT NULL,
+    version INT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+COMMENT ON COLUMN compensation.approval_no IS '补偿批准号(唯一),证据查询入口';
+COMMENT ON COLUMN compensation.request_id IS '补偿批准幂等键';
+COMMENT ON COLUMN compensation.lot_id IS '受控缸次主键';
+COMMENT ON COLUMN compensation.lot_no IS '受控缸次号';
+COMMENT ON COLUMN compensation.recipe_code IS '引用的已发布配方编码,不修改基础配方';
+COMMENT ON COLUMN compensation.recipe_version IS '引用的已发布配方冻结版本';
+COMMENT ON COLUMN compensation.version IS '批准乐观锁版本,从1开始,成功变更加1';
+COMMENT ON COLUMN compensation.status IS '状态:ACTIVE 未投料/CONSUMED 已投料/INVALIDATED 系数修订失效';
+
+CREATE TABLE IF NOT EXISTS compensation_item (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    compensation_id BIGINT NOT NULL,
+    dye_code VARCHAR(64) NOT NULL,
+    batch_no VARCHAR(64) NOT NULL,
+    potency DECIMAL(12, 6) NOT NULL,
+    potency_version INT NOT NULL,
+    base_target_g DECIMAL(14, 4) NOT NULL,
+    compensated_target_g DECIMAL(14, 3) NOT NULL,
+    CONSTRAINT uk_compensation_item UNIQUE (compensation_id, dye_code)
+);
+COMMENT ON COLUMN compensation_item.compensation_id IS '所属补偿批准';
+COMMENT ON COLUMN compensation_item.dye_code IS '染料代码,须与批次登记代码一致';
+COMMENT ON COLUMN compensation_item.batch_no IS '冻结的染料批次号';
+COMMENT ON COLUMN compensation_item.potency IS '冻结的效价系数快照';
+COMMENT ON COLUMN compensation_item.potency_version IS '冻结的系数版本快照,投料时须与批次当前版本一致';
+COMMENT ON COLUMN compensation_item.base_target_g IS '放大配方原目标克重,单位g';
+COMMENT ON COLUMN compensation_item.compensated_target_g IS '补偿目标克重=原目标/系数,四舍五入到三位小数,单位g';
+
+CREATE TABLE IF NOT EXISTS controlled_feeding (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id VARCHAR(64) NOT NULL UNIQUE,
+    lot_id BIGINT NOT NULL,
+    compensation_id BIGINT NOT NULL,
+    fed_at TIMESTAMP NOT NULL
+);
+COMMENT ON COLUMN controlled_feeding.request_id IS '受控投料幂等键';
+COMMENT ON COLUMN controlled_feeding.lot_id IS '受控缸次';
+COMMENT ON COLUMN controlled_feeding.compensation_id IS '所依据的补偿批准';
+
+CREATE TABLE IF NOT EXISTS batch_weighing (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    controlled_feeding_id BIGINT NOT NULL,
+    dye_code VARCHAR(64) NOT NULL,
+    batch_no VARCHAR(64) NOT NULL,
+    potency DECIMAL(12, 6) NOT NULL,
+    compensated_target_g DECIMAL(14, 3) NOT NULL,
+    actual_g DECIMAL(14, 4) NOT NULL,
+    deviation_pct DECIMAL(9, 6)
+);
+COMMENT ON COLUMN batch_weighing.controlled_feeding_id IS '所属受控投料单';
+COMMENT ON COLUMN batch_weighing.dye_code IS '染料代码';
+COMMENT ON COLUMN batch_weighing.batch_no IS '实际扣减的染料批次号';
+COMMENT ON COLUMN batch_weighing.potency IS '称量时冻结效价系数';
+COMMENT ON COLUMN batch_weighing.compensated_target_g IS '补偿目标克重,单位g';
+COMMENT ON COLUMN batch_weighing.actual_g IS '实际称量克重,单位g';
+COMMENT ON COLUMN batch_weighing.deviation_pct IS '偏差百分比=(实际-补偿目标)/补偿目标*100,绝对值>0.5拒绝(恰0.5合法)';
+
 -- 合成基础染化料库存（克）
 INSERT INTO dye (code, name, stock_g, created_at) VALUES
     ('D-RED',    '活性红 RED-3BS',    5000.000, CURRENT_TIMESTAMP),
@@ -164,3 +252,9 @@ INSERT INTO recipe_item (recipe_id, dye_code, dosage_gpl)
 SELECT id, 'D-YELLOW', 1.5000 FROM recipe WHERE recipe_code = 'R-BASE' AND version = 1;
 INSERT INTO recipe_item (recipe_id, dye_code, dosage_gpl)
 SELECT id, 'D-BLUE',   0.5000 FROM recipe WHERE recipe_code = 'R-BASE' AND version = 1;
+
+-- 合成染料批次（效价系数/可用克重/有效截止均为合成数据，截止 2099 年仅保证本地演示有效）
+INSERT INTO dye_batch (batch_no, dye_code, potency, potency_version, available_g, valid_until, created_at, updated_at) VALUES
+    ('B-RED-01',    'D-RED',    1.250000, 1, 4000.000, TIMESTAMP '2099-12-31 23:59:59', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+    ('B-YELLOW-01', 'D-YELLOW', 1.000000, 1, 4000.000, TIMESTAMP '2099-12-31 23:59:59', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+    ('B-BLUE-01',   'D-BLUE',   0.800000, 1, 4000.000, TIMESTAMP '2099-12-31 23:59:59', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);

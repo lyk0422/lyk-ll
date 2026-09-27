@@ -12,13 +12,18 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.example.starter.api.dto.ApproveCompensationRequest;
 import com.example.starter.api.dto.ColorCheckRequest;
+import com.example.starter.api.dto.ControlledFeedRequest;
 import com.example.starter.api.dto.CreateRecipeRequest;
 import com.example.starter.api.dto.FeedRequest;
 import com.example.starter.api.dto.JudgeRequest;
 import com.example.starter.api.dto.LateColorRequest;
 import com.example.starter.api.dto.MergeLotsRequest;
+import com.example.starter.api.dto.RegisterBatchRequest;
+import com.example.starter.api.dto.RevisePotencyRequest;
 import com.example.starter.api.dto.ScheduleLotRequest;
+import com.example.starter.service.CompensationService;
 import com.example.starter.service.DyeService;
 import com.example.starter.service.ServiceResult;
 
@@ -30,9 +35,11 @@ import com.example.starter.service.ServiceResult;
 public class DyeController {
 
     private final DyeService dyeService;
+    private final CompensationService compensationService;
 
-    public DyeController(DyeService dyeService) {
+    public DyeController(DyeService dyeService, CompensationService compensationService) {
         this.dyeService = dyeService;
+        this.compensationService = compensationService;
     }
 
     /** 创建配方草稿（v1）。 */
@@ -106,6 +113,43 @@ public class DyeController {
     @GetMapping("/recipes/{recipeCode}/recalculate")
     public ResponseEntity<Map<String, Object>> recalculate(@PathVariable String recipeCode) {
         return toResponse(dyeService.recalculate(recipeCode));
+    }
+
+    /** 登记染料批次：效价系数/可用克重/有效截止，系数版本从 1 开始（requestId 幂等）。 */
+    @PostMapping("/dye-batches")
+    public ResponseEntity<Map<String, Object>> registerBatch(@Valid @RequestBody RegisterBatchRequest req) {
+        return toResponse(compensationService.registerBatch(req));
+    }
+
+    /** 修订批次系数：expectedVersion 乐观锁，成功版本加 1，未投料补偿批准失效（requestId 幂等）。 */
+    @PostMapping("/dye-batches/{batchNo}/potency")
+    public ResponseEntity<Map<String, Object>> revisePotency(@PathVariable String batchNo,
+                                                             @Valid @RequestBody RevisePotencyRequest req) {
+        return toResponse(compensationService.revisePotency(batchNo, req));
+    }
+
+    @GetMapping("/dye-batches/{batchNo}")
+    public ResponseEntity<Map<String, Object>> getBatch(@PathVariable String batchNo) {
+        return toResponse(compensationService.getBatch(batchNo));
+    }
+
+    /** 补偿批准：冻结每种染料的批次、系数与补偿目标（requestId 幂等）。 */
+    @PostMapping("/compensations")
+    public ResponseEntity<Map<String, Object>> approveCompensation(
+            @Valid @RequestBody ApproveCompensationRequest req) {
+        return toResponse(compensationService.approveCompensation(req));
+    }
+
+    /** 补偿审批及证据查询：冻结明细与受控称量链。 */
+    @GetMapping("/compensations/{approvalNo}")
+    public ResponseEntity<Map<String, Object>> getCompensation(@PathVariable String approvalNo) {
+        return toResponse(compensationService.getCompensation(approvalNo));
+    }
+
+    /** 受控投料：验证补偿版本/称量/批次有效期，原子扣减批次余量并写称量链（requestId 幂等）。 */
+    @PostMapping("/controlled-feedings")
+    public ResponseEntity<Map<String, Object>> controlledFeed(@Valid @RequestBody ControlledFeedRequest req) {
+        return toResponse(compensationService.controlledFeed(req));
     }
 
     private ResponseEntity<Map<String, Object>> toResponse(ServiceResult result) {

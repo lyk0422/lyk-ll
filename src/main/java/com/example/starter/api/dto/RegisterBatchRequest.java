@@ -1,0 +1,20 @@
+package com.example.starter.api.dto;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+
+/**
+ * 染料批次登记请求：效价系数须为正数；validUntil 为精确时刻（ISO-8601），now&lt;截止有效、恰在截止失效。
+ */
+public record RegisterBatchRequest(
+        @NotBlank String requestId,
+        @NotBlank String batchNo,
+        @NotBlank String dyeCode,
+        @NotNull @DecimalMin(value = "0", inclusive = false) BigDecimal potency,
+        @NotNull @DecimalMin(value = "0", inclusive = false) BigDecimal availableG,
+        @NotNull Instant validUntil) {
+}
