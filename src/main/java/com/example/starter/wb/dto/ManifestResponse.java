@@ -33,6 +33,8 @@ public record ManifestResponse(
         List<String> confirmedRoles,
         boolean frozen,
         LocalDateTime closedAt,
-        List<LateAlert> lateAlerts
+        List<LateAlert> lateAlerts,
+        boolean assemblyControlled,
+        Integer assemblyPlanVersion
 ) {
 }

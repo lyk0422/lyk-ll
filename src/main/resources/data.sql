@@ -27,3 +27,11 @@ KEY (id) VALUES
 MERGE INTO flight (id, flight_no, origin, destination, aircraft_id, scheduled_time, created_at)
 KEY (id) VALUES
 (1, 'CA1234', 'PEK', 'SHA', 1, TIMESTAMP '2026-09-26 10:00:00', TIMESTAMP '2026-09-26 06:00:00');
+
+-- 集装器舱位主数据（合成）：力臂为整数毫米，限额为整数公斤，恰达限额合法
+MERGE INTO cargo_compartment (id, aircraft_id, compartment_code, arm_mm, max_load_kg, allowed_uld_types)
+KEY (id) VALUES
+(1, 1, 'ULD_P1', 13000, 3000, 'AKE,DPE'),
+(2, 1, 'ULD_P2', 15000, 3000, 'AKE,DPE'),
+(3, 1, 'ULD_P3', 17000, 3500, 'AKE,AMA'),
+(4, 1, 'ULD_P4', 19000, 3500, 'AMA,PLA');

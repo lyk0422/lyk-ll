@@ -11,8 +11,8 @@ import java.util.List;
  * @param fuelKg         加油量，kg
  * @param zfwKg          无油重量，kg
  * @param towKg          起飞重量，kg
- * @param zfwMoment      无油总力矩，kg·英寸
- * @param towMoment      起飞总力矩，kg·英寸
+ * @param zfwMoment      无油总力矩；站位模式为 kg·英寸，装配模式为 kg·毫米
+ * @param towMoment      起飞总力矩；站位模式为 kg·英寸，装配模式为 kg·毫米
  * @param cgZfwPct       无油重心，%MAC
  * @param cgTowPct       起飞重心，%MAC
  * @param withinLimits   是否同时满足重量限制与重心包线（边界合法）

@@ -24,6 +24,7 @@ public record ManifestRow(
         boolean withinLimits,
         int lmcPaxDelta,
         BigDecimal lmcWeightDelta,
+        boolean assemblyControlled,
         Long activeFlag,
         String createdBy,
         LocalDateTime createdAt,

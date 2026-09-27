@@ -1,6 +1,9 @@
 package com.example.starter.wb.repo;
 
 import com.example.starter.wb.domain.Aircraft;
+import com.example.starter.wb.domain.AssemblyItemRow;
+import com.example.starter.wb.domain.AssemblyPlanRow;
+import com.example.starter.wb.domain.CompartmentRow;
 import com.example.starter.wb.domain.EnvelopePoint;
 import com.example.starter.wb.domain.Flight;
 import com.example.starter.wb.domain.IdempotentRow;
@@ -10,6 +13,7 @@ import com.example.starter.wb.domain.LoadStation;
 import com.example.starter.wb.domain.LmcLogRow;
 import com.example.starter.wb.domain.ManifestRow;
 import com.example.starter.wb.domain.ReviewRow;
+import com.example.starter.wb.domain.UldOccupationRow;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -201,9 +205,9 @@ public class JdbcWeightBalanceRepository implements WeightBalanceRepository {
                 INSERT INTO manifest_version
                   (flight_id, version_no, parent_version_id, request_id, fingerprint, status,
                    passenger_count, payload_kg, fuel_kg, zfw_kg, tow_kg, cg_zfw_pct, cg_tow_pct,
-                   within_limits, lmc_pax_delta, lmc_weight_delta, active_flag, created_by,
-                   created_at, updated_at, closed_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   within_limits, lmc_pax_delta, lmc_weight_delta, assembly_controlled, active_flag,
+                   created_by, created_at, updated_at, closed_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """;
         jdbcTemplate.update(con -> {
             PreparedStatement ps = con.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
@@ -224,6 +228,7 @@ public class JdbcWeightBalanceRepository implements WeightBalanceRepository {
             ps.setBoolean(i++, r.withinLimits());
             ps.setInt(i++, r.lmcPaxDelta());
             ps.setBigDecimal(i++, r.lmcWeightDelta());
+            ps.setBoolean(i++, r.assemblyControlled());
             setNullableLong(ps, i++, r.activeFlag());
             ps.setString(i++, r.createdBy());
             ps.setTimestamp(i++, Timestamp.valueOf(r.createdAt()));
@@ -415,6 +420,195 @@ public class JdbcWeightBalanceRepository implements WeightBalanceRepository {
         }
     }
 
+    // ------------------------------------------------------------ 集装器装配
+
+    @Override
+    public List<CompartmentRow> findCompartments(long aircraftId) {
+        return jdbc.sql("""
+                        SELECT id, aircraft_id, compartment_code, arm_mm, max_load_kg, allowed_uld_types
+                        FROM cargo_compartment WHERE aircraft_id = :id ORDER BY compartment_code
+                        """)
+                .param("id", aircraftId)
+                .query((rs, n) -> new CompartmentRow(
+                        rs.getLong("id"), rs.getLong("aircraft_id"),
+                        rs.getString("compartment_code"), rs.getInt("arm_mm"),
+                        rs.getInt("max_load_kg"), rs.getString("allowed_uld_types")))
+                .list();
+    }
+
+    @Override
+    public Optional<AssemblyPlanRow> findActivePlanByFlightId(long flightId) {
+        return jdbc.sql("SELECT * FROM assembly_plan WHERE flight_id = :fid AND active_flag = :fid")
+                .param("fid", flightId).query(PLAN_MAPPER).optional();
+    }
+
+    @Override
+    public Optional<AssemblyPlanRow> findActivePlanByFlightIdForUpdate(long flightId) {
+        return jdbc.sql("SELECT * FROM assembly_plan WHERE flight_id = :fid AND active_flag = :fid FOR UPDATE")
+                .param("fid", flightId).query(PLAN_MAPPER).optional();
+    }
+
+    @Override
+    public List<AssemblyPlanRow> findPlansByFlightId(long flightId) {
+        return jdbc.sql("SELECT * FROM assembly_plan WHERE flight_id = :fid ORDER BY plan_version")
+                .param("fid", flightId).query(PLAN_MAPPER).list();
+    }
+
+    @Override
+    public List<AssemblyItemRow> findPlanItems(long planId) {
+        return jdbc.sql("""
+                        SELECT id, plan_id, uld_number, uld_type, compartment_code,
+                               tare_kg, net_kg, total_kg, arm_mm, moment_kgmm, seq_no
+                        FROM assembly_item WHERE plan_id = :id ORDER BY seq_no, id
+                        """)
+                .param("id", planId)
+                .query((rs, n) -> new AssemblyItemRow(
+                        rs.getLong("id"), rs.getLong("plan_id"), rs.getString("uld_number"),
+                        rs.getString("uld_type"), rs.getString("compartment_code"),
+                        rs.getInt("tare_kg"), rs.getInt("net_kg"), rs.getInt("total_kg"),
+                        rs.getInt("arm_mm"), rs.getBigDecimal("moment_kgmm"), rs.getInt("seq_no")))
+                .list();
+    }
+
+    @Override
+    public long insertPlan(AssemblyPlanRow r) {
+        KeyHolder kh = new GeneratedKeyHolder();
+        String sql = """
+                INSERT INTO assembly_plan
+                  (flight_id, manifest_id, manifest_version_no, plan_version, request_id, fingerprint,
+                   status, total_tare_kg, total_net_kg, total_weight_kg, cargo_moment_kgmm,
+                   cg_zfw_pct, cg_tow_pct, active_flag, submitted_at, created_by, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """;
+        jdbcTemplate.update(con -> {
+            PreparedStatement ps = con.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
+            int i = 1;
+            ps.setLong(i++, r.flightId());
+            ps.setLong(i++, r.manifestId());
+            ps.setInt(i++, r.manifestVersionNo());
+            ps.setInt(i++, r.planVersion());
+            ps.setString(i++, r.requestId());
+            ps.setString(i++, r.fingerprint());
+            ps.setString(i++, r.status());
+            ps.setInt(i++, r.totalTareKg());
+            ps.setInt(i++, r.totalNetKg());
+            ps.setInt(i++, r.totalWeightKg());
+            ps.setBigDecimal(i++, r.cargoMomentKgMm());
+            ps.setBigDecimal(i++, r.cgZfwPct());
+            ps.setBigDecimal(i++, r.cgTowPct());
+            setNullableLong(ps, i++, r.activeFlag());
+            ps.setTimestamp(i++, Timestamp.valueOf(r.submittedAt()));
+            ps.setString(i++, r.createdBy());
+            ps.setTimestamp(i, Timestamp.valueOf(r.createdAt()));
+            return ps;
+        }, kh);
+        return kh.getKey() == null ? 0L : kh.getKey().longValue();
+    }
+
+    @Override
+    public void insertPlanItems(long planId, List<AssemblyItemRow> items) {
+        String sql = """
+                INSERT INTO assembly_item
+                  (plan_id, uld_number, uld_type, compartment_code, tare_kg, net_kg, total_kg,
+                   arm_mm, moment_kgmm, seq_no)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+                """;
+        for (AssemblyItemRow d : items) {
+            jdbc.sql(sql)
+                    .params(List.of(planId, d.uldNumber(), d.uldType(), d.compartmentCode(),
+                            d.tareKg(), d.netKg(), d.totalKg(), d.armMm(), d.momentKgMm(), d.seqNo()))
+                    .update();
+        }
+    }
+
+    @Override
+    public void supersedePlan(long planId) {
+        jdbc.sql("""
+                UPDATE assembly_plan
+                SET active_flag = NULL, status = 'SUPERSEDED'
+                WHERE id = :id AND active_flag IS NOT NULL
+                """).param("id", planId).update();
+    }
+
+    @Override
+    public void releasePlan(long planId) {
+        jdbc.sql("""
+                UPDATE assembly_plan
+                SET active_flag = NULL, status = 'RELEASED'
+                WHERE id = :id AND active_flag IS NOT NULL
+                """).param("id", planId).update();
+    }
+
+    @Override
+    public void deleteReviewsByManifest(long manifestId) {
+        jdbc.sql("DELETE FROM review_confirmation WHERE manifest_id = :id")
+                .param("id", manifestId).update();
+    }
+
+    @Override
+    public Optional<UldOccupationRow> findOccupation(String uldNumber) {
+        return jdbc.sql("""
+                        SELECT uld_number, flight_id, plan_id, occupied_at
+                        FROM uld_occupation WHERE uld_number = :n
+                        """)
+                .param("n", uldNumber)
+                .query((rs, i) -> new UldOccupationRow(
+                        rs.getString("uld_number"), rs.getLong("flight_id"), rs.getLong("plan_id"),
+                        rs.getTimestamp("occupied_at").toLocalDateTime()))
+                .optional();
+    }
+
+    @Override
+    public List<UldOccupationRow> findOccupationsByFlightId(long flightId) {
+        return jdbc.sql("""
+                        SELECT uld_number, flight_id, plan_id, occupied_at
+                        FROM uld_occupation WHERE flight_id = :fid ORDER BY uld_number
+                        """)
+                .param("fid", flightId)
+                .query((rs, i) -> new UldOccupationRow(
+                        rs.getString("uld_number"), rs.getLong("flight_id"), rs.getLong("plan_id"),
+                        rs.getTimestamp("occupied_at").toLocalDateTime()))
+                .list();
+    }
+
+    @Override
+    public void insertOccupation(UldOccupationRow r) {
+        jdbc.sql("""
+                INSERT INTO uld_occupation (uld_number, flight_id, plan_id, occupied_at)
+                VALUES (?,?,?,?)
+                """)
+                .params(List.of(r.uldNumber(), r.flightId(), r.planId(),
+                        Timestamp.valueOf(r.occupiedAt())))
+                .update();
+    }
+
+    @Override
+    public void deleteOccupationsByFlightId(long flightId) {
+        jdbc.sql("DELETE FROM uld_occupation WHERE flight_id = :fid")
+                .param("fid", flightId).update();
+    }
+
+    private static final RowMapper<AssemblyPlanRow> PLAN_MAPPER = (rs, n) -> new AssemblyPlanRow(
+            rs.getLong("id"),
+            rs.getLong("flight_id"),
+            rs.getLong("manifest_id"),
+            rs.getInt("manifest_version_no"),
+            rs.getInt("plan_version"),
+            rs.getString("request_id"),
+            rs.getString("fingerprint"),
+            rs.getString("status"),
+            rs.getInt("total_tare_kg"),
+            rs.getInt("total_net_kg"),
+            rs.getInt("total_weight_kg"),
+            rs.getBigDecimal("cargo_moment_kgmm"),
+            rs.getBigDecimal("cg_zfw_pct"),
+            rs.getBigDecimal("cg_tow_pct"),
+            (Long) rs.getObject("active_flag"),
+            rs.getTimestamp("submitted_at").toLocalDateTime(),
+            rs.getString("created_by"),
+            rs.getTimestamp("created_at").toLocalDateTime()
+    );
+
     private static final RowMapper<ManifestRow> MANIFEST_MAPPER = (rs, n) -> new ManifestRow(
             rs.getLong("id"),
             rs.getLong("flight_id"),
@@ -433,6 +627,7 @@ public class JdbcWeightBalanceRepository implements WeightBalanceRepository {
             rs.getBoolean("within_limits"),
             rs.getInt("lmc_pax_delta"),
             rs.getBigDecimal("lmc_weight_delta"),
+            rs.getBoolean("assembly_controlled"),
             (Long) rs.getObject("active_flag"),
             rs.getString("created_by"),
             rs.getTimestamp("created_at").toLocalDateTime(),

@@ -1,9 +1,11 @@
 package com.example.starter.wb.service;
 
 import com.example.starter.wb.calc.CalcLoadItem;
+import com.example.starter.wb.calc.CargoPayloadSplit;
 import com.example.starter.wb.calc.WeightBalanceCalculator;
 import com.example.starter.wb.calc.WeightBalanceResult;
 import com.example.starter.wb.domain.Aircraft;
+import com.example.starter.wb.domain.AssemblyPlanRow;
 import com.example.starter.wb.domain.Flight;
 import com.example.starter.wb.domain.IdempotentRow;
 import com.example.starter.wb.domain.LateEventRow;
@@ -101,6 +103,7 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
                     ManifestStatus.PRELIMINARY.name(),
                     wb.passengerCount(), wb.payloadKg(), wb.fuelKg(), wb.zfwKg(), wb.towKg(),
                     wb.cgZfwPct(), wb.cgTowPct(), true, 0, BigDecimal.ZERO.setScale(2),
+                    Boolean.TRUE.equals(request.assemblyControlled()),
                     flight.id(), request.createdBy(), now, now, null);
             long id = insertManifestActive(row);
             repo.insertDetails(id, withManifestId(details, id));
@@ -119,7 +122,7 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
             Aircraft ac = ctx.aircraft();
             BigDecimal fuel = request.fuelKg() != null ? request.fuelKg() : ctx.row().fuelKg();
             List<LoadDetailRow> details = toDetails(request.items(), ac, 0);
-            WeightBalanceResult wb = WeightBalanceCalculator.calculate(ac, toCalcItems(details, ac), fuel);
+            WeightBalanceResult wb = recompute(ctx.row(), ac, details, fuel);
             ensureWithinLimits(wb);
 
             long id = ctx.row().id();
@@ -186,7 +189,7 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
                 }
             }
             BigDecimal newFuel = row.fuelKg().add(request.fuelDeltaKg());
-            WeightBalanceResult wb = WeightBalanceCalculator.calculate(ac, toCalcItems(merged, ac), newFuel);
+            WeightBalanceResult wb = recompute(row, ac, merged, newFuel);
             ensureWithinLimits(wb);
 
             LocalDateTime now = LocalDateTime.now(clock);
@@ -216,6 +219,7 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
                     fingerprint(request.requestId(), request),
                     newStatus, wb.passengerCount(), wb.payloadKg(), wb.fuelKg(), wb.zfwKg(), wb.towKg(),
                     wb.cgZfwPct(), wb.cgTowPct(), true, 0, BigDecimal.ZERO.setScale(2),
+                    row.assemblyControlled(),
                     flightId, request.operator(), now, now, null);
             long newId = reprintActive(row, newRow);
             // 新版本明细 = 旧版全部明细（含历次限内增量）+ 本次触发重打的增量，保证可复算。
@@ -278,6 +282,9 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
             }
             if (!ManifestStatus.REVIEWED.name().equals(row.status())) {
                 throw new ConflictException("双岗复核通过后方可放行关闭，当前状态 " + row.status());
+            }
+            if (row.assemblyControlled()) {
+                releaseAssemblyForClose(ctx, row);
             }
             LocalDateTime now = LocalDateTime.now(clock);
             repo.updateStatus(row.id(), ManifestStatus.CLOSED.name(), now);
@@ -462,7 +469,7 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
         return new ManifestRow(r.id(), r.flightId(), r.versionNo(), r.parentVersionId(), r.requestId(),
                 r.fingerprint(), status, wb.passengerCount(), wb.payloadKg(), wb.fuelKg(), wb.zfwKg(),
                 wb.towKg(), wb.cgZfwPct(), wb.cgTowPct(), true, lmcPax, lmcWeight,
-                r.activeFlag(), r.createdBy(), r.createdAt(), now, r.closedAt());
+                r.assemblyControlled(), r.activeFlag(), r.createdBy(), r.createdAt(), now, r.closedAt());
     }
 
     private long insertManifestActive(ManifestRow row) {
@@ -607,12 +614,59 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
         }
     }
 
+    /**
+     * 关闭放行前装配闸口：图与舱单版本匹配、总货重与当前货运业载一致、重心仍合法，
+     * 然后在同一事务内原子释放实物占用并标记装配图已释放（历史图只读）。
+     */
+    private void releaseAssemblyForClose(ActiveCtx ctx, ManifestRow row) {
+        long flightId = row.flightId();
+        AssemblyPlanRow plan = repo.findActivePlanByFlightIdForUpdate(flightId)
+                .orElseThrow(() -> new ConflictException(
+                        "舱单启用集装器装配控制，但无有效装配图，不能放行关闭"));
+        if (plan.manifestId() != row.id()) {
+            throw new ConflictException("装配图对应舱单版本 " + plan.manifestVersionNo()
+                    + " 与当前舱单版本 " + row.versionNo() + " 不匹配，需重新提交装配图");
+        }
+        List<LoadDetailRow> details = repo.findDetails(row.id());
+        BigDecimal cargo = CargoPayloadSplit.cargoPayloadKg(details);
+        if (BigDecimal.valueOf(plan.totalWeightKg()).compareTo(cargo) != 0) {
+            throw new UnprocessableException("装配图总货重 " + plan.totalWeightKg()
+                    + "kg 与当前货运业载 " + cargo + "kg 不一致，LMC 变更后需重新装配");
+        }
+        WeightBalanceResult wb = WeightBalanceCalculator.calculateWithCargoMoment(
+                ctx.aircraft(), CargoPayloadSplit.nonCargoItems(details, ctx.aircraft()),
+                cargo, plan.cargoMomentKgMm(), row.fuelKg());
+        ensureWithinLimits(wb);
+        repo.deleteOccupationsByFlightId(flightId);
+        repo.releasePlan(plan.id());
+    }
+
+    /**
+     * 装配感知重算：受控舱单存在与当前舱单版本匹配且总货重一致的有效装配图时，
+     * 货运力矩取自装配图（kg·mm 精确求和），否则回退站位力臂（既有行为）。
+     */
+    private WeightBalanceResult recompute(ManifestRow row, Aircraft ac,
+                                          List<LoadDetailRow> details, BigDecimal fuelKg) {
+        if (row.assemblyControlled()) {
+            Optional<AssemblyPlanRow> plan = repo.findActivePlanByFlightId(row.flightId());
+            if (plan.isPresent() && plan.get().manifestId() == row.id()
+                    && BigDecimal.valueOf(plan.get().totalWeightKg())
+                            .compareTo(CargoPayloadSplit.cargoPayloadKg(details)) == 0) {
+                return WeightBalanceCalculator.calculateWithCargoMoment(ac,
+                        CargoPayloadSplit.nonCargoItems(details, ac),
+                        BigDecimal.valueOf(plan.get().totalWeightKg()),
+                        plan.get().cargoMomentKgMm(), fuelKg);
+            }
+        }
+        return WeightBalanceCalculator.calculate(ac, toCalcItems(details, ac), fuelKg);
+    }
+
     /** 组装响应；重量/重心由明细与油量重新计算，验证可复算，violations 随之得出。 */
     private ManifestResponse toResponse(ManifestRow row) {
         Flight flight = requireFlight(row.flightId());
         Aircraft ac = requireAircraft(flight.aircraftId());
         List<LoadDetailRow> details = repo.findDetails(row.id());
-        WeightBalanceResult recomputed = WeightBalanceCalculator.calculate(ac, toCalcItems(details, ac), row.fuelKg());
+        WeightBalanceResult recomputed = recompute(row, ac, details, row.fuelKg());
         List<ReviewRow> reviews = repo.findReviews(row.id());
         List<LateEventRow> lateEvents = repo.findLateEvents(row.flightId());
         Long supersededBy = null;
@@ -630,6 +684,13 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
                         e.payloadJson(), e.alerted(), e.createdAt()))
                 .toList();
         List<String> roles = reviews.stream().map(ReviewRow::roleCode).toList();
+        Integer assemblyPlanVersion = null;
+        if (row.assemblyControlled()) {
+            assemblyPlanVersion = repo.findActivePlanByFlightId(row.flightId())
+                    .filter(p -> p.manifestId() == row.id())
+                    .map(AssemblyPlanRow::planVersion)
+                    .orElse(null);
+        }
         return new ManifestResponse(
                 row.id(), row.flightId(), row.versionNo(), row.parentVersionId(), row.requestId(),
                 row.status(), recomputed.passengerCount(), recomputed.payloadKg(), recomputed.fuelKg(),
@@ -638,6 +699,7 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
                 row.lmcPaxDelta(), row.lmcWeightDelta(),
                 Math.abs(row.lmcPaxDelta()) <= LMC_PAX_LIMIT
                         && row.lmcWeightDelta().abs().compareTo(LMC_WEIGHT_LIMIT) <= 0,
-                supersededBy, details, roles, frozen, row.closedAt(), alerts);
+                supersededBy, details, roles, frozen, row.closedAt(), alerts,
+                row.assemblyControlled(), assemblyPlanVersion);
     }
 }

@@ -1,5 +1,7 @@
 package com.example.starter.wb.web;
 
+import com.example.starter.wb.dto.AssemblyPlanResponse;
+import com.example.starter.wb.dto.AssemblySubmitRequest;
 import com.example.starter.wb.dto.CheckinRequest;
 import com.example.starter.wb.dto.CloseRequest;
 import com.example.starter.wb.dto.CreateManifestRequest;
@@ -8,6 +10,7 @@ import com.example.starter.wb.dto.LmcRequest;
 import com.example.starter.wb.dto.ManifestResponse;
 import com.example.starter.wb.dto.ReviewRequest;
 import com.example.starter.wb.dto.StageRequest;
+import com.example.starter.wb.service.AssemblyService;
 import com.example.starter.wb.service.WeightBalanceService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -27,9 +30,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class LoadsheetController {
 
     private final WeightBalanceService service;
+    private final AssemblyService assemblyService;
 
-    public LoadsheetController(WeightBalanceService service) {
+    public LoadsheetController(WeightBalanceService service, AssemblyService assemblyService) {
         this.service = service;
+        this.assemblyService = assemblyService;
     }
 
     @PostMapping
@@ -87,5 +92,22 @@ public class LoadsheetController {
     public ManifestResponse lateCheckin(@PathVariable Long flightId,
                                         @Valid @RequestBody LateCheckinRequest request) {
         return service.recordLateCheckin(flightId, request);
+    }
+
+    @PostMapping("/assembly")
+    @ResponseStatus(HttpStatus.CREATED)
+    public AssemblyPlanResponse submitAssembly(@PathVariable Long flightId,
+                                               @Valid @RequestBody AssemblySubmitRequest request) {
+        return assemblyService.submit(flightId, request);
+    }
+
+    @GetMapping("/assembly")
+    public AssemblyPlanResponse activeAssembly(@PathVariable Long flightId) {
+        return assemblyService.getActive(flightId);
+    }
+
+    @GetMapping("/assembly/versions")
+    public java.util.List<AssemblyPlanResponse> assemblyVersions(@PathVariable Long flightId) {
+        return assemblyService.listVersions(flightId);
     }
 }
