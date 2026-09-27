@@ -31,6 +31,8 @@ public class RunwayService {
     private final AssessmentRepository assessmentRepository;
     private final NotamRepository notamRepository;
     private final WeatherRepository weatherRepository;
+    private final RoutinePlanRepository routinePlanRepository;
+    private final RunwayLockRepository runwayLockRepository;
     private final RunwayProperties properties;
     private final IdempotencyExecutor idempotencyExecutor;
     private final Clock clock;
@@ -40,6 +42,8 @@ public class RunwayService {
                          AssessmentRepository assessmentRepository,
                          NotamRepository notamRepository,
                          WeatherRepository weatherRepository,
+                         RoutinePlanRepository routinePlanRepository,
+                         RunwayLockRepository runwayLockRepository,
                          RunwayProperties properties,
                          IdempotencyExecutor idempotencyExecutor,
                          Clock clock) {
@@ -48,6 +52,8 @@ public class RunwayService {
         this.assessmentRepository = assessmentRepository;
         this.notamRepository = notamRepository;
         this.weatherRepository = weatherRepository;
+        this.routinePlanRepository = routinePlanRepository;
+        this.runwayLockRepository = runwayLockRepository;
         this.properties = properties;
         this.idempotencyExecutor = idempotencyExecutor;
         this.clock = clock;
@@ -76,6 +82,8 @@ public class RunwayService {
     }
 
     private ReportResponse doReport(ReportRequest request) {
+        // 与例行“开始”在同一跑道上串行化，得到唯一占用状态；跨跑道持不同锁行互不阻塞。
+        runwayLockRepository.lockRunway(request.runwayId());
         Instant now = clock.instant();
         Instant closedAt = request.reportedAt();
         Instant deadline = closedAt.plus(properties.inspectionStartLimitMinutes(), ChronoUnit.MINUTES);
@@ -85,7 +93,31 @@ public class RunwayService {
         String notamNo = "NTM-C-" + event.id();
         notamRepository.insert(new NotamRecord(0L, event.id(), event.runwayId(), NotamAction.CLOSE,
                 notamNo, closedAt));
+        preemptRoutinePlans(event, closedAt, now);
         return new ReportResponse(event.id(), event.runwayId(), event.status().name(), closedAt, deadline, notamNo);
+    }
+
+    /**
+     * 紧急关闭抢占：同一事务内取消该跑道“尚未开始”例行计划，已开始计划转中止并保留已完成检查项。
+     * 被抢占计划置终态并释放获准位（紧急事件结束后可另建新计划，不复活被抢占项）。
+     */
+    private void preemptRoutinePlans(RunwayEvent event, Instant closedAt, Instant now) {
+        List<RoutinePlan> activePlans = routinePlanRepository.findActiveByRunway(event.runwayId());
+        for (RoutinePlan plan : activePlans) {
+            RoutinePlanStatus target = switch (plan.status()) {
+                case STARTED -> RoutinePlanStatus.ABORTED;
+                case APPROVED, NEEDS_REVIEW -> RoutinePlanStatus.CANCELLED;
+                default -> null;
+            };
+            if (target == null) {
+                continue;
+            }
+            RoutinePlan preempted = new RoutinePlan(plan.id(), plan.runwayId(), plan.windowStart(),
+                    plan.windowEnd(), plan.durationMinutes(), plan.calendarVersion(), plan.version() + 1,
+                    target, plan.evidence(), plan.slotFlag(), event.id(), plan.startedAt(), plan.completedAt(),
+                    closedAt, plan.requestId(), plan.createdAt(), now);
+            routinePlanRepository.update(preempted);
+        }
     }
 
     /**
