@@ -29,11 +29,14 @@ public class WorkOrderService {
     private final JdbcTemplate jdbc;
     private final WorkOrderStore store;
     private final EscalationService escalation;
+    private final GeneratorDispatchService generatorDispatch;
 
-    public WorkOrderService(JdbcTemplate jdbc, WorkOrderStore store, EscalationService escalation) {
+    public WorkOrderService(JdbcTemplate jdbc, WorkOrderStore store, EscalationService escalation,
+            GeneratorDispatchService generatorDispatch) {
         this.jdbc = jdbc;
         this.store = store;
         this.escalation = escalation;
+        this.generatorDispatch = generatorDispatch;
     }
 
     /**
@@ -66,6 +69,8 @@ public class WorkOrderService {
         long newId = store.insertOrder(feeder, faultPoint, affected, level, "PENDING", outageStart);
         store.addEvent(newId, "CREATED_BY_MERGE", "由工单" + ids + "合并生成");
         for (WorkOrderRow source : sources) {
+            // 合并原子撤销源单未结束的临时保电调度并释放发电车，供电证据保留
+            generatorDispatch.cancelOpenOrdersForWorkOrder(source.id(), "MERGED");
             jdbc.update("UPDATE work_order SET status = 'MERGED', merged_into_id = ? WHERE id = ?",
                     newId, source.id());
             store.addEvent(source.id(), "MERGED", "合并至工单" + newId);

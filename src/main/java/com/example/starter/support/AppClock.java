@@ -3,6 +3,7 @@ package com.example.starter.support;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 
 import org.springframework.stereotype.Component;
 
@@ -22,6 +23,14 @@ public class AppClock {
      */
     public LocalDateTime now() {
         return LocalDateTime.now(clock);
+    }
+
+    /**
+     * 返回当前 UTC 时间；发电车调度（下发/截止/到场/占用）统一使用 UTC 精确时刻。
+     * 与 {@link #now()} 基于同一底层时钟，测试固定时钟时两者为同一时刻的不同时区表达。
+     */
+    public LocalDateTime nowUtc() {
+        return LocalDateTime.now(clock.withZone(ZoneOffset.UTC));
     }
 
     /**

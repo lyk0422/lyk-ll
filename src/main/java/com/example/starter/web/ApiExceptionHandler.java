@@ -8,7 +8,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 /**
- * 全局异常映射：业务冲突返回 409，资源不存在返回 404。
+ * 全局异常映射：业务冲突返回 409，业务规则拒绝返回 422，资源不存在返回 404。
  */
 @RestControllerAdvice
 public class ApiExceptionHandler {
@@ -16,6 +16,11 @@ public class ApiExceptionHandler {
     @ExceptionHandler(ConflictException.class)
     public ResponseEntity<Map<String, String>> conflict(ConflictException ex) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", ex.getMessage()));
+    }
+
+    @ExceptionHandler(UnprocessableException.class)
+    public ResponseEntity<Map<String, String>> unprocessable(UnprocessableException ex) {
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(Map.of("error", ex.getMessage()));
     }
 
     @ExceptionHandler(NotFoundException.class)

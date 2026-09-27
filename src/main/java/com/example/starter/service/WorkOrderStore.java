@@ -39,6 +39,13 @@ public class WorkOrderStore {
     }
 
     private static WorkOrderRow mapRow(ResultSet rs) throws SQLException {
+        return mapRowPublic(rs);
+    }
+
+    /**
+     * 公共工单行映射：供其他服务在加锁查询（SELECT ... FOR UPDATE）时复用同一映射。
+     */
+    public static WorkOrderRow mapRowPublic(ResultSet rs) throws SQLException {
         long teamId = rs.getLong("team_id");
         Long team = rs.wasNull() ? null : teamId;
         Timestamp restored = rs.getTimestamp("restored_at");

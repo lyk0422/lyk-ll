@@ -27,13 +27,15 @@ public class RestoreService {
     private final JdbcTemplate jdbc;
     private final AppClock clock;
     private final WorkOrderStore store;
+    private final GeneratorDispatchService generatorDispatch;
     private final TransactionTemplate tx;
 
     public RestoreService(JdbcTemplate jdbc, AppClock clock, WorkOrderStore store,
-            PlatformTransactionManager txManager) {
+            GeneratorDispatchService generatorDispatch, PlatformTransactionManager txManager) {
         this.jdbc = jdbc;
         this.clock = clock;
         this.store = store;
+        this.generatorDispatch = generatorDispatch;
         this.tx = new TransactionTemplate(txManager);
     }
 
@@ -102,6 +104,8 @@ public class RestoreService {
         jdbc.update("INSERT INTO load_recovery (work_order_id, load_kw, recorded_at) VALUES (?,?,?)",
                 req.workOrderId(), loadKw, Timestamp.valueOf(clock.now()));
         store.addEvent(req.workOrderId(), "RESTORED", "调度与现场双确认复电, 恢复负荷" + loadKw + "kW");
+        // 正式复电：原子撤销未结束的临时保电调度并释放发电车，已形成的供电证据保留
+        generatorDispatch.cancelOpenOrdersForWorkOrder(req.workOrderId(), "FORMAL_RESTORE");
         promoteQueued(order.teamId());
         return new RestoreConfirmResponse(req.workOrderId(), true, false, "RESTORED", false);
     }
