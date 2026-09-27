@@ -563,63 +563,12 @@ public class CemsService {
     // ---------------- 幂等支撑 ----------------
 
     /**
-     * 幂等执行：指纹覆盖 requestId 与全部业务字段。
-     * 同键同参返回首次结果；同键异参抛 409 且不执行动作、不改变排口状态。
-     * 先插入占位行（主键串行化同键并发），业务动作成功后回写结果；动作失败则随事务回滚释放该键。
+     * 幂等执行：委托 IdempotencySupport（旧规范化指纹，行为不变）。
+     * 同键同参返回首次结果；同键异参抛 409 且不执行动作、不改变排口状态；失败随事务回滚不占键。
      */
     private <T> T replayable(String requestId, String requestType, Map<String, Object> fields,
                              Class<T> resultType, Supplier<T> action) {
-        String rid = requireText(requestId, "requestId");
-        String fingerprint = idem.fingerprint(rid, fields);
-        Map<String, Object> existing = repo.findIdempotent(rid);
-        if (existing != null) {
-            return replayOrConflict(rid, fingerprint, existing, resultType);
-        }
-        while (true) {
-            if (repo.insertIdempotent(rid, requestType, fingerprint, "", clock.now())) {
-                T result = action.get();
-                repo.updateIdempotentResult(rid, idem.toJson(result));
-                return result;
-            }
-            // 同键并发：等待首个事务提交结果；若其回滚（占位行消失）则重新抢占。
-            Map<String, Object> raced = waitForIdempotentResult(rid);
-            if (raced != null) {
-                return replayOrConflict(rid, fingerprint, raced, resultType);
-            }
-        }
-    }
-
-    private <T> T replayOrConflict(String rid, String fingerprint, Map<String, Object> row, Class<T> resultType) {
-        if (!fingerprint.equals(row.get("fingerprint"))) {
-            throw new ConflictException("requestId=" + rid + " 请求参数与首次调用不一致（409 幂等冲突）");
-        }
-        return idem.fromJson((String) row.get("result_json"), resultType);
-    }
-
-    /**
-     * 并发同键后等待首个事务提交结果（真实并发协调，带超时）。
-     * @return 已回写结果的幂等行；占位行消失（首个事务回滚）时返回 null 供调用方重新抢占
-     */
-    private Map<String, Object> waitForIdempotentResult(String rid) {
-        long deadlineMillis = System.currentTimeMillis() + 15_000L;
-        while (true) {
-            Map<String, Object> row = repo.findIdempotent(rid);
-            if (row == null) {
-                return null;
-            }
-            if (!"".equals(row.get("result_json"))) {
-                return row;
-            }
-            if (System.currentTimeMillis() >= deadlineMillis) {
-                throw new ConflictException("requestId=" + rid + " 并发请求等待首次结果超时");
-            }
-            try {
-                Thread.sleep(20L);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new ConflictException("并发幂等等待被中断");
-            }
-        }
+        return idem.execute(requestId, requestType, fields, resultType, action, false);
     }
 
     // ---------------- 公共辅助 ----------------
