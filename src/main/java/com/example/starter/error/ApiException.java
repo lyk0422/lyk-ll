@@ -22,6 +22,11 @@ public class ApiException extends RuntimeException {
         return code;
     }
 
+    /** 400：参数非法（格式错误、无法解析的枚举或时刻、集合重复等）。 */
+    public static ApiException badRequest(String message) {
+        return new ApiException(400, "BAD_REQUEST", message);
+    }
+
     /** 404：批次或头只不存在。 */
     public static ApiException notFound(String message) {
         return new ApiException(404, "NOT_FOUND", message);

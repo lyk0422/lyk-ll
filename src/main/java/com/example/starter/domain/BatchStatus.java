@@ -14,6 +14,8 @@ public enum BatchStatus {
     PAUSED,
     /** 判定分流完成，等待回执勾稽与出厂核销。 */
     JUDGED,
+    /** 风险抽检任一阳性：专项隔离，四类判定保留但受控出厂拒绝。 */
+    SPECIAL_QUARANTINE,
     /** 出厂核销，终态。 */
     RELEASED
 }

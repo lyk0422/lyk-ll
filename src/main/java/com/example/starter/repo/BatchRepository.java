@@ -128,7 +128,16 @@ public class BatchRepository {
     }
 
     public void markJudged(long batchId, String at) {
-        jdbc.update("UPDATE slaughter_batch SET status = 'JUDGED', judged_at = ? WHERE id = ?", at, batchId);
+        // 专项隔离状态承载阳性证据，判定完成不得覆盖；judged_at 照常落库以保留四类判定结果。
+        jdbc.update("UPDATE slaughter_batch SET"
+                + " status = CASE WHEN status = 'SPECIAL_QUARANTINE' THEN status ELSE 'JUDGED' END,"
+                + " judged_at = ? WHERE id = ?", at, batchId);
+    }
+
+    /** 行锁锁定批次主行（SELECT ... FOR UPDATE），序列化风险变更/结果与出厂核销竞争。 */
+    public void lockBatch(long batchId) {
+        jdbc.queryForObject("SELECT id FROM slaughter_batch WHERE id = ? FOR UPDATE",
+                Long.class, batchId);
     }
 
     public int markReleased(long batchId, String at) {

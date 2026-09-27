@@ -11,6 +11,12 @@ import com.example.starter.web.dto.InspectionRequest;
 import com.example.starter.web.dto.InspectionResponse;
 import com.example.starter.web.dto.PreQuarantineRequest;
 import com.example.starter.web.dto.PreQuarantineResponse;
+import com.example.starter.web.dto.RiskBindRequest;
+import com.example.starter.web.dto.RiskChangeRequest;
+import com.example.starter.web.dto.RiskChecklistResponse;
+import com.example.starter.web.dto.RiskResultRequest;
+import com.example.starter.web.dto.RiskResultResponse;
+import com.example.starter.web.dto.RiskSummaryView;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -52,6 +58,10 @@ abstract class BaseIntegrationTest {
         jdbc.update("DELETE FROM late_event");
         jdbc.update("DELETE FROM harmless_receipt");
         jdbc.update("DELETE FROM judgment_detail");
+        jdbc.update("DELETE FROM risk_sample");
+        jdbc.update("DELETE FROM risk_checklist");
+        jdbc.update("DELETE FROM risk_change_event");
+        jdbc.update("DELETE FROM risk_binding");
         jdbc.update("DELETE FROM head_ledger");
         jdbc.update("DELETE FROM slaughter_batch");
         clock.set(TestClockConfig.T0);
@@ -104,5 +114,42 @@ abstract class BaseIntegrationTest {
     protected int countRows(String table) {
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class);
         return count == null ? 0 : count;
+    }
+
+    // ---------- 风险抽检流程辅助 ----------
+
+    protected RiskChecklistResponse bindRisk(String requestId, String batchNo, String level,
+                                             String ruleVersion, List<String> declared,
+                                             int expectedVersion) throws Exception {
+        return postOk("/api/batches/" + batchNo + "/risk/bind",
+                new RiskBindRequest(requestId, level, ruleVersion, declared, expectedVersion,
+                        clock.instant().toString()),
+                RiskChecklistResponse.class);
+    }
+
+    protected RiskChecklistResponse changeRisk(String requestId, String batchNo, String level,
+                                               String ruleVersion, List<String> declared,
+                                               int expectedVersion) throws Exception {
+        return postOk("/api/batches/" + batchNo + "/risk/changes",
+                new RiskChangeRequest(requestId, level, ruleVersion, declared, expectedVersion,
+                        clock.instant().toString()),
+                RiskChecklistResponse.class);
+    }
+
+    protected RiskResultResponse riskResult(String requestId, String batchNo, String headNo,
+                                            String result, int expectedVersion) throws Exception {
+        return postOk("/api/batches/" + batchNo + "/risk/results",
+                new RiskResultRequest(requestId, headNo, result, expectedVersion,
+                        clock.instant().toString()),
+                RiskResultResponse.class);
+    }
+
+    protected RiskSummaryView getRisk(String batchNo) throws Exception {
+        String json = mockMvc.perform(get("/api/batches/{batchNo}/risk", batchNo))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        return om.readValue(json, RiskSummaryView.class);
     }
 }

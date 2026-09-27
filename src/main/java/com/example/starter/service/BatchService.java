@@ -63,14 +63,17 @@ public class BatchService {
     private final BatchRepository repo;
     private final Clock clock;
     private final ObjectMapper objectMapper;
+    /** 风险抽检门禁：受控批次全部样本阴性且抽检完成才允许出厂核销。 */
+    private final RiskService riskService;
     /** 漏检暂停独立事务：判定请求整体回滚时，暂停状态仍须落库。 */
     private final TransactionTemplate pauseTemplate;
 
     public BatchService(BatchRepository repo, Clock clock, ObjectMapper objectMapper,
-                        PlatformTransactionManager transactionManager) {
+                        PlatformTransactionManager transactionManager, RiskService riskService) {
         this.repo = repo;
         this.clock = clock;
         this.objectMapper = objectMapper;
+        this.riskService = riskService;
         this.pauseTemplate = new TransactionTemplate(transactionManager);
         this.pauseTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
@@ -157,7 +160,8 @@ public class BatchService {
         String status = batch.status();
         boolean inspectable = BatchStatus.PRE_QUARANTINED.name().equals(status)
                 || BatchStatus.INSPECTING.name().equals(status)
-                || BatchStatus.PAUSED.name().equals(status);
+                || BatchStatus.PAUSED.name().equals(status)
+                || BatchStatus.SPECIAL_QUARANTINE.name().equals(status);
         if (!inspectable) {
             throw ApiException.conflict("批次当前状态不允许同步检验");
         }
@@ -192,7 +196,8 @@ public class BatchService {
         String status = batch.status();
         boolean judgeable = BatchStatus.PRE_QUARANTINED.name().equals(status)
                 || BatchStatus.INSPECTING.name().equals(status)
-                || BatchStatus.PAUSED.name().equals(status);
+                || BatchStatus.PAUSED.name().equals(status)
+                || BatchStatus.SPECIAL_QUARANTINE.name().equals(status);
         if (!judgeable) {
             throw ApiException.conflict("批次当前状态不允许判定分流");
         }
@@ -202,11 +207,14 @@ public class BatchService {
                 .map(HeadRow::headNo)
                 .toList();
         if (!missing.isEmpty()) {
-            // 独立事务落库暂停状态：判定请求本身回滚，整批暂停仍然生效
-            pauseTemplate.executeWithoutResult(s -> repo.transitionStatus(batch.id(),
-                    List.of(BatchStatus.PRE_QUARANTINED.name(), BatchStatus.INSPECTING.name(),
-                            BatchStatus.PAUSED.name()),
-                    BatchStatus.PAUSED.name()));
+            if (!BatchStatus.SPECIAL_QUARANTINE.name().equals(status)) {
+                // 独立事务落库暂停状态：判定请求本身回滚，整批暂停仍然生效；
+                // 已专项隔离的批次阳性证据优先，不被 PAUSED 覆盖。
+                pauseTemplate.executeWithoutResult(s -> repo.transitionStatus(batch.id(),
+                        List.of(BatchStatus.PRE_QUARANTINED.name(), BatchStatus.INSPECTING.name(),
+                                BatchStatus.PAUSED.name()),
+                        BatchStatus.PAUSED.name()));
+            }
             throw ApiException.conflict("存在漏检头只 " + missing + "，整批暂停流转");
         }
         Map<String, HeadRow> byHeadNo = new LinkedHashMap<>();
@@ -243,7 +251,9 @@ public class BatchService {
             counts.merge(r.category().name(), 1, Integer::sum);
         }
         repo.markJudged(batch.id(), now);
-        return new JudgmentResponse(batchNo, BatchStatus.JUDGED.name(), resolved.size(), counts);
+        String resultingStatus = repo.findBatchByNo(batchNo)
+                .map(BatchRow::status).orElse(BatchStatus.JUDGED.name());
+        return new JudgmentResponse(batchNo, resultingStatus, resolved.size(), counts);
     }
 
     /** 单头只判定项解析结果。 */
@@ -291,7 +301,8 @@ public class BatchService {
             return new ReceiptResponse(batchNo, req.receiptNo(), category.name(), req.headCount(),
                     true, reconciliation(batch.id()));
         }
-        if (!BatchStatus.JUDGED.name().equals(batch.status())) {
+        if (!BatchStatus.JUDGED.name().equals(batch.status())
+                && !BatchStatus.SPECIAL_QUARANTINE.name().equals(batch.status())) {
             throw ApiException.conflict("批次未完成判定分流，不允许登记无害化处理回执");
         }
         repo.insertReceipt(batch.id(), req.receiptNo(), category.name(), req.headCount(),
@@ -313,9 +324,15 @@ public class BatchService {
 
     private ReleaseResponse doRelease(String batchNo) {
         BatchRow batch = mustFind(batchNo);
+        // 先锁批次主行：与风险结果/变更同序互斥，杜绝阳性与出厂核销竞争放行。
+        repo.lockBatch(batch.id());
+        batch = mustFind(batchNo);
         if (BatchStatus.RELEASED.name().equals(batch.status())) {
             return new ReleaseResponse(batchNo, BatchStatus.RELEASED.name(), batch.releasedAt(),
                     reconciliation(batch.id()));
+        }
+        if (BatchStatus.SPECIAL_QUARANTINE.name().equals(batch.status())) {
+            throw ApiException.conflict("批次处于专项隔离，四类判定保留但受控出厂拒绝");
         }
         if (!BatchStatus.JUDGED.name().equals(batch.status())) {
             throw ApiException.conflict("批次未达到可核销状态");
@@ -328,6 +345,8 @@ public class BatchService {
         if (!mismatched.isEmpty()) {
             throw ApiException.conflict("回执头只数与判定数不一致，拒绝出厂：" + mismatched);
         }
+        // 风险抽检门禁：受控批次全部清单完成且全部样本阴性才解除；未受控批次直接通过。
+        riskService.assertReleaseGate(batch.id());
         String now = now();
         int updated = repo.markReleased(batch.id(), now);
         if (updated == 0) {

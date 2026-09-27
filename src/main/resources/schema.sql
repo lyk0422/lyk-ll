@@ -117,3 +117,92 @@ COMMENT ON COLUMN idempotency_record.endpoint IS '受理接口标识';
 COMMENT ON COLUMN idempotency_record.fingerprint IS '请求指纹：requestId 与全部业务字段的 SHA-256';
 COMMENT ON COLUMN idempotency_record.response_body IS '首次受理的响应报文（JSON），同键同参重放时原样返回';
 COMMENT ON COLUMN idempotency_record.created_at IS '登记时间（UTC ISO-8601）';
+
+-- ========== 风险抽检层（合成规则，不用于生产） ==========
+
+CREATE TABLE IF NOT EXISTS risk_binding (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    version INT NOT NULL,
+    level VARCHAR(32) NOT NULL,
+    rule_version VARCHAR(64) NOT NULL,
+    current_sequence_no BIGINT NOT NULL,
+    created_at VARCHAR(40) NOT NULL,
+    updated_at VARCHAR(40) NOT NULL,
+    CONSTRAINT uk_risk_binding_batch UNIQUE (batch_id)
+);
+COMMENT ON TABLE risk_binding IS '风险绑定：受控批次宰前检疫合格后绑定合成风险等级，每批仅一行，承载乐观版本与当前清单序号';
+COMMENT ON COLUMN risk_binding.batch_id IS '所属屠宰批次主键';
+COMMENT ON COLUMN risk_binding.version IS '风险版本：首次绑定为 1，每次成功变更（等级变更/接受新结果）加 1，同结果重复不增加，迟到事件不增加';
+COMMENT ON COLUMN risk_binding.level IS '当前风险等级：NORMAL 普通抽检10% / TIGHTENED 加严抽检30%';
+COMMENT ON COLUMN risk_binding.rule_version IS '当前合成风险规则版本（随每次清单冻结更新，仅合成数据）';
+COMMENT ON COLUMN risk_binding.current_sequence_no IS '当前清单序号：同一批次只一个当前清单，原子扩充沿用原序号，补充清单序号加 1';
+COMMENT ON COLUMN risk_binding.created_at IS '绑定时间（UTC ISO-8601）';
+COMMENT ON COLUMN risk_binding.updated_at IS '最近一次成功风险变更时间（UTC ISO-8601）';
+
+CREATE TABLE IF NOT EXISTS risk_checklist (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    sequence_no BIGINT NOT NULL,
+    kind VARCHAR(32) NOT NULL,
+    level VARCHAR(32) NOT NULL,
+    rule_version VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    frozen_declared CLOB NOT NULL,
+    frozen_samples CLOB NOT NULL,
+    created_at VARCHAR(40) NOT NULL,
+    completed_at VARCHAR(40) NULL,
+    CONSTRAINT uk_risk_checklist_seq UNIQUE (batch_id, sequence_no)
+);
+COMMENT ON TABLE risk_checklist IS '风险抽检清单：冻结编号清单、风险规则版本及申报头只集合，同一批次只一个当前清单';
+COMMENT ON COLUMN risk_checklist.batch_id IS '所属屠宰批次主键';
+COMMENT ON COLUMN risk_checklist.sequence_no IS '清单序号，批次内从 1 递增：原子扩充沿用原序号，补充清单另开新序号';
+COMMENT ON COLUMN risk_checklist.kind IS '清单类型：INITIAL 首份 / EXPANDED 提高等级原子扩充 / SUPPLEMENTARY 已完成后新增风险补充清单';
+COMMENT ON COLUMN risk_checklist.level IS '清单冻结时的风险等级：NORMAL/TIGHTENED';
+COMMENT ON COLUMN risk_checklist.rule_version IS '清单冻结时的合成风险规则版本';
+COMMENT ON COLUMN risk_checklist.status IS '清单状态：OPEN 进行中（可提交结果）/ COMPLETED 已完成（全部冻结样本有结果，不可改）';
+COMMENT ON COLUMN risk_checklist.frozen_declared IS '冻结申报头只集合（JSON 数组，字典序），与头只台账集合一致';
+COMMENT ON COLUMN risk_checklist.frozen_samples IS '冻结抽检编号集合（JSON 数组，字典序）：申报集合字典序前 ceil(总数×比例) 只且至少 1 只';
+COMMENT ON COLUMN risk_checklist.created_at IS '清单冻结时间（UTC ISO-8601）';
+COMMENT ON COLUMN risk_checklist.completed_at IS '清单完成时间（UTC ISO-8601，最后一只结果登记时刻），NULL 表示未完成';
+
+CREATE TABLE IF NOT EXISTS risk_sample (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    sequence_no BIGINT NOT NULL,
+    head_no VARCHAR(64) NOT NULL,
+    result VARCHAR(16) NOT NULL,
+    submitted_at VARCHAR(40) NOT NULL,
+    CONSTRAINT uk_risk_sample UNIQUE (batch_id, sequence_no, head_no)
+);
+COMMENT ON TABLE risk_sample IS '抽检逐只结果：每个冻结样本至多一条结果，同结果重复不新增，异结果冲突，清单外编号拒绝';
+COMMENT ON COLUMN risk_sample.batch_id IS '所属屠宰批次主键';
+COMMENT ON COLUMN risk_sample.sequence_no IS '所属抽检清单序号';
+COMMENT ON COLUMN risk_sample.head_no IS '头只编号，须属于同序号清单冻结抽检集合';
+COMMENT ON COLUMN risk_sample.result IS '抽检结果：NEGATIVE 阴性 / POSITIVE 阳性（任一阳性整批专项隔离）';
+COMMENT ON COLUMN risk_sample.submitted_at IS '结果提交业务精确时刻（UTC ISO-8601）';
+
+CREATE TABLE IF NOT EXISTS risk_change_event (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    event_type VARCHAR(32) NOT NULL,
+    from_level VARCHAR(32) NULL,
+    to_level VARCHAR(32) NOT NULL,
+    from_rule_version VARCHAR(64) NULL,
+    to_rule_version VARCHAR(64) NOT NULL,
+    sequence_no BIGINT NOT NULL,
+    from_version INT NOT NULL,
+    to_version INT NOT NULL,
+    created_at VARCHAR(40) NOT NULL
+);
+COMMENT ON TABLE risk_change_event IS '风险变更证据台账：绑定、提高等级原子扩充、补充清单逐次留痕，支撑复算与审计';
+COMMENT ON COLUMN risk_change_event.batch_id IS '所属屠宰批次主键';
+COMMENT ON COLUMN risk_change_event.event_type IS '事件类型：BIND 首次绑定 / EXPAND 原子扩充 / SUPPLEMENT 补充清单';
+COMMENT ON COLUMN risk_change_event.from_level IS '变更前风险等级，BIND 时为 NULL';
+COMMENT ON COLUMN risk_change_event.to_level IS '变更后风险等级';
+COMMENT ON COLUMN risk_change_event.from_rule_version IS '变更前规则版本，BIND 时为 NULL';
+COMMENT ON COLUMN risk_change_event.to_rule_version IS '变更后规则版本';
+COMMENT ON COLUMN risk_change_event.sequence_no IS '事件关联清单序号（扩充沿用原序号，补充清单为新序号）';
+COMMENT ON COLUMN risk_change_event.from_version IS '变更前风险版本，BIND 时为 0';
+COMMENT ON COLUMN risk_change_event.to_version IS '变更后风险版本';
+COMMENT ON COLUMN risk_change_event.created_at IS '事件记录时间（UTC ISO-8601）';
