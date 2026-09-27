@@ -21,6 +21,16 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.CONFLICT, ex.getMessage());
     }
 
+    @ExceptionHandler(VersionConflictException.class)
+    public ResponseEntity<Map<String, Object>> handleVersionConflict(VersionConflictException ex) {
+        return build(HttpStatus.CONFLICT, ex.getMessage());
+    }
+
+    @ExceptionHandler(BusinessRejectedException.class)
+    public ResponseEntity<Map<String, Object>> handleBusinessRejected(BusinessRejectedException ex) {
+        return build(HttpStatus.UNPROCESSABLE_ENTITY, ex.getMessage());
+    }
+
     @ExceptionHandler(TaskNotAcceptedException.class)
     public ResponseEntity<Map<String, Object>> handleNotAccepted(TaskNotAcceptedException ex) {
         return build(HttpStatus.CONFLICT, ex.getMessage());

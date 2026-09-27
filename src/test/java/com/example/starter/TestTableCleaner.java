@@ -16,6 +16,11 @@ public class TestTableCleaner {
     }
 
     public void clean() {
+        jdbc.update("DELETE FROM tank_ledger");
+        jdbc.update("DELETE FROM refill_event");
+        jdbc.update("DELETE FROM refill_order");
+        jdbc.update("DELETE FROM injection_plan");
+        jdbc.update("DELETE FROM odorant_tank");
         jdbc.update("DELETE FROM odorant_reading");
         jdbc.update("DELETE FROM pressure_reading");
         jdbc.update("DELETE FROM adjustment_issue");

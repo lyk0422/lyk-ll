@@ -6,6 +6,7 @@ import com.example.starter.idempotent.ReplayResult;
 import com.example.starter.reading.LateEventRepository;
 import com.example.starter.station.Station;
 import com.example.starter.station.StationRepository;
+import com.example.starter.tank.InjectionPlanService;
 import com.example.starter.valve.ValveState;
 import com.example.starter.valve.ValveStateRepository;
 import com.example.starter.web.ResourceNotFoundException;
@@ -29,11 +30,16 @@ import java.time.LocalDate;
  *       未受理方返回 409；</li>
  *   <li>PRESSURE 调压（回归目标压力）与 INJECTION 比例加注调整在同一事务下发，
  *       任一失败整体回滚；</li>
+ *   <li>绑定储罐的门站：加注先经储罐安全储备预占，储备不足则生成待补液事件、
+ *       不下发加注（加注量记 0、速率维持，不伪报加注成功），调压处置仍进行；
+ *       未绑定储罐的旧门站行为不变；</li>
  *   <li>对应业务日期已封存时只落迟到事件，不联动。</li>
  * </ul>
  */
 @Service
 public class PressureService {
+
+    private static final BigDecimal MG_PER_KG = BigDecimal.valueOf(1_000_000);
 
     private final StationRepository stationRepository;
     private final ValveStateRepository valveStateRepository;
@@ -43,6 +49,7 @@ public class PressureService {
     private final StationTaskLockRepository taskLockRepository;
     private final LinkageTaskRepository linkageTaskRepository;
     private final AdjustmentIssueRepository adjustmentIssueRepository;
+    private final InjectionPlanService injectionPlanService;
     private final IdempotencyService idempotencyService;
 
     public PressureService(StationRepository stationRepository,
@@ -53,6 +60,7 @@ public class PressureService {
                            StationTaskLockRepository taskLockRepository,
                            LinkageTaskRepository linkageTaskRepository,
                            AdjustmentIssueRepository adjustmentIssueRepository,
+                           InjectionPlanService injectionPlanService,
                            IdempotencyService idempotencyService) {
         this.stationRepository = stationRepository;
         this.valveStateRepository = valveStateRepository;
@@ -62,6 +70,7 @@ public class PressureService {
         this.taskLockRepository = taskLockRepository;
         this.linkageTaskRepository = linkageTaskRepository;
         this.adjustmentIssueRepository = adjustmentIssueRepository;
+        this.injectionPlanService = injectionPlanService;
         this.idempotencyService = idempotencyService;
     }
 
@@ -130,6 +139,18 @@ public class PressureService {
             dose = request.gasFlowM3()
                     .multiply(station.targetConcentrationMgM3())
                     .setScale(3, RoundingMode.HALF_UP);
+            // 储罐安全储备门禁：绑定储罐的门站先预占再下发加注（未绑定返回 null，旧行为不变）
+            BigDecimal requiredKg = dose.divide(MG_PER_KG, 3, RoundingMode.HALF_UP);
+            if (requiredKg.signum() > 0) {
+                InjectionPlanService.LinkageReserveResult reserve =
+                        injectionPlanService.reserveForLinkage(
+                                station, taskId, "LINK-" + taskId, requiredKg, request.detectedAt());
+                if (reserve != null && !reserve.dispatched()) {
+                    // 储备不足：已生成待补液事件，不下发加注；调压仍执行，不伪报加注成功
+                    rateAfter = rateBefore;
+                    dose = BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP);
+                }
+            }
         }
 
         // 调压与加注调整同事务下发（两条指令 + 状态更新 + 任务完成原子提交）
