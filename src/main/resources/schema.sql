@@ -134,6 +134,65 @@ COMMENT ON COLUMN telemetry.state IS '回报状态：OPEN/CLOSED/APPLIED/REMOVED
 COMMENT ON COLUMN telemetry.late IS '是否迟到遥信（票已归档后到达，仅记录不处理）';
 COMMENT ON COLUMN telemetry.created_at IS '入库时刻（UTC）';
 
+CREATE TABLE IF NOT EXISTS ground_wire (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    wire_no     VARCHAR(64) NOT NULL,
+    status      VARCHAR(24) NOT NULL,
+    version     INT         NOT NULL,
+    ticket_id   BIGINT,
+    interval_id VARCHAR(64),
+    created_at  TIMESTAMP   NOT NULL,
+    updated_at  TIMESTAMP   NOT NULL,
+    CONSTRAINT uk_ground_wire_no UNIQUE (wire_no)
+);
+COMMENT ON TABLE ground_wire IS '临时接地线实物表（合成数据），乐观锁版本控制';
+COMMENT ON COLUMN ground_wire.id IS '主键，自增';
+COMMENT ON COLUMN ground_wire.wire_no IS '接地线唯一编号';
+COMMENT ON COLUMN ground_wire.status IS '状态：AVAILABLE可用/BORROWED借出/APPLIED已挂接/REMOVED_PENDING_RETURN已拆除待归还';
+COMMENT ON COLUMN ground_wire.version IS '乐观锁版本，从1开始，每次成功变更加1';
+COMMENT ON COLUMN ground_wire.ticket_id IS '当前占用操作票主键，可用状态为空';
+COMMENT ON COLUMN ground_wire.interval_id IS '借用绑定间隔编号，可用状态为空';
+COMMENT ON COLUMN ground_wire.created_at IS '登记时刻（UTC）';
+COMMENT ON COLUMN ground_wire.updated_at IS '最近变更时刻（UTC）';
+
+CREATE TABLE IF NOT EXISTS ground_wire_loan (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    wire_id     BIGINT      NOT NULL,
+    ticket_id   BIGINT      NOT NULL,
+    interval_id VARCHAR(64) NOT NULL,
+    borrowed_at TIMESTAMP   NOT NULL,
+    returned_at TIMESTAMP,
+    keeper_id   VARCHAR(64)
+);
+COMMENT ON TABLE ground_wire_loan IS '临时接地线借用/归还历史，归还后保留不删除';
+COMMENT ON COLUMN ground_wire_loan.id IS '主键，自增';
+COMMENT ON COLUMN ground_wire_loan.wire_id IS '接地线主键';
+COMMENT ON COLUMN ground_wire_loan.ticket_id IS '借用绑定操作票主键';
+COMMENT ON COLUMN ground_wire_loan.interval_id IS '借用绑定间隔编号';
+COMMENT ON COLUMN ground_wire_loan.borrowed_at IS '借出时刻（UTC）';
+COMMENT ON COLUMN ground_wire_loan.returned_at IS '归还核销时刻（UTC），未归还为空';
+COMMENT ON COLUMN ground_wire_loan.keeper_id IS '归还核销仓管编号，未归还为空';
+
+CREATE TABLE IF NOT EXISTS ground_wire_event (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    wire_id     BIGINT      NOT NULL,
+    ticket_id   BIGINT      NOT NULL,
+    step_seq    INT         NOT NULL,
+    action      VARCHAR(16) NOT NULL,
+    operator_id VARCHAR(64) NOT NULL,
+    guardian_id VARCHAR(64) NOT NULL,
+    created_at  TIMESTAMP   NOT NULL
+);
+COMMENT ON TABLE ground_wire_event IS '接地线挂接/拆除双人确认证据，仅插入不可覆盖';
+COMMENT ON COLUMN ground_wire_event.id IS '主键，自增';
+COMMENT ON COLUMN ground_wire_event.wire_id IS '接地线主键';
+COMMENT ON COLUMN ground_wire_event.ticket_id IS '关联操作票主键';
+COMMENT ON COLUMN ground_wire_event.step_seq IS '引用本票步序';
+COMMENT ON COLUMN ground_wire_event.action IS '动作：APPLY挂接/REMOVE拆除';
+COMMENT ON COLUMN ground_wire_event.operator_id IS '操作人编号';
+COMMENT ON COLUMN ground_wire_event.guardian_id IS '监护人编号，必须与操作人不同';
+COMMENT ON COLUMN ground_wire_event.created_at IS '证据时刻（UTC）';
+
 CREATE TABLE IF NOT EXISTS unlock_record (
     id           BIGINT AUTO_INCREMENT PRIMARY KEY,
     device_id    VARCHAR(64)  NOT NULL,

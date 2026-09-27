@@ -7,6 +7,7 @@ import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.function.Supplier;
 
 import org.springframework.dao.DuplicateKeyException;
@@ -41,9 +42,32 @@ public class IdempotencyService {
         for (String field : businessFields) {
             sb.append('|').append(field == null ? "" : field);
         }
+        return sha256Hex(sb.toString());
+    }
+
+    /**
+     * 计算结构化请求指纹：长度前缀编码后做 SHA-256，
+     * 字段边界无歧义，合法文本含分隔符（如 '|'、':'）也可区分。
+     */
+    public static String structuredFingerprint(String endpoint, String requestId, List<String> businessFields) {
+        StringBuilder sb = new StringBuilder();
+        appendLengthPrefixed(sb, endpoint);
+        appendLengthPrefixed(sb, requestId);
+        for (String field : businessFields) {
+            appendLengthPrefixed(sb, field);
+        }
+        return sha256Hex(sb.toString());
+    }
+
+    private static void appendLengthPrefixed(StringBuilder sb, String field) {
+        String value = field == null ? "" : field;
+        sb.append(value.length()).append(':').append(value).append(';');
+    }
+
+    private static String sha256Hex(String input) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(digest.digest(sb.toString().getBytes(StandardCharsets.UTF_8)));
+            return HexFormat.of().formatHex(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 不可用", e);
         }

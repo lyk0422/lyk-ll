@@ -74,6 +74,16 @@ public class InterlockService {
         };
     }
 
+    /**
+     * 评估指定间隔是否带电（带电挂接地线闭锁），供临时接地线挂接在事务内复查。
+     *
+     * @param intervalId 间隔编号
+     * @return 评估结果，blocked=true 表示间隔带电禁止挂接
+     */
+    public InterlockResult evaluateLiveGround(String intervalId) {
+        return checkLiveGround(intervalId);
+    }
+
     /** 带负荷拉合刀闸：间隔内开关合位时禁止拉合刀闸。 */
     private InterlockResult checkLoadDisconnector(String intervalId) {
         List<String> closedBreakers = closedBreakers(intervalId);

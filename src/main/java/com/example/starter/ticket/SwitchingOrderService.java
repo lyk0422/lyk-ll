@@ -19,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.example.starter.error.ApiException;
+import com.example.starter.groundwire.GroundWireService;
 import com.example.starter.interlock.InterlockResult;
 import com.example.starter.interlock.InterlockService;
 import com.example.starter.ticket.TicketDtos.ArchiveRequest;
@@ -70,13 +71,15 @@ public class SwitchingOrderService {
     private final JdbcTemplate jdbc;
     private final Clock clock;
     private final InterlockService interlockService;
+    private final GroundWireService groundWireService;
     private final TransactionTemplate requiresNewTx;
 
     public SwitchingOrderService(JdbcTemplate jdbc, Clock businessClock, InterlockService interlockService,
-                                 PlatformTransactionManager txManager) {
+                                 GroundWireService groundWireService, PlatformTransactionManager txManager) {
         this.jdbc = jdbc;
         this.clock = businessClock;
         this.interlockService = interlockService;
+        this.groundWireService = groundWireService;
         this.requiresNewTx = new TransactionTemplate(txManager);
         this.requiresNewTx.setPropagationBehavior(
                 org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
@@ -174,6 +177,10 @@ public class SwitchingOrderService {
             throw ApiException.conflict("INTERLOCK_BLOCKED",
                     interlock.detail() + " [" + interlock.ruleCode() + "]");
         }
+        // 送电门禁：送电类步在事务内重新检查间隔临时接地线均已拆除，不信任拟票快照
+        if ("CLOSE_BREAKER".equals(step.operationType())) {
+            groundWireService.assertIntervalGroundsRemoved(ticket.intervalId(), ticketId, seq);
+        }
         Instant now = Instant.now(clock);
         jdbc.update("UPDATE switching_step SET status = 'DONE', operator_id = ?, guardian_id = ?, executed_at = ?"
                         + " WHERE id = ? AND status = 'PENDING'",
@@ -195,6 +202,12 @@ public class SwitchingOrderService {
         ticket = refreshExpiry(ticket, false);
         switch (ticket.status()) {
             case "ISSUED", "EXECUTING", "EXCEPTION", "EXPIRED" -> {
+                // 归档门禁：本票借用的临时接地线须全部归还，历史借用记录保留
+                int outstanding = groundWireService.countOutstandingForTicket(ticketId);
+                if (outstanding > 0) {
+                    throw ApiException.unprocessable("GROUND_WIRE_OUTSTANDING",
+                            "本票尚有 " + outstanding + " 条临时接地线未归还核销，不可归档");
+                }
                 jdbc.update("UPDATE switching_ticket SET status = 'ARCHIVED', updated_at = ? WHERE id = ?",
                         Timestamp.from(Instant.now(clock)), ticketId);
                 releaseLock(ticket.intervalId(), ticketId);
