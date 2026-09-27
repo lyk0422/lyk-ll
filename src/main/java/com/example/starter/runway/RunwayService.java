@@ -33,6 +33,8 @@ public class RunwayService {
     private final WeatherRepository weatherRepository;
     private final RunwayProperties properties;
     private final IdempotencyExecutor idempotencyExecutor;
+    private final RunwayCoordinationRepository coordinationRepository;
+    private final RoutinePlanService routinePlanService;
     private final Clock clock;
 
     public RunwayService(RunwayEventRepository eventRepository,
@@ -42,6 +44,8 @@ public class RunwayService {
                          WeatherRepository weatherRepository,
                          RunwayProperties properties,
                          IdempotencyExecutor idempotencyExecutor,
+                         RunwayCoordinationRepository coordinationRepository,
+                         RoutinePlanService routinePlanService,
                          Clock clock) {
         this.eventRepository = eventRepository;
         this.inspectionRepository = inspectionRepository;
@@ -50,6 +54,8 @@ public class RunwayService {
         this.weatherRepository = weatherRepository;
         this.properties = properties;
         this.idempotencyExecutor = idempotencyExecutor;
+        this.coordinationRepository = coordinationRepository;
+        this.routinePlanService = routinePlanService;
         this.clock = clock;
     }
 
@@ -77,11 +83,16 @@ public class RunwayService {
 
     private ReportResponse doReport(ReportRequest request) {
         Instant now = clock.instant();
+        // 先取得跑道行锁：与例行巡检开始/完成串行化，保证“批准/开始与紧急接报并发”得到唯一占用状态；
+        // 跨跑道使用不同锁行互不阻塞。
+        coordinationRepository.lockRunway(request.runwayId());
         Instant closedAt = request.reportedAt();
         Instant deadline = closedAt.plus(properties.inspectionStartLimitMinutes(), ChronoUnit.MINUTES);
         RunwayEvent event = new RunwayEvent(0L, request.runwayId(), request.eventType(), EventStatus.CLOSED,
                 request.reportedAt(), closedAt, deadline, false, null, request.requestId(), now, now);
         event = eventRepository.insert(event, 1);
+        // 同事务抢占例行计划：未开始取消、已开始中止并保留检查项、释放巡检占用。
+        routinePlanService.preemptPlansForEmergency(request.runwayId(), event.id(), now);
         String notamNo = "NTM-C-" + event.id();
         notamRepository.insert(new NotamRecord(0L, event.id(), event.runwayId(), NotamAction.CLOSE,
                 notamNo, closedAt));
