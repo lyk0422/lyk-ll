@@ -21,6 +21,10 @@ public abstract class AbstractServiceTest {
 
     @org.junit.jupiter.api.BeforeEach
     void cleanDatabase() {
+        jdbcTemplate.update("DELETE FROM collection_batch");
+        jdbcTemplate.update("DELETE FROM collection_packet");
+        jdbcTemplate.update("DELETE FROM collection_session_point");
+        jdbcTemplate.update("DELETE FROM collection_session");
         jdbcTemplate.update("DELETE FROM late_measurement_event");
         jdbcTemplate.update("DELETE FROM release_record");
         jdbcTemplate.update("DELETE FROM witness_record");

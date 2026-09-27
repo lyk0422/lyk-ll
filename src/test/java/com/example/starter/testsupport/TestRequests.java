@@ -4,6 +4,9 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 
+import com.example.starter.api.dto.CollectionCloseRequest;
+import com.example.starter.api.dto.CollectionSessionCreateRequest;
+import com.example.starter.api.dto.CollectionUploadRequest;
 import com.example.starter.api.dto.CoverageRequest;
 import com.example.starter.api.dto.DispatchRequest;
 import com.example.starter.api.dto.InspectionRequest;
@@ -64,5 +67,27 @@ public final class TestRequests {
 
     public static ReleaseRequest release(String requestId, String cardNo, String releasedBy) {
         return new ReleaseRequest(requestId, cardNo, releasedBy);
+    }
+
+    public static CollectionSessionCreateRequest createSession(String requestId, String sessionNo,
+                                                               String cardNo, String toolCode) {
+        return new CollectionSessionCreateRequest(requestId, sessionNo, cardNo, toolCode);
+    }
+
+    /** 采集包：测量时刻为 UTC ISO-8601 文本（须落在绑定工具校验当天）。 */
+    public static CollectionUploadRequest.PacketSpec packet(int seq, String pointCode,
+                                                            String measured, String measuredAtIso) {
+        return new CollectionUploadRequest.PacketSpec(seq, pointCode, new BigDecimal(measured),
+                java.time.Instant.parse(measuredAtIso));
+    }
+
+    public static CollectionUploadRequest upload(String requestId, String sessionNo, int expectedVersion,
+                                                 CollectionUploadRequest.PacketSpec... packets) {
+        return new CollectionUploadRequest(requestId, sessionNo, expectedVersion, List.of(packets));
+    }
+
+    public static CollectionCloseRequest closeSession(String requestId, String sessionNo,
+                                                      int expectedVersion) {
+        return new CollectionCloseRequest(requestId, sessionNo, expectedVersion);
     }
 }

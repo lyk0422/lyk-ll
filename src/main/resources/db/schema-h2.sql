@@ -128,6 +128,59 @@ CREATE TABLE IF NOT EXISTS late_measurement_event (
 );
 CREATE INDEX IF NOT EXISTS idx_late_card ON late_measurement_event (card_id);
 
+-- 工具采集会话：绑定工序卡、力矩工具及其日校验版本（创建时快照），并快照紧固点清单。
+-- watermark 为已连续入账的最大包序号（0=未入账），只推进到连续完整前缀；
+-- version 为乐观锁版本，从 1 开始，每次成功变更（入账/迟到登记/关闭）加 1。
+CREATE TABLE IF NOT EXISTS collection_session (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    session_no       VARCHAR(64) NOT NULL COMMENT '采集会话号（全库唯一）',
+    card_no          VARCHAR(64) NOT NULL COMMENT '绑定的工序卡编号',
+    tool_code        VARCHAR(64) NOT NULL COMMENT '绑定的力矩工具编号',
+    calibration_date DATE        NOT NULL COMMENT '绑定的工具日校验版本(UTC日期)，入账时按测量时刻校验',
+    status           VARCHAR(16) NOT NULL COMMENT '会话状态：OPEN=采集中，CLOSED=已关闭(终态)',
+    watermark        INT         NOT NULL DEFAULT 0 COMMENT '水位线：已连续入账的最大包序号，0=尚未入账',
+    version          INT         NOT NULL DEFAULT 1 COMMENT '乐观锁版本，从1开始，成功变更加1',
+    created_at       TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    closed_at        TIMESTAMP(6) NULL     COMMENT '关闭时间(UTC)，NULL=未关闭',
+    CONSTRAINT uk_collection_session_no UNIQUE (session_no)
+);
+CREATE INDEX IF NOT EXISTS idx_collection_session_card ON collection_session (card_no);
+
+-- 会话绑定的紧固点清单快照：创建会话时从工序卡工艺复制，上传按此校验未知点。
+CREATE TABLE IF NOT EXISTS collection_session_point (
+    id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+    session_id BIGINT      NOT NULL COMMENT '所属采集会话',
+    point_code VARCHAR(64) NOT NULL COMMENT '绑定的紧固点编号（会话创建时快照）',
+    CONSTRAINT uk_session_point UNIQUE (session_id, point_code)
+);
+
+-- 原始采集包（append-only 证据）：同会话同序号唯一；同内容重放不追加，异内容 409。
+-- 状态：BUFFERED=乱序缓冲（不参与自检/互检/见证放行），CONSUMED=已按前缀入账，LATE=归档后迟到（不复活卡片）。
+CREATE TABLE IF NOT EXISTS collection_packet (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    session_id      BIGINT        NOT NULL COMMENT '所属采集会话',
+    seq             INT           NOT NULL COMMENT '会话内包序号，从1开始连续',
+    point_code      VARCHAR(64)   NOT NULL COMMENT '紧固点编号',
+    measured_torque DECIMAL(12,3) NOT NULL COMMENT '实测力矩(N·m)，有限正数',
+    measured_at     TIMESTAMP(6)  NOT NULL COMMENT '测量时刻(UTC)',
+    status          VARCHAR(16)   NOT NULL COMMENT '包状态：BUFFERED/CONSUMED/LATE',
+    content_hash    CHAR(64)      NOT NULL COMMENT '包内容SHA-256指纹：判同内容重放与异内容冲突',
+    request_id      VARCHAR(64)   NOT NULL COMMENT '上传批次幂等请求号',
+    created_at      TIMESTAMP(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    CONSTRAINT uk_collection_packet_seq UNIQUE (session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_collection_packet_session ON collection_packet (session_id, status);
+
+-- 采集上传批次台账：每次接受的上传一批，便于批量采集查询。
+CREATE TABLE IF NOT EXISTS collection_batch (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    session_id   BIGINT      NOT NULL COMMENT '所属采集会话',
+    request_id   VARCHAR(64) NOT NULL COMMENT '上传批次幂等请求号',
+    packet_count INT         NOT NULL COMMENT '本批实际追加的包数（不含同内容重放跳过）',
+    created_at   TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    CONSTRAINT uk_collection_batch_req UNIQUE (session_id, request_id)
+);
+
 -- 幂等请求台账：指纹覆盖 requestId 与全部业务字段，同键异参冲突 (409)。
 CREATE TABLE IF NOT EXISTS idempotent_request (
     request_id    VARCHAR(64)  NOT NULL COMMENT '幂等请求号（主键）',
