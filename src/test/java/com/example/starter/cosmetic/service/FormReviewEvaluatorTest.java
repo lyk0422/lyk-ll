@@ -137,13 +137,14 @@ class FormReviewEvaluatorTest {
     private static final class StubCatalog implements CatalogPort {
 
         private static final List<EfficacyCatalog> EFFICACIES = List.of(
-                new EfficacyCatalog("MOISTURIZING", "保湿", false, true),
-                new EfficacyCatalog("SUNSCREEN", "防晒", true, true),
-                new EfficacyCatalog("WHITENING", "美白", true, true),
-                new EfficacyCatalog("MEDICAL_CURE", "医疗治疗作用", true, false));
+                new EfficacyCatalog("MOISTURIZING", "保湿", false, true, true),
+                new EfficacyCatalog("SUNSCREEN", "防晒", true, true, false),
+                new EfficacyCatalog("WHITENING", "美白", true, true, false),
+                new EfficacyCatalog("MEDICAL_CURE", "医疗治疗作用", true, false, false));
 
         private static final List<RestrictedIngredient> RESTRICTED = List.of(
-                new RestrictedIngredient("SALICYLIC_ACID", "水杨酸", new BigDecimal("2.0000")));
+                new RestrictedIngredient("SALICYLIC_ACID", "水杨酸", new BigDecimal("2.0000"),
+                        new BigDecimal("0.5000"), new BigDecimal("1.0000")));
 
         @Override
         public Optional<EfficacyCatalog> findEfficacy(String code) {
@@ -158,6 +159,18 @@ class FormReviewEvaluatorTest {
         @Override
         public Optional<RestrictedIngredient> findRestricted(String ingredientCode) {
             return RESTRICTED.stream().filter(r -> r.ingredientCode().equals(ingredientCode)).findFirst();
+        }
+
+        @Override
+        public String currentAgeRuleVersion() {
+            return "AGE-RULE-V1";
+        }
+
+        @Override
+        public List<com.example.starter.cosmetic.domain.AgeBandRule> listAgeBands(String ruleVersion) {
+            return List.of(
+                    new com.example.starter.cosmetic.domain.AgeBandRule(ruleVersion, "BAND_0_36", 0, 36),
+                    new com.example.starter.cosmetic.domain.AgeBandRule(ruleVersion, "BAND_37_144", 37, 144));
         }
     }
 }

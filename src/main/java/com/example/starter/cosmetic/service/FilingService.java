@@ -1,6 +1,9 @@
 package com.example.starter.cosmetic.service;
 
+import com.example.starter.cosmetic.web.dto.AgeRuleResponse;
 import com.example.starter.cosmetic.web.dto.ChangeFilingRequest;
+import com.example.starter.cosmetic.web.dto.ChildEvidenceResponse;
+import com.example.starter.cosmetic.web.dto.CorrectionFilingRequest;
 import com.example.starter.cosmetic.web.dto.FilingResponse;
 import com.example.starter.cosmetic.web.dto.FilingResultResponse;
 import com.example.starter.cosmetic.web.dto.ReviewDetailResponse;
@@ -46,4 +49,17 @@ public interface FilingService {
 
     /** 扫描并原子生效已期满公示（恰第 10 日 24:00 UTC 起可生效），返回生效数量。 */
     int expireDuePublicNotices(Instant now);
+
+    /**
+     * 儿童备案材料补正：仅允许对最新修订处于待补正（形式审查未通过）状态的儿童备案。
+     * 生成新修订（版本号 +1）并使旧修订待审批准失效（同事务）；公示只能使用最新修订。
+     * 审查不通过时新修订仍为待补正，缺项一次列全并零生效。
+     */
+    FilingResultResponse correct(String filingNo, CorrectionFilingRequest request);
+
+    /** 儿童备案判定证据查询：受理冻结的报告清单、分龄规则版本、标识文本摘要及审查明细。 */
+    ChildEvidenceResponse getChildEvidence(String filingNo, Integer versionNo);
+
+    /** 儿童分龄规则查询（合成初始化结果：当前规则版本与分龄档定义）。 */
+    AgeRuleResponse getAgeRule();
 }

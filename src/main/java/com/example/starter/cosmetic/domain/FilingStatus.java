@@ -20,7 +20,7 @@ public enum FilingStatus {
     OBJECTION_REVIEW(false),
     /** 生效：该产品当前唯一有效的备案。 */
     EFFECTIVE(false),
-    /** 已被新版本替代（实质变更新版本生效或简易变更生效时，旧版本同事务转入此态）。 */
+    /** 已被新版本替代（实质变更新版本生效、简易变更生效，或儿童材料补正生成新修订时旧修订待审批准失效）。 */
     SUPERSEDED(true),
     /** 已注销（终态）：重复注销幂等成功，注销后新宣称审查一律拒绝。 */
     WITHDRAWN(true),

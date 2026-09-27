@@ -2,6 +2,7 @@ package com.example.starter.cosmetic.web;
 
 import com.example.starter.cosmetic.service.ConflictException;
 import com.example.starter.cosmetic.service.NotFoundException;
+import com.example.starter.cosmetic.service.UnprocessableException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -10,10 +11,12 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 统一异常到 HTTP 状态的映射：404 不存在，409 业务冲突（含同键异参），400 参数非法。
+ * 统一异常到 HTTP 状态的映射：404 不存在，409 幂等/并发冲突（含同键异参、版本冲突），
+ * 422 业务拒绝（状态不允许、儿童分龄审查缺项零生效），400 参数非法。
  */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -28,6 +31,16 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ConflictException.class)
     public ResponseEntity<Map<String, Object>> handleConflict(ConflictException e) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(body(e.code(), e.getMessage()));
+    }
+
+    /** 422 业务拒绝（含缺项明细，一次列全）。 */
+    @ExceptionHandler(UnprocessableException.class)
+    public ResponseEntity<Map<String, Object>> handleUnprocessable(UnprocessableException e) {
+        Map<String, Object> body = new LinkedHashMap<>(body(e.code(), e.getMessage()));
+        if (!e.violations().isEmpty()) {
+            body.put("violations", e.violations());
+        }
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(body);
     }
 
     /** 400 参数校验。 */

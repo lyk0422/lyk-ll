@@ -2,17 +2,20 @@
 -- 所有时刻列均存 UTC；DATE 列为 UTC 日界日期。
 
 CREATE TABLE IF NOT EXISTS efficacy_catalog (
-    code        VARCHAR(40)  NOT NULL PRIMARY KEY COMMENT '功效编码',
-    name        VARCHAR(100) NOT NULL COMMENT '功效名称',
-    special     TINYINT      NOT NULL COMMENT '是否特殊功效：1=特殊化妆品功效，0=普通功效',
-    supported   TINYINT      NOT NULL COMMENT '是否允许宣称：1=支持，0=不支持的功效宣称'
+    code          VARCHAR(40)  NOT NULL PRIMARY KEY COMMENT '功效编码',
+    name          VARCHAR(100) NOT NULL COMMENT '功效名称',
+    special       TINYINT      NOT NULL COMMENT '是否特殊功效：1=特殊化妆品功效，0=普通功效',
+    supported     TINYINT      NOT NULL COMMENT '是否允许宣称(成人)：1=支持，0=不支持的功效宣称',
+    child_allowed TINYINT      NOT NULL DEFAULT 0 COMMENT '是否儿童合成目录允许宣称：1=允许，0=不允许；儿童备案只允许本列允许的功效'
 );
 
 CREATE TABLE IF NOT EXISTS restricted_ingredient (
-    ingredient_code       VARCHAR(40)    NOT NULL PRIMARY KEY COMMENT '限用成分编码',
-    name                  VARCHAR(100)   NOT NULL COMMENT '成分名称',
-    max_concentration_pct DECIMAL(10, 4) NOT NULL COMMENT '配方中允许的最高质量百分比浓度，恰等合法，单位 %',
-    unit                  VARCHAR(10)    NOT NULL DEFAULT '%' COMMENT '浓度单位'
+    ingredient_code            VARCHAR(40)    NOT NULL PRIMARY KEY COMMENT '限用成分编码',
+    name                       VARCHAR(100)   NOT NULL COMMENT '成分名称',
+    max_concentration_pct      DECIMAL(10, 4) NOT NULL COMMENT '配方中允许的最高质量百分比浓度(成人)，恰等合法，单位 %',
+    unit                       VARCHAR(10)    NOT NULL DEFAULT '%' COMMENT '浓度单位',
+    child_max_band_0_36_pct    DECIMAL(10, 4) NULL COMMENT '儿童分龄限值：0~36月档最高质量百分比浓度，恰等合法，单位 %；NULL=该档不设限',
+    child_max_band_37_144_pct  DECIMAL(10, 4) NULL COMMENT '儿童分龄限值：37~144月档最高质量百分比浓度，恰等合法，单位 %；NULL=该档不设限'
 );
 
 CREATE TABLE IF NOT EXISTS test_report (
@@ -46,6 +49,13 @@ CREATE TABLE IF NOT EXISTS filing_record (
     effective_at_utc          TIMESTAMP    NULL COMMENT '生效时刻(UTC)',
     withdrawn_at_utc          TIMESTAMP    NULL COMMENT '注销时刻(UTC)，注销为终态',
     reject_reason             CLOB         NULL COMMENT '驳回/异议成立原因汇总',
+    filing_category           VARCHAR(10)  NOT NULL DEFAULT 'ADULT' COMMENT '备案类别：ADULT=成人备案，CHILD=儿童备案；儿童备案须通过分龄审查',
+    age_lower_months          INT          NULL COMMENT '儿童备案申请年龄下限(整数月，闭区间，0<=下限<=上限<=144)；成人备案为NULL',
+    age_upper_months          INT          NULL COMMENT '儿童备案申请年龄上限(整数月，闭区间)；成人备案为NULL',
+    age_rule_version          VARCHAR(20)  NULL COMMENT '受理时冻结的分龄规则版本；成人备案为NULL',
+    child_reports_json        CLOB         NULL COMMENT '受理时冻结的儿童安全报告清单快照JSON；成人备案为NULL',
+    label_texts_json          CLOB         NULL COMMENT '受理时冻结的适用年龄标识文本快照JSON(按分龄档)；成人备案为NULL',
+    label_digest              VARCHAR(128) NULL COMMENT '受理时冻结的标识文本摘要(SHA-256，结构化无歧义)；成人备案为NULL',
     created_at_utc            TIMESTAMP    NOT NULL,
     updated_at_utc            TIMESTAMP    NOT NULL,
     CONSTRAINT uk_filing_version UNIQUE (filing_no, version_no)
@@ -90,3 +100,30 @@ CREATE TABLE IF NOT EXISTS filing_sequence (
     seq BIGINT  NOT NULL COMMENT '已分配的备案编号顺序号'
 );
 MERGE INTO filing_sequence (id, seq) KEY(id) VALUES (1, 0);
+
+-- 儿童分龄规则版本单行表（合成初始化；受理时冻结当前版本到备案）
+CREATE TABLE IF NOT EXISTS age_rule_version (
+    id           TINYINT     NOT NULL PRIMARY KEY COMMENT '固定为1的单行',
+    rule_version VARCHAR(20) NOT NULL COMMENT '当前分龄规则版本号',
+    effective_from DATE      NOT NULL COMMENT '规则生效日(UTC 日界)'
+);
+
+-- 儿童分龄档定义：整数月闭区间，0<=下限<=上限<=144
+CREATE TABLE IF NOT EXISTS age_band_rule (
+    rule_version VARCHAR(20) NOT NULL COMMENT '分龄规则版本号',
+    band_code    VARCHAR(20) NOT NULL COMMENT '分龄档编码：BAND_0_36 / BAND_37_144',
+    lower_months INT         NOT NULL COMMENT '档下限(整数月，含)',
+    upper_months INT         NOT NULL COMMENT '档上限(整数月，含)',
+    PRIMARY KEY (rule_version, band_code)
+);
+
+-- 儿童安全报告（合成登记）：独立于成人功效评价试验报告，成人报告不能替代
+CREATE TABLE IF NOT EXISTS child_safety_report (
+    report_no            VARCHAR(64)  NOT NULL PRIMARY KEY COMMENT '儿童安全报告编号',
+    band_code            VARCHAR(20)  NOT NULL COMMENT '报告对应分龄档编码',
+    coverage_lower_months INT         NOT NULL COMMENT '报告明确覆盖的年龄下限(整数月，含)',
+    coverage_upper_months INT         NOT NULL COMMENT '报告明确覆盖的年龄上限(整数月，含)',
+    conclusion_supported TINYINT      NOT NULL COMMENT '报告结论是否支持该年龄段使用安全：1=支持，0=不支持',
+    conclusion_text      VARCHAR(500) NULL COMMENT '报告结论文本',
+    created_at_utc       TIMESTAMP    NOT NULL COMMENT '入库时间(UTC)'
+);

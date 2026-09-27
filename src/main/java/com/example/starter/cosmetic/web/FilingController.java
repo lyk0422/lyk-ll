@@ -1,7 +1,10 @@
 package com.example.starter.cosmetic.web;
 
 import com.example.starter.cosmetic.service.FilingService;
+import com.example.starter.cosmetic.web.dto.AgeRuleResponse;
 import com.example.starter.cosmetic.web.dto.ChangeFilingRequest;
+import com.example.starter.cosmetic.web.dto.ChildEvidenceResponse;
+import com.example.starter.cosmetic.web.dto.CorrectionFilingRequest;
 import com.example.starter.cosmetic.web.dto.FilingResponse;
 import com.example.starter.cosmetic.web.dto.FilingResultResponse;
 import com.example.starter.cosmetic.web.dto.SubmitFilingRequest;
@@ -39,11 +42,31 @@ public class FilingController {
         return ResponseEntity.ok(result);
     }
 
-    /** 备案变更（服务端自动判定实质/简易）。 */
+    /** 备案变更（服务端自动判定实质/简易；儿童属性、年龄或标识适用范围改变一律实质变更）。 */
     @PostMapping("/products/{productCode}/changes")
     public ResponseEntity<FilingResultResponse> change(@PathVariable String productCode,
                                                        @Valid @RequestBody ChangeFilingRequest request) {
         return ResponseEntity.ok(filingService.change(productCode, request));
+    }
+
+    /** 儿童备案材料补正：生成新修订并使旧修订待审批准失效，公示只能使用最新修订。 */
+    @PostMapping("/{filingNo}/corrections")
+    public ResponseEntity<FilingResultResponse> correct(@PathVariable String filingNo,
+                                                        @Valid @RequestBody CorrectionFilingRequest request) {
+        return ResponseEntity.ok(filingService.correct(filingNo, request));
+    }
+
+    /** 儿童备案判定证据查询：受理冻结的报告清单、分龄规则版本、标识文本摘要及审查明细。 */
+    @GetMapping("/{filingNo}/child-evidence")
+    public ChildEvidenceResponse childEvidence(@PathVariable String filingNo,
+                                               @RequestParam(required = false) Integer versionNo) {
+        return filingService.getChildEvidence(filingNo, versionNo);
+    }
+
+    /** 儿童分龄规则查询（合成初始化结果）。 */
+    @GetMapping("/age-rule")
+    public AgeRuleResponse ageRule() {
+        return filingService.getAgeRule();
     }
 
     /** 公示期内受理异议（可显式给异议受理时刻 UTC，便于复算竞态）。 */

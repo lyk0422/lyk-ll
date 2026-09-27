@@ -1,6 +1,7 @@
 package com.example.starter.cosmetic.testsupport;
 
 import com.example.starter.cosmetic.web.dto.ChangeFilingRequest;
+import com.example.starter.cosmetic.web.dto.ChildBandDossierRequest;
 import com.example.starter.cosmetic.web.dto.FormulationItemRequest;
 import com.example.starter.cosmetic.web.dto.SubmitFilingRequest;
 import com.example.starter.cosmetic.web.dto.TestReportRequest;
@@ -47,7 +48,8 @@ public final class FilingFixtures {
     /** 普通化妆品首次备案请求。 */
     public static SubmitFilingRequest ordinarySubmit(String requestId, String productCode) {
         return new SubmitFilingRequest(requestId, productCode, "合成保湿乳",
-                ordinaryFormulation(), List.of("MOISTURIZING"), List.of());
+                ordinaryFormulation(), List.of("MOISTURIZING"), List.of(),
+                null, null, null, null);
     }
 
     /** 防晒特殊化妆品首次备案请求。 */
@@ -55,11 +57,43 @@ public final class FilingFixtures {
                                                       LocalDate reportIssuedDate, boolean supported) {
         return new SubmitFilingRequest(requestId, productCode, "合成防晒霜",
                 sunscreenFormulation(), List.of("SUNSCREEN"),
-                List.of(sunscreenReport("R-" + requestId, reportIssuedDate, supported)));
+                List.of(sunscreenReport("R-" + requestId, reportIssuedDate, supported)),
+                null, null, null, null);
     }
 
     /** 仅包装文字简易变更。 */
     public static ChangeFilingRequest packagingChange(String requestId, String packagingText) {
-        return new ChangeFilingRequest(requestId, null, null, null, null, packagingText);
+        return new ChangeFilingRequest(requestId, null, null, null, null, packagingText,
+                null, null, null, null, null);
+    }
+
+    // ============================ 儿童备案合成材料 ============================
+
+    /** 0~36 月档儿童安全报告+适用年龄标识。 */
+    public static ChildBandDossierRequest band036Dossier(String reportNo, int covLower, int covUpper) {
+        return new ChildBandDossierRequest("BAND_0_36", reportNo, covLower, covUpper, true,
+                "结论支持0-36月婴幼儿使用安全", "适用于0-36个月婴幼儿");
+    }
+
+    /** 37~144 月档儿童安全报告+适用年龄标识。 */
+    public static ChildBandDossierRequest band37144Dossier(String reportNo, int covLower, int covUpper) {
+        return new ChildBandDossierRequest("BAND_37_144", reportNo, covLower, covUpper, true,
+                "结论支持37-144月儿童使用安全", "适用于37-144个月儿童");
+    }
+
+    /** 单档（0~36 月）儿童备案提交请求。 */
+    public static SubmitFilingRequest childSubmitBand036(String requestId, String productCode) {
+        return new SubmitFilingRequest(requestId, productCode, "合成婴儿保湿霜",
+                ordinaryFormulation(), List.of("MOISTURIZING"), List.of(),
+                "CHILD", 0, 36, List.of(band036Dossier("CS-" + requestId, 0, 36)));
+    }
+
+    /** 跨档（0~144 月）儿童备案提交请求：两档资料都齐。 */
+    public static SubmitFilingRequest childSubmitCrossBand(String requestId, String productCode) {
+        return new SubmitFilingRequest(requestId, productCode, "合成儿童保湿乳",
+                ordinaryFormulation(), List.of("MOISTURIZING"), List.of(),
+                "CHILD", 0, 144,
+                List.of(band036Dossier("CS-A-" + requestId, 0, 36),
+                        band37144Dossier("CS-B-" + requestId, 37, 144)));
     }
 }

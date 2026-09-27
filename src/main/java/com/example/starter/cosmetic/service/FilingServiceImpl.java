@@ -1,6 +1,10 @@
 package com.example.starter.cosmetic.service;
 
+import com.example.starter.cosmetic.domain.AgeBandRule;
 import com.example.starter.cosmetic.domain.ChangeType;
+import com.example.starter.cosmetic.domain.ChildBandDossier;
+import com.example.starter.cosmetic.domain.ChildSafetyReportRecord;
+import com.example.starter.cosmetic.domain.FilingCategory;
 import com.example.starter.cosmetic.domain.FilingRecord;
 import com.example.starter.cosmetic.domain.FilingStatus;
 import com.example.starter.cosmetic.domain.FormulationIngredient;
@@ -14,7 +18,11 @@ import com.example.starter.cosmetic.port.IdempotencyRow;
 import com.example.starter.cosmetic.port.ReportPort;
 import com.example.starter.cosmetic.support.FingerprintSupport;
 import com.example.starter.cosmetic.support.JsonSupport;
+import com.example.starter.cosmetic.web.dto.AgeRuleResponse;
 import com.example.starter.cosmetic.web.dto.ChangeFilingRequest;
+import com.example.starter.cosmetic.web.dto.ChildBandDossierRequest;
+import com.example.starter.cosmetic.web.dto.ChildEvidenceResponse;
+import com.example.starter.cosmetic.web.dto.CorrectionFilingRequest;
 import com.example.starter.cosmetic.web.dto.FilingResponse;
 import com.example.starter.cosmetic.web.dto.FilingResultResponse;
 import com.example.starter.cosmetic.web.dto.FormulationItemRequest;
@@ -39,7 +47,12 @@ import java.util.Optional;
  * 备案领域服务默认实现。
  *
  * <p>所有写操作以 requestId 幂等：指纹覆盖 requestId 与全部业务字段，
- * 同键同参返回首次结果（idempotentReplay=true），同键异参 409。</p>
+ * 同键同参返回首次结果（idempotentReplay=true），同键异参 409；
+ * 业务/版本/幂等结果同事务，参数或状态异常整体回滚，失败不占键。</p>
+ *
+ * <p>儿童备案（filingCategory=CHILD）：提交/补正/变更均同步分龄审查，
+ * 受理时冻结报告清单、分龄规则版本与标识文本摘要；材料补正生成新修订并
+ * 使旧修订待审批准失效（同事务），公示只能使用最新修订。</p>
  */
 @Service
 public class FilingServiceImpl implements FilingService {
@@ -47,6 +60,7 @@ public class FilingServiceImpl implements FilingService {
     private static final String OP_SUBMIT = "SUBMIT";
     private static final String OP_CHANGE = "CHANGE";
     private static final String OP_WITHDRAW = "WITHDRAW";
+    private static final String OP_CORRECT = "CORRECT";
     private static final int PUBLIC_NOTICE_DAYS = 10;
     private static final long IDEMPOTENCY_WAIT_NANOS = 10_000_000_000L;
     private static final long IDEMPOTENCY_WAIT_STEP_MS = 20L;
@@ -58,6 +72,7 @@ public class FilingServiceImpl implements FilingService {
     private final PublicNoticeEffector publicNoticeEffector;
     private final Clock clock;
     private final FormReviewEvaluator formReviewEvaluator;
+    private final ChildFormReviewEvaluator childFormReviewEvaluator;
 
     public FilingServiceImpl(FilingPort filingPort,
                              CatalogPort catalogPort,
@@ -72,6 +87,7 @@ public class FilingServiceImpl implements FilingService {
         this.publicNoticeEffector = publicNoticeEffector;
         this.clock = clock;
         this.formReviewEvaluator = new FormReviewEvaluator(catalogPort);
+        this.childFormReviewEvaluator = new ChildFormReviewEvaluator(catalogPort, reportPort);
     }
 
     private Instant now() {
@@ -84,6 +100,9 @@ public class FilingServiceImpl implements FilingService {
     @Transactional
     public FilingResultResponse submit(SubmitFilingRequest request) {
         Instant now = now();
+        boolean child = request.isChild();
+        validateSubmitChildFields(request, child);
+
         Map<String, Object> fingerprintFields = new LinkedHashMap<>();
         fingerprintFields.put("requestId", request.requestId());
         fingerprintFields.put("productCode", request.productCode());
@@ -91,6 +110,11 @@ public class FilingServiceImpl implements FilingService {
         fingerprintFields.put("formulation", request.formulation());
         fingerprintFields.put("claims", request.claims());
         fingerprintFields.put("reports", request.reports() == null ? List.of() : request.reports());
+        fingerprintFields.put("filingCategory", child ? "CHILD" : "ADULT");
+        fingerprintFields.put("ageLowerMonths", request.ageLowerMonths());
+        fingerprintFields.put("ageUpperMonths", request.ageUpperMonths());
+        fingerprintFields.put("childDossiers",
+                request.childDossiers() == null ? List.of() : request.childDossiers());
         String fingerprint = FingerprintSupport.sha256(fingerprintFields);
 
         Optional<FilingResultResponse> replay =
@@ -104,13 +128,26 @@ public class FilingServiceImpl implements FilingService {
                 .toList();
         List<String> claims = List.copyOf(request.claims());
         List<TestReportRecord> reports = registerReports(request.reports());
+        List<ChildBandDossier> dossiers = registerChildDossiers(request.childDossiers());
 
         int versionNo = filingPort.nextProductVersion(request.productCode());
         String filingNo = allocateFilingNo();
         LocalDate submitDate = LocalDate.ofInstant(now, ZoneOffset.UTC);
 
-        FormReviewEvaluator.Result review = formReviewEvaluator.evaluate(
-                request.productName(), formulation, claims, reports, submitDate, now, filingNo, versionNo);
+        FormReviewEvaluator.Result review;
+        String ageRuleVersion = null;
+        String labelDigest = null;
+        if (child) {
+            ageRuleVersion = catalogPort.currentAgeRuleVersion();
+            List<AgeBandRule> bands = catalogPort.listAgeBands(ageRuleVersion);
+            labelDigest = labelDigestOf(dossiers);
+            review = childFormReviewEvaluator.evaluate(request.productName(), formulation, claims,
+                    request.ageLowerMonths(), request.ageUpperMonths(), dossiers, bands,
+                    ageRuleVersion, now, filingNo, versionNo);
+        } else {
+            review = formReviewEvaluator.evaluate(
+                    request.productName(), formulation, claims, reports, submitDate, now, filingNo, versionNo);
+        }
 
         List<ReviewDetail> details = new ArrayList<>(review.details());
         // 注销后新宣称审查一律拒绝（独立规则，可复算）
@@ -141,17 +178,142 @@ public class FilingServiceImpl implements FilingService {
         LocalDate noticeDate = passed ? submitDate : null;
         Instant expiresAt = passed ? publicExpiry(noticeDate) : null;
 
+        // 受理冻结：儿童备案冻结报告清单、分龄规则版本与标识文本摘要（含审查未通过修订，便于证据复算）
         FilingRecord record = new FilingRecord(
                 null, filingNo, request.productCode(), request.productName(), versionNo, null,
                 ChangeType.INITIAL, status, formulation, claims, reports, null,
                 request.requestId(), now, now, noticeDate, expiresAt, null,
-                null, null, passed ? null : String.join("；", reasons));
+                null, null, passed ? null : String.join("；", reasons),
+                child ? FilingCategory.CHILD : FilingCategory.ADULT,
+                child ? request.ageLowerMonths() : null,
+                child ? request.ageUpperMonths() : null,
+                ageRuleVersion, child ? dossiers : null, labelDigest);
 
         filingPort.saveReviews(details);
         filingPort.insert(record);
 
         FilingRecord saved = filingPort.findLatestByNo(filingNo).orElseThrow();
         FilingResultResponse response = buildResult(saved, details, false, now);
+        idempotencyPort.complete(request.requestId(), 200, status.name(), filingNo,
+                JsonSupport.toJson(response), now);
+        return response;
+    }
+
+    /** 提交参数的儿童字段一致性校验（非法参数 400）。 */
+    private void validateSubmitChildFields(SubmitFilingRequest request, boolean child) {
+        if (child) {
+            validateAgeRange(request.ageLowerMonths(), request.ageUpperMonths());
+            return;
+        }
+        if (request.ageLowerMonths() != null || request.ageUpperMonths() != null
+                || (request.childDossiers() != null && !request.childDossiers().isEmpty())) {
+            throw new IllegalArgumentException(
+                    "成人备案不得携带儿童字段（年龄范围/分龄档材料）；儿童备案请显式 filingCategory=CHILD");
+        }
+    }
+
+    /** 申请年龄范围参数校验：整数月闭区间，0≤下限≤上限≤144（非法参数 400）。 */
+    private void validateAgeRange(Integer ageLower, Integer ageUpper) {
+        if (ageLower == null || ageUpper == null) {
+            throw new IllegalArgumentException("儿童备案必须提供申请年龄上下限（整数月）");
+        }
+        if (ageLower < 0 || ageUpper > ChildFormReviewEvaluator.MAX_AGE_MONTHS || ageLower > ageUpper) {
+            throw new IllegalArgumentException(String.format(
+                    "申请年龄范围非法：[%d, %d]月，须满足 0≤下限≤上限≤%d",
+                    ageLower, ageUpper, ChildFormReviewEvaluator.MAX_AGE_MONTHS));
+        }
+    }
+
+    // ============================ 儿童材料补正 ============================
+
+    @Override
+    @Transactional
+    public FilingResultResponse correct(String filingNo, CorrectionFilingRequest request) {
+        Instant now = now();
+        Map<String, Object> fingerprintFields = new LinkedHashMap<>();
+        fingerprintFields.put("requestId", request.requestId());
+        fingerprintFields.put("filingNo", filingNo);
+        fingerprintFields.put("expectedVersion", request.expectedVersion());
+        fingerprintFields.put("productName", request.productName());
+        fingerprintFields.put("formulation", request.formulation());
+        fingerprintFields.put("claims", request.claims());
+        fingerprintFields.put("reports", request.reports());
+        fingerprintFields.put("packagingText", request.packagingText());
+        fingerprintFields.put("ageLowerMonths", request.ageLowerMonths());
+        fingerprintFields.put("ageUpperMonths", request.ageUpperMonths());
+        fingerprintFields.put("childDossiers", request.childDossiers());
+        String fingerprint = FingerprintSupport.sha256(fingerprintFields);
+
+        Optional<FilingResultResponse> replay = resolveIdempotency(request.requestId(), OP_CORRECT, fingerprint);
+        if (replay.isPresent()) {
+            return replay.get();
+        }
+
+        FilingRecord current = filingPort.findLatestByNo(filingNo)
+                .orElseThrow(() -> new NotFoundException("备案不存在: " + filingNo));
+        if (!current.isChild()) {
+            throw new UnprocessableException("NOT_CHILD_FILING",
+                    "备案 " + filingNo + " 非儿童备案，不支持材料补正");
+        }
+        if (current.status() != FilingStatus.FORM_REJECTED) {
+            throw new UnprocessableException("CORRECTION_NOT_ALLOWED",
+                    "仅待补正（形式审查未通过）的最新修订可补正，当前状态: " + current.status());
+        }
+        if (!request.expectedVersion().equals(current.versionNo())) {
+            throw new ConflictException("VERSION_CONFLICT",
+                    "expectedVersion=" + request.expectedVersion()
+                            + " 与当前最新版本 " + current.versionNo() + " 不一致（409）");
+        }
+
+        String newName = request.productName() == null ? current.productName() : request.productName();
+        List<FormulationIngredient> newFormulation = request.formulation() == null
+                ? current.formulation()
+                : request.formulation().stream()
+                .map(i -> new FormulationIngredient(i.code(), i.name(), i.concentrationPct())).toList();
+        List<String> newClaims = request.claims() == null ? current.claims() : List.copyOf(request.claims());
+        List<TestReportRecord> newReports = request.reports() == null
+                ? current.reports()
+                : registerReports(request.reports());
+        String newPackaging = request.packagingText() == null
+                ? current.packagingText()
+                : request.packagingText();
+        Integer newAgeLower = request.ageLowerMonths() == null
+                ? current.ageLowerMonths() : request.ageLowerMonths();
+        Integer newAgeUpper = request.ageUpperMonths() == null
+                ? current.ageUpperMonths() : request.ageUpperMonths();
+        List<ChildBandDossier> newDossiers = request.childDossiers() == null
+                ? current.childDossiers()
+                : registerChildDossiers(request.childDossiers());
+        validateAgeRange(newAgeLower, newAgeUpper);
+
+        int versionNo = current.versionNo() + 1;
+        String ageRuleVersion = catalogPort.currentAgeRuleVersion();
+        List<AgeBandRule> bands = catalogPort.listAgeBands(ageRuleVersion);
+        String labelDigest = labelDigestOf(newDossiers);
+
+        FormReviewEvaluator.Result review = childFormReviewEvaluator.evaluate(
+                newName, newFormulation, newClaims, newAgeLower, newAgeUpper, newDossiers,
+                bands, ageRuleVersion, now, filingNo, versionNo);
+
+        boolean passed = review.passed();
+        FilingStatus status = passed ? FilingStatus.PUBLIC : FilingStatus.FORM_REJECTED;
+        LocalDate noticeDate = passed ? LocalDate.ofInstant(now, ZoneOffset.UTC) : null;
+        Instant expiresAt = passed ? publicExpiry(noticeDate) : null;
+
+        // 同事务：旧修订（待补正）待审批准失效，补正生成新修订；公示只能使用最新修订
+        filingPort.supersedeRejectedRevisions(filingNo, now);
+        FilingRecord record = new FilingRecord(
+                null, filingNo, current.productCode(), newName, versionNo, current.parentFilingNo(),
+                current.changeType(), status, newFormulation, newClaims, newReports, newPackaging,
+                request.requestId(), now, now, noticeDate, expiresAt, null,
+                null, null, passed ? null : String.join("；", review.reasons()),
+                FilingCategory.CHILD, newAgeLower, newAgeUpper,
+                ageRuleVersion, newDossiers, labelDigest);
+        filingPort.saveReviews(review.details());
+        filingPort.insert(record);
+
+        FilingRecord saved = filingPort.findVersion(filingNo, versionNo).orElseThrow();
+        FilingResultResponse response = buildResult(saved, review.details(), false, now);
         idempotencyPort.complete(request.requestId(), 200, status.name(), filingNo,
                 JsonSupport.toJson(response), now);
         return response;
@@ -171,6 +333,11 @@ public class FilingServiceImpl implements FilingService {
         fingerprintFields.put("claims", request.claims());
         fingerprintFields.put("reports", request.reports());
         fingerprintFields.put("packagingText", request.packagingText());
+        fingerprintFields.put("expectedVersion", request.expectedVersion());
+        fingerprintFields.put("filingCategory", request.filingCategory());
+        fingerprintFields.put("ageLowerMonths", request.ageLowerMonths());
+        fingerprintFields.put("ageUpperMonths", request.ageUpperMonths());
+        fingerprintFields.put("childDossiers", request.childDossiers());
         String fingerprint = FingerprintSupport.sha256(fingerprintFields);
 
         Optional<FilingResultResponse> replay = resolveIdempotency(request.requestId(), OP_CHANGE, fingerprint);
@@ -187,6 +354,23 @@ public class FilingServiceImpl implements FilingService {
             throw new ConflictException("ACTIVE_FILING_NOT_EFFECTIVE",
                     "当前有效槽备案状态异常: " + current.status());
         }
+
+        boolean childInvolved = current.isChild()
+                || "CHILD".equals(request.filingCategory())
+                || request.ageLowerMonths() != null || request.ageUpperMonths() != null
+                || request.childDossiers() != null;
+        if (childInvolved) {
+            // 儿童备案变更必须携带 expectedVersion（乐观并发控制）
+            if (request.expectedVersion() == null) {
+                throw new IllegalArgumentException("儿童备案变更必须携带 expectedVersion（当前有效版本号）");
+            }
+            if (!request.expectedVersion().equals(current.versionNo())) {
+                throw new ConflictException("VERSION_CONFLICT",
+                        "expectedVersion=" + request.expectedVersion()
+                                + " 与当前有效版本 " + current.versionNo() + " 不一致（409）");
+            }
+        }
+
         // 上一实质变更新版本仍在公示/异议审查时，不允许叠加变更，避免多个在途版本竞争同一有效槽
         boolean anotherInFlight = filingPort.findByProduct(productCode).stream()
                 .anyMatch(r -> r.id() != current.id()
@@ -210,20 +394,59 @@ public class FilingServiceImpl implements FilingService {
                 ? current.packagingText()
                 : request.packagingText();
 
+        // 目标类别与儿童字段合并：显式 ADULT 视为清除儿童属性；显式 CHILD 必须提供年龄与材料
+        FilingCategory newCategory;
+        Integer newAgeLower;
+        Integer newAgeUpper;
+        List<ChildBandDossier> newDossiers;
+        if ("ADULT".equals(request.filingCategory())) {
+            newCategory = FilingCategory.ADULT;
+            newAgeLower = null;
+            newAgeUpper = null;
+            newDossiers = null;
+        } else if ("CHILD".equals(request.filingCategory())) {
+            newCategory = FilingCategory.CHILD;
+            newAgeLower = request.ageLowerMonths();
+            newAgeUpper = request.ageUpperMonths();
+            newDossiers = registerChildDossiers(request.childDossiers());
+        } else {
+            newCategory = current.filingCategory();
+            newAgeLower = request.ageLowerMonths() == null
+                    ? current.ageLowerMonths() : request.ageLowerMonths();
+            newAgeUpper = request.ageUpperMonths() == null
+                    ? current.ageUpperMonths() : request.ageUpperMonths();
+            newDossiers = request.childDossiers() == null
+                    ? current.childDossiers()
+                    : registerChildDossiers(request.childDossiers());
+        }
+        if (newCategory == FilingCategory.CHILD) {
+            validateAgeRange(newAgeLower, newAgeUpper);
+        } else if (newAgeLower != null || newAgeUpper != null || newDossiers != null) {
+            throw new IllegalArgumentException(
+                    "成人备案不得保留儿童字段；转为儿童备案请显式 filingCategory=CHILD 并提供年龄范围与分龄档材料");
+        }
+
         boolean formulationChanged = !newFormulation.equals(current.formulation());
         boolean claimsChanged = !newClaims.equals(current.claims());
         boolean packagingChanged = !nullSafeEquals(newPackaging, current.packagingText());
         boolean nameChanged = !newName.equals(current.productName());
+        boolean categoryChanged = newCategory != current.filingCategory();
+        boolean ageChanged = !java.util.Objects.equals(newAgeLower, current.ageLowerMonths())
+                || !java.util.Objects.equals(newAgeUpper, current.ageUpperMonths());
+        boolean dossiersChanged = !java.util.Objects.equals(newDossiers, current.childDossiers());
 
-        if (!formulationChanged && !claimsChanged && !packagingChanged && !nameChanged) {
+        if (!formulationChanged && !claimsChanged && !packagingChanged && !nameChanged
+                && !categoryChanged && !ageChanged && !dossiersChanged) {
             throw new ConflictException("NO_CHANGE", "变更内容与当前有效备案完全一致，无需变更");
         }
 
         int versionNo = filingPort.nextProductVersion(productCode);
 
-        if (formulationChanged || claimsChanged) {
+        // 儿童属性、年龄或标识适用范围（分龄档材料）改变一律实质变更，不得伪装为包装文字简易变更
+        if (formulationChanged || claimsChanged || categoryChanged || ageChanged || dossiersChanged) {
             return substantiveChange(request.requestId(), current, productCode, newName, newFormulation,
-                    newClaims, newReports, newPackaging, versionNo, now);
+                    newClaims, newReports, newPackaging, newCategory, newAgeLower, newAgeUpper,
+                    newDossiers, versionNo, now);
         }
         return simpleChange(request.requestId(), current, productCode, newName, newFormulation,
                 newClaims, newReports, newPackaging, versionNo, now);
@@ -237,12 +460,29 @@ public class FilingServiceImpl implements FilingService {
                                                    List<String> newClaims,
                                                    List<TestReportRecord> newReports,
                                                    String newPackaging,
+                                                   FilingCategory newCategory,
+                                                   Integer newAgeLower,
+                                                   Integer newAgeUpper,
+                                                   List<ChildBandDossier> newDossiers,
                                                    int versionNo,
                                                    Instant now) {
         String newFilingNo = allocateFilingNo();
         LocalDate submitDate = LocalDate.ofInstant(now, ZoneOffset.UTC);
-        FormReviewEvaluator.Result review = formReviewEvaluator.evaluate(
-                newName, newFormulation, newClaims, newReports, submitDate, now, newFilingNo, versionNo);
+
+        FormReviewEvaluator.Result review;
+        String ageRuleVersion = null;
+        String labelDigest = null;
+        if (newCategory == FilingCategory.CHILD) {
+            ageRuleVersion = catalogPort.currentAgeRuleVersion();
+            List<AgeBandRule> bands = catalogPort.listAgeBands(ageRuleVersion);
+            labelDigest = labelDigestOf(newDossiers);
+            review = childFormReviewEvaluator.evaluate(newName, newFormulation, newClaims,
+                    newAgeLower, newAgeUpper, newDossiers, bands, ageRuleVersion,
+                    now, newFilingNo, versionNo);
+        } else {
+            review = formReviewEvaluator.evaluate(
+                    newName, newFormulation, newClaims, newReports, submitDate, now, newFilingNo, versionNo);
+        }
 
         boolean passed = review.passed();
         FilingStatus status = passed ? FilingStatus.PUBLIC : FilingStatus.FORM_REJECTED;
@@ -253,7 +493,13 @@ public class FilingServiceImpl implements FilingService {
                 null, newFilingNo, productCode, newName, versionNo, current.filingNo(),
                 ChangeType.SUBSTANTIVE, status, newFormulation, newClaims, newReports, newPackaging,
                 requestId, now, now, noticeDate, expiresAt, null, null, null,
-                passed ? null : String.join("；", review.reasons()));
+                passed ? null : String.join("；", review.reasons()),
+                newCategory,
+                newCategory == FilingCategory.CHILD ? newAgeLower : null,
+                newCategory == FilingCategory.CHILD ? newAgeUpper : null,
+                ageRuleVersion,
+                newCategory == FilingCategory.CHILD ? newDossiers : null,
+                labelDigest);
         filingPort.saveReviews(review.details());
         filingPort.insert(record);
 
@@ -276,10 +522,13 @@ public class FilingServiceImpl implements FilingService {
                                               int versionNo,
                                               Instant now) {
         // 包装文字类（含产品名称文字）简易变更：引用原备案编号，不重新公示，即时生效。
+        // 儿童属性/年龄/标识适用范围变化已在变更入口判定为实质变更，不会进入本分支。
         FilingRecord record = new FilingRecord(
                 null, current.filingNo(), productCode, newName, versionNo, current.filingNo(),
                 ChangeType.SIMPLE, FilingStatus.EFFECTIVE, newFormulation, newClaims, newReports,
-                newPackaging, requestId, now, now, null, null, null, now, null, null);
+                newPackaging, requestId, now, now, null, null, null, now, null, null,
+                current.filingCategory(), current.ageLowerMonths(), current.ageUpperMonths(),
+                current.ageRuleVersion(), current.childDossiers(), current.labelDigest());
         filingPort.insert(record);
 
         boolean superseded = filingPort.supersedeEffective(current.id(), now);
@@ -444,6 +693,40 @@ public class FilingServiceImpl implements FilingService {
     }
 
     @Override
+    @Transactional(readOnly = true)
+    public ChildEvidenceResponse getChildEvidence(String filingNo, Integer versionNo) {
+        List<FilingRecord> versions = filingPort.findAllVersions(filingNo);
+        if (versions.isEmpty()) {
+            throw new NotFoundException("备案不存在: " + filingNo);
+        }
+        FilingRecord record;
+        if (versionNo == null) {
+            record = versions.get(versions.size() - 1);
+        } else {
+            record = versions.stream().filter(v -> v.versionNo() == versionNo).findFirst()
+                    .orElseThrow(() -> new NotFoundException(
+                            "备案 " + filingNo + " 不存在版本 " + versionNo));
+        }
+        if (!record.isChild()) {
+            throw new UnprocessableException("NOT_CHILD_FILING",
+                    "备案 " + filingNo + " 非儿童备案，无分龄审查证据");
+        }
+        List<ReviewDetailResponse> reviews = filingPort.findReviews(filingNo, record.versionNo())
+                .stream().map(ReviewDetailResponse::from).toList();
+        return new ChildEvidenceResponse(record.filingNo(), record.versionNo(), record.status().name(),
+                record.ageLowerMonths(), record.ageUpperMonths(), record.ageRuleVersion(),
+                FilingResponse.from(record).childDossiers(), record.labelDigest(),
+                record.formReviewedAtUtc(), reviews);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public AgeRuleResponse getAgeRule() {
+        String ruleVersion = catalogPort.currentAgeRuleVersion();
+        return AgeRuleResponse.of(ruleVersion, catalogPort.listAgeBands(ruleVersion));
+    }
+
+    @Override
     public int expireDuePublicNotices(Instant now) {
         Instant at = now == null ? now() : now;
         int effected = 0;
@@ -526,6 +809,41 @@ public class FilingServiceImpl implements FilingService {
             records.add(rec);
         }
         return List.copyOf(records);
+    }
+
+    /**
+     * 登记儿童安全报告并组装分龄档材料清单；请求为 null 时返回 null（表示不变/不适用）。
+     */
+    private List<ChildBandDossier> registerChildDossiers(List<ChildBandDossierRequest> requests) {
+        if (requests == null) {
+            return null;
+        }
+        List<ChildBandDossier> dossiers = new ArrayList<>();
+        for (ChildBandDossierRequest d : requests) {
+            ChildSafetyReportRecord report = new ChildSafetyReportRecord(d.reportNo(), d.bandCode(),
+                    d.coverageLowerMonths(), d.coverageUpperMonths(),
+                    Boolean.TRUE.equals(d.conclusionSupported()), d.conclusionText());
+            reportPort.upsertChildSafetyReport(report);
+            dossiers.add(new ChildBandDossier(d.bandCode(), report, d.labelText()));
+        }
+        return List.copyOf(dossiers);
+    }
+
+    /**
+     * 标识文本摘要：结构化（分龄档+文本逐项）规范化后取 SHA-256，
+     * 合法文本含分隔符亦能被无歧义区分。
+     */
+    private String labelDigestOf(List<ChildBandDossier> dossiers) {
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("kind", "CHILD_AGE_LABELS");
+        fields.put("labels", (dossiers == null ? List.<ChildBandDossier>of() : dossiers).stream()
+                .map(d -> {
+                    Map<String, Object> entry = new LinkedHashMap<String, Object>();
+                    entry.put("bandCode", d.bandCode());
+                    entry.put("labelText", d.labelText());
+                    return entry;
+                }).toList());
+        return FingerprintSupport.sha256(fields);
     }
 
     private boolean hasInFlightFiling(String productCode) {

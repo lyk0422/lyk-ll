@@ -102,7 +102,8 @@ class FilingLifecycleIntegrationTest extends AbstractCosmeticIntegrationTest {
     @Test
     void unsupportedClaimRejectedAtFormReview() {
         SubmitFilingRequest request = new SubmitFilingRequest("REQ-5", "P-BAD", "违规产品",
-                FilingFixtures.ordinaryFormulation(), List.of("MEDICAL_CURE"), List.of());
+                FilingFixtures.ordinaryFormulation(), List.of("MEDICAL_CURE"), List.of(),
+                null, null, null, null);
 
         FilingResultResponse rejected = filingService.submit(request);
 
@@ -126,7 +127,8 @@ class FilingLifecycleIntegrationTest extends AbstractCosmeticIntegrationTest {
         filingService.submit(ordinary("REQ-IDEM-2", "P-IDEM-2"));
 
         SubmitFilingRequest changed = new SubmitFilingRequest("REQ-IDEM-2", "P-IDEM-2", "改名产品",
-                FilingFixtures.ordinaryFormulation(), List.of("MOISTURIZING"), List.of());
+                FilingFixtures.ordinaryFormulation(), List.of("MOISTURIZING"), List.of(),
+                null, null, null, null);
 
         assertThatThrownBy(() -> filingService.submit(changed))
                 .isInstanceOf(ConflictException.class)
@@ -170,7 +172,8 @@ class FilingLifecycleIntegrationTest extends AbstractCosmeticIntegrationTest {
         List<TestReportRequest> newReports = List.of(
                 FilingFixtures.sunscreenReport("R-SUB-1", LocalDate.of(2025, 1, 1), true));
         ChangeFilingRequest change = new ChangeFilingRequest("REQ-SUB-2", null,
-                newFormulation, List.of("MOISTURIZING", "SUNSCREEN"), newReports, "包装不变");
+                newFormulation, List.of("MOISTURIZING", "SUNSCREEN"), newReports, "包装不变",
+                null, null, null, null, null);
 
         FilingResultResponse changed = filingService.change("P-SUBST-1", change);
 
@@ -209,7 +212,7 @@ class FilingLifecycleIntegrationTest extends AbstractCosmeticIntegrationTest {
         ChangeFilingRequest change = new ChangeFilingRequest("REQ-SUBF-2", null,
                 FilingFixtures.sunscreenFormulation(), List.of("SUNSCREEN"),
                 List.of(FilingFixtures.sunscreenReport("R-SUBF", LocalDate.of(2020, 1, 1), true)),
-                null);
+                null, null, null, null, null, null);
 
         FilingResultResponse result = filingService.change("P-SUBSTF-1", change);
         assertThat(result.filing().status()).isEqualTo(FilingStatus.FORM_REJECTED.name());
@@ -318,7 +321,8 @@ class FilingLifecycleIntegrationTest extends AbstractCosmeticIntegrationTest {
         clock.setInstant(EXPIRES_EXPECTED);
         filingService.expireDuePublicNotices(null);
 
-        ChangeFilingRequest noop = new ChangeFilingRequest("REQ-NC-2", null, null, null, null, null);
+        ChangeFilingRequest noop = new ChangeFilingRequest("REQ-NC-2", null, null, null, null, null,
+                null, null, null, null, null);
         assertThatThrownBy(() -> filingService.change("P-NC-1", noop))
                 .isInstanceOfSatisfying(ConflictException.class,
                         e -> assertThat(e.code()).isEqualTo("NO_CHANGE"));

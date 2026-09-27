@@ -91,4 +91,15 @@ public interface FilingPort {
 
     /** 产品下一个备案版本号（最大版本号 +1，无历史则为 1）。 */
     int nextProductVersion(String productCode);
+
+    /** 查询同一备案编号的全部修订版本（按版本号升序），供判定证据查询。 */
+    List<FilingRecord> findAllVersions(String filingNo);
+
+    /**
+     * 儿童材料补正：将同一备案编号下全部待补正（FORM_REJECTED）旧修订原子置为
+     * SUPERSEDED（旧修订待审批准失效），与补正新修订插入同事务。
+     *
+     * @return 失效的旧修订数量
+     */
+    int supersedeRejectedRevisions(String filingNo, Instant now);
 }

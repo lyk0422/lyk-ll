@@ -1,6 +1,8 @@
 package com.example.starter.cosmetic.persistence;
 
 import com.example.starter.cosmetic.domain.ChangeType;
+import com.example.starter.cosmetic.domain.ChildBandDossier;
+import com.example.starter.cosmetic.domain.FilingCategory;
 import com.example.starter.cosmetic.domain.FilingRecord;
 import com.example.starter.cosmetic.domain.FilingStatus;
 import com.example.starter.cosmetic.domain.FormulationIngredient;
@@ -39,6 +41,8 @@ public class JdbcFilingPort implements FilingPort {
     };
     private static final TypeReference<List<TestReportRecord>> REPORT_LIST_TYPE = new TypeReference<>() {
     };
+    private static final TypeReference<List<ChildBandDossier>> CHILD_DOSSIER_TYPE = new TypeReference<>() {
+    };
 
     private final JdbcTemplate jdbc;
 
@@ -67,7 +71,19 @@ public class JdbcFilingPort implements FilingPort {
             toInstant(rs.getTimestamp("objection_received_at_utc")),
             toInstant(rs.getTimestamp("effective_at_utc")),
             toInstant(rs.getTimestamp("withdrawn_at_utc")),
-            rs.getString("reject_reason"));
+            rs.getString("reject_reason"),
+            FilingCategory.valueOf(rs.getString("filing_category")),
+            toInteger(rs, "age_lower_months"),
+            toInteger(rs, "age_upper_months"),
+            rs.getString("age_rule_version"),
+            rs.getString("child_reports_json") == null ? null
+                    : JsonSupport.fromJson(rs.getString("child_reports_json"), CHILD_DOSSIER_TYPE),
+            rs.getString("label_digest"));
+
+    private static Integer toInteger(java.sql.ResultSet rs, String column) throws java.sql.SQLException {
+        int v = rs.getInt(column);
+        return rs.wasNull() ? null : v;
+    }
 
     private static final RowMapper<ReviewDetail> REVIEW_MAPPER = (rs, n) -> new ReviewDetail(
             rs.getLong("id"),
@@ -132,8 +148,10 @@ public class JdbcFilingPort implements FilingPort {
                        packaging_text, request_id, submitted_at_utc, form_reviewed_at_utc,
                        public_notice_date_utc, public_expires_at_utc, objection_received_at_utc,
                        effective_at_utc, withdrawn_at_utc, reject_reason,
+                       filing_category, age_lower_months, age_upper_months, age_rule_version,
+                       child_reports_json, label_texts_json, label_digest,
                        created_at_utc, updated_at_utc)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """, Statement.RETURN_GENERATED_KEYS);
             int i = 1;
             setString(ps, i++, r.filingNo());
@@ -156,11 +174,36 @@ public class JdbcFilingPort implements FilingPort {
             setInstant(ps, i++, r.effectiveAtUtc());
             setInstant(ps, i++, r.withdrawnAtUtc());
             setString(ps, i++, r.rejectReason());
+            ps.setString(i++, r.filingCategory().name());
+            setInteger(ps, i++, r.ageLowerMonths());
+            setInteger(ps, i++, r.ageUpperMonths());
+            setString(ps, i++, r.ageRuleVersion());
+            setString(ps, i++, r.childDossiers() == null ? null : JsonSupport.toJson(r.childDossiers()));
+            setString(ps, i++, labelTextsJson(r));
+            setString(ps, i++, r.labelDigest());
             Instant now = Instant.now();
             ps.setTimestamp(i++, Timestamp.from(now));
             ps.setTimestamp(i, Timestamp.from(now));
             return ps;
         }, keyHolder);
+    }
+
+    /** 由冻结的儿童材料清单派生标识文本快照 JSON（按分龄档）。 */
+    private static String labelTextsJson(FilingRecord r) {
+        if (r.childDossiers() == null) {
+            return null;
+        }
+        java.util.Map<String, String> labels = new java.util.LinkedHashMap<>();
+        r.childDossiers().forEach(d -> labels.put(d.bandCode(), d.labelText()));
+        return JsonSupport.toJson(labels);
+    }
+
+    private static void setInteger(PreparedStatement ps, int idx, Integer v) throws java.sql.SQLException {
+        if (v == null) {
+            ps.setNull(idx, java.sql.Types.INTEGER);
+        } else {
+            ps.setInt(idx, v);
+        }
     }
 
     @Override
@@ -174,6 +217,9 @@ public class JdbcFilingPort implements FilingPort {
                   form_reviewed_at_utc = ?, public_notice_date_utc = ?,
                   public_expires_at_utc = ?, objection_received_at_utc = ?,
                   effective_at_utc = ?, withdrawn_at_utc = ?, reject_reason = ?,
+                  filing_category = ?, age_lower_months = ?, age_upper_months = ?,
+                  age_rule_version = ?, child_reports_json = ?, label_texts_json = ?,
+                  label_digest = ?,
                   updated_at_utc = ?
                 WHERE id = ?
                 """,
@@ -185,6 +231,10 @@ public class JdbcFilingPort implements FilingPort {
                 ts(r.formReviewedAtUtc()), date(r.publicNoticeDateUtc()),
                 ts(r.publicExpiresAtUtc()), ts(r.objectionReceivedAtUtc()),
                 ts(r.effectiveAtUtc()), ts(r.withdrawnAtUtc()), r.rejectReason(),
+                r.filingCategory().name(), r.ageLowerMonths(), r.ageUpperMonths(),
+                r.ageRuleVersion(),
+                r.childDossiers() == null ? null : JsonSupport.toJson(r.childDossiers()),
+                labelTextsJson(r), r.labelDigest(),
                 Timestamp.from(Instant.now()), r.id());
         if (updated != 1) {
             throw new IllegalStateException("备案版本更新失败，id=" + r.id());
@@ -228,7 +278,9 @@ public class JdbcFilingPort implements FilingPort {
                        change_type, status, formulation_json, claims_json, reports_json,
                        packaging_text, request_id, submitted_at_utc, form_reviewed_at_utc,
                        public_notice_date_utc, public_expires_at_utc, objection_received_at_utc,
-                       effective_at_utc, withdrawn_at_utc, reject_reason
+                       effective_at_utc, withdrawn_at_utc, reject_reason,
+                       filing_category, age_lower_months, age_upper_months, age_rule_version,
+                       child_reports_json, label_texts_json, label_digest
                 FROM filing_record
                 """;
     }
@@ -396,5 +448,20 @@ public class JdbcFilingPort implements FilingPort {
                 "SELECT COALESCE(MAX(version_no), 0) FROM filing_record WHERE product_code = ?",
                 Integer.class, productCode);
         return (max == null ? 0 : max) + 1;
+    }
+
+    @Override
+    public List<FilingRecord> findAllVersions(String filingNo) {
+        return jdbc.query(selectAll() + " WHERE filing_no = ? ORDER BY version_no ASC",
+                MAPPER, filingNo);
+    }
+
+    @Override
+    public int supersedeRejectedRevisions(String filingNo, Instant now) {
+        return jdbc.update("""
+                UPDATE filing_record
+                SET status = 'SUPERSEDED', updated_at_utc = ?
+                WHERE filing_no = ? AND status = 'FORM_REJECTED'
+                """, Timestamp.from(now), filingNo);
     }
 }
