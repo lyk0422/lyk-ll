@@ -55,13 +55,15 @@ public class RescueService {
     private final JdbcTemplate jdbc;
     private final ElevatorService elevatorService;
     private final IdempotencyService idempotency;
+    private final ObligationService obligationService;
     private final Clock clock;
 
     public RescueService(JdbcTemplate jdbc, ElevatorService elevatorService,
-                         IdempotencyService idempotency, Clock clock) {
+                         IdempotencyService idempotency, ObligationService obligationService, Clock clock) {
         this.jdbc = jdbc;
         this.elevatorService = elevatorService;
         this.idempotency = idempotency;
+        this.obligationService = obligationService;
         this.clock = clock;
     }
 
@@ -94,6 +96,8 @@ public class RescueService {
         appendEvent(rescueId, "REPORTED", "接报困人", reportedAt);
         // 困人即停梯；已停梯（如维保锁定）则不重复落 RESCUE 停梯链
         elevatorService.stopIfRunning(ev, StopReason.RESCUE, rescueId, reportedAt);
+        // 接报原子挂起该电梯未完成的履约维保尝试并释放人员，保留已做清单，不改变到期义务
+        obligationService.suspendActiveForRescue(ev.id(), rescueId, reportedAt);
         // 90 日（UTC 日界）内第 2 次困人：强制停梯检查
         LocalDate windowStart = day.minusDays(INCIDENT_WINDOW_DAYS - 1);
         Integer incidents = jdbc.queryForObject(

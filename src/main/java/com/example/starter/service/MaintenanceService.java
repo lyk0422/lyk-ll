@@ -33,13 +33,15 @@ public class MaintenanceService {
     private final JdbcTemplate jdbc;
     private final ElevatorService elevatorService;
     private final IdempotencyService idempotency;
+    private final ObligationService obligationService;
     private final Clock clock;
 
     public MaintenanceService(JdbcTemplate jdbc, ElevatorService elevatorService,
-                              IdempotencyService idempotency, Clock clock) {
+                              IdempotencyService idempotency, ObligationService obligationService, Clock clock) {
         this.jdbc = jdbc;
         this.elevatorService = elevatorService;
         this.idempotency = idempotency;
+        this.obligationService = obligationService;
         this.clock = clock;
     }
 
@@ -71,15 +73,17 @@ public class MaintenanceService {
 
         LocalDate base = ev.lastMaintenanceDay() != null ? ev.lastMaintenanceDay() : ev.commissionedDay();
         LocalDate dueDay = base.plusDays(CYCLE_DAYS);
+        Instant now = Instant.now(clock);
         if (performedDay.isAfter(dueDay)) {
             // 逾期：锁定电梯并列入重点监察；维保事实仍入账
             jdbc.update("UPDATE elevator SET key_supervision=TRUE, last_maintenance_day=? WHERE id=?",
                     performedDay, ev.id());
             MaintenanceView v = insertRecord(ev.id(), req, dueDay, MaintenanceResult.OVERDUE, req.note());
+            // 旧手工入口兼容：有效维保记录将对应的未完成义务一次性结清
+            obligationService.settleByManualRecord(ev.id(), v.id(), performedDay, now);
             boolean alreadyLocked = elevatorService.openStops(ev.id()).stream()
                     .anyMatch(s -> StopReason.MAINTENANCE_OVERDUE.name().equals(s.reason()));
             if (!alreadyLocked) {
-                Instant now = Instant.now(clock);
                 if ("RUNNING".equals(ev.status())) {
                     elevatorService.stopIfRunning(ev, StopReason.MAINTENANCE_OVERDUE, null, now);
                 } else {
@@ -91,7 +95,10 @@ public class MaintenanceService {
         }
         // 周期内（含恰第 15 日）：合规
         jdbc.update("UPDATE elevator SET last_maintenance_day=? WHERE id=?", performedDay, ev.id());
-        return insertRecord(ev.id(), req, dueDay, MaintenanceResult.COMPLIANT, req.note());
+        MaintenanceView v = insertRecord(ev.id(), req, dueDay, MaintenanceResult.COMPLIANT, req.note());
+        // 旧手工入口兼容：有效维保记录将对应的未完成义务一次性结清
+        obligationService.settleByManualRecord(ev.id(), v.id(), performedDay, now);
+        return v;
     }
 
     private MaintenanceView insertRecord(long elevatorId, MaintenanceRequest req, LocalDate dueDay,

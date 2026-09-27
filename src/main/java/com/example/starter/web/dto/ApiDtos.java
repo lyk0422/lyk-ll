@@ -57,6 +57,50 @@ public final class ApiDtos {
     public record ElevatorRecheckRequest(boolean inspectionPassed) {
     }
 
+    /** 履约派发/续派请求：指定两名持证人员与半开作业窗 [windowStart,windowEnd) */
+    public record ObligationAllocateRequest(@NotBlank String requestId, @NotNull Long expectedVersion,
+                                            @NotEmpty List<@NotNull Long> staffIds,
+                                            @NotNull Instant windowStart, @NotNull Instant windowEnd) {
+    }
+
+    /** 履约尝试开始请求 */
+    public record ObligationStartRequest(@NotBlank String requestId, @NotNull Long expectedVersion,
+                                         @NotNull Instant startedAt) {
+    }
+
+    /** 尝试清单回报请求（开始/完成共用）；doneItems 为已完成检查项编码集合 */
+    public record ObligationItemsRequest(@NotBlank String requestId, @NotNull Long expectedVersion,
+                                         @NotEmpty List<@NotBlank String> doneItems,
+                                         @NotNull Instant at) {
+    }
+
+    /** 履约尝试完成请求：全部清单齐备且双人共同确认 */
+    public record ObligationCompleteRequest(@NotBlank String requestId, @NotNull Long expectedVersion,
+                                            @NotEmpty List<@NotNull Long> confirmerIds,
+                                            @NotEmpty List<@NotBlank String> doneItems,
+                                            @NotNull Instant at) {
+    }
+
+    /** 义务视图 */
+    public record ObligationView(long id, long elevatorId, int periodIndex, LocalDate baseDay, Instant dueAt,
+                                 String status, int version, Long activeAttemptId,
+                                 Long lastValidRecordId, Long fulfilledRecordId, Instant fulfilledAt,
+                                 List<String> checklist, List<ObligationAttemptView> attempts) {
+    }
+
+    /** 尝试视图 */
+    public record ObligationAttemptView(long id, int seq, String status, int version,
+                                        String allocateRequestId, String startRequestId,
+                                        String completeRequestId, Instant allocatedAt, Instant startedAt,
+                                        Instant suspendedAt, Instant completedAt, Long suspendRescueId,
+                                        List<Long> staffIds, Instant windowStart, Instant windowEnd,
+                                        List<String> doneItems) {
+    }
+
+    /** 轨迹事件视图 */
+    public record ObligationEventView(long id, Long attemptId, String event, String detail, Instant createdAt) {
+    }
+
     /** 救援单视图 */
     public record RescueView(long id, long elevatorId, String requestId, String status,
                              Instant reportedAt, Instant dispatchedAt, Instant arrivedAt,

@@ -10,6 +10,10 @@ import com.example.starter.web.dto.ApiDtos.DispatchRequest;
 import com.example.starter.web.dto.ApiDtos.ElevatorRecheckRequest;
 import com.example.starter.web.dto.ApiDtos.ElevatorRequest;
 import com.example.starter.web.dto.ApiDtos.MaintenanceRequest;
+import com.example.starter.web.dto.ApiDtos.ObligationAllocateRequest;
+import com.example.starter.web.dto.ApiDtos.ObligationCompleteRequest;
+import com.example.starter.web.dto.ApiDtos.ObligationItemsRequest;
+import com.example.starter.web.dto.ApiDtos.ObligationStartRequest;
 import com.example.starter.web.dto.ApiDtos.RecheckRequest;
 import com.example.starter.web.dto.ApiDtos.ReportRequest;
 import com.example.starter.web.dto.ApiDtos.RescueRequest;
@@ -63,6 +67,12 @@ public abstract class AbstractIntegrationTest {
         jdbc.update("DELETE FROM rescue_event");
         jdbc.update("DELETE FROM rescue_staff");
         jdbc.update("DELETE FROM stop_resume_chain");
+        jdbc.update("DELETE FROM maintenance_attempt_item");
+        jdbc.update("DELETE FROM maintenance_attempt_staff");
+        jdbc.update("DELETE FROM maintenance_obligation_event");
+        jdbc.update("DELETE FROM maintenance_attempt");
+        jdbc.update("DELETE FROM maintenance_obligation_checklist");
+        jdbc.update("DELETE FROM maintenance_obligation");
         jdbc.update("DELETE FROM maintenance_record");
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM rescue_order");
@@ -146,6 +156,53 @@ public abstract class AbstractIntegrationTest {
 
     protected Resp elevatorRecheck(long elevatorId, boolean passed) throws Exception {
         return postJson("/api/elevators/" + elevatorId + "/recheck", new ElevatorRecheckRequest(passed));
+    }
+
+    // ---------------------------------------------------------------- 履约义务辅助
+
+    protected static final List<String> ALL_CHECKLIST =
+            List.of("CHK_CAR_DOOR", "CHK_EMERGENCY_ALARM", "CHK_LANDING_LOCK", "CHK_TRACTION_BRAKE");
+
+    protected Resp scanObligations(long elevatorId, Instant at) throws Exception {
+        String url = "/api/obligations/scan?elevatorId=" + elevatorId
+                + (at == null ? "" : "&at=" + at.toString());
+        return postJson(url, new java.util.HashMap<String, Object>());
+    }
+
+    protected Resp allocate(long obligationId, String requestId, long expectedVersion,
+                            List<Long> staffIds, Instant windowStart, Instant windowEnd) throws Exception {
+        return postJson("/api/obligations/" + obligationId + "/attempts",
+                new ObligationAllocateRequest(requestId, expectedVersion, staffIds, windowStart, windowEnd));
+    }
+
+    protected Resp startAttempt(long attemptId, String requestId, long expectedVersion, Instant at) throws Exception {
+        return postJson("/api/obligations/attempts/" + attemptId + "/start",
+                new ObligationStartRequest(requestId, expectedVersion, at));
+    }
+
+    protected Resp reportItems(long attemptId, String requestId, long expectedVersion,
+                               List<String> items, Instant at) throws Exception {
+        return postJson("/api/obligations/attempts/" + attemptId + "/items",
+                new ObligationItemsRequest(requestId, expectedVersion, items, at));
+    }
+
+    protected Resp completeAttempt(long attemptId, String requestId, long expectedVersion,
+                                   List<Long> confirmers, List<String> items, Instant at) throws Exception {
+        return postJson("/api/obligations/attempts/" + attemptId + "/complete",
+                new ObligationCompleteRequest(requestId, expectedVersion, confirmers, items, at));
+    }
+
+    protected Resp obligation(long obligationId) throws Exception {
+        return getJson("/api/obligations/" + obligationId);
+    }
+
+    protected Resp obligationEvents(long obligationId) throws Exception {
+        return getJson("/api/obligations/" + obligationId + "/events");
+    }
+
+    protected JsonNode latestAttempt(long obligationId) throws Exception {
+        var arr = obligation(obligationId).body().get("attempts");
+        return arr.get(arr.size() - 1);
     }
 
     /** 走完 接报→派单→到场→施救→复检→结案 全流程，返回救援单 ID。 */
