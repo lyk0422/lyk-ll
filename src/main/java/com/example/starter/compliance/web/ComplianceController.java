@@ -3,12 +3,16 @@ package com.example.starter.compliance.web;
 import com.example.starter.compliance.service.ComplianceService;
 import com.example.starter.compliance.service.Results;
 import com.example.starter.compliance.service.ServiceResult;
+import com.example.starter.compliance.web.Requests.ConfirmCleaningRequest;
+import com.example.starter.compliance.web.Requests.ControlledProductionRequest;
 import com.example.starter.compliance.web.Requests.FileFilingRequest;
 import com.example.starter.compliance.web.Requests.FilingRefRequest;
 import com.example.starter.compliance.web.Requests.FormulaRefRequest;
 import com.example.starter.compliance.web.Requests.ProductionReportRequest;
+import com.example.starter.compliance.web.Requests.RegisterLineRequest;
 import com.example.starter.compliance.web.Requests.StandardUpdateRequest;
 import com.example.starter.compliance.web.Requests.SubmitFormulaRequest;
+import com.example.starter.compliance.web.Requests.UpsertAllergensRequest;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -102,6 +106,52 @@ public class ComplianceController {
     @GetMapping("/products/{productCode}/trajectory")
     public Results.TrajectoryView trajectory(@PathVariable String productCode) {
         return service.getTrajectory(productCode);
+    }
+
+    /** 登记生产线：占用版本从 1 开始，lineCode 唯一。 */
+    @PostMapping("/lines")
+    public ResponseEntity<Results.LineView> registerLine(
+            @RequestBody RegisterLineRequest request) {
+        return respond(service.registerLine(request));
+    }
+
+    @GetMapping("/lines/{lineCode}")
+    public Results.LineView line(@PathVariable String lineCode) {
+        return service.getLine(lineCode);
+    }
+
+    /** 登记/变更配方版本过敏原集合：变更携带 expectedVersion 乐观锁。 */
+    @PostMapping("/formulas/allergens")
+    public ResponseEntity<Results.AllergenView> upsertAllergens(
+            @RequestBody UpsertAllergensRequest request) {
+        return respond(service.upsertAllergens(request));
+    }
+
+    @GetMapping("/formulas/{formulaId}/allergens")
+    public Results.AllergenView allergens(@PathVariable long formulaId) {
+        return service.getAllergens(formulaId);
+    }
+
+    /** 确认清线凭证：两名不同人员共同确认，固定线路、清线时刻与占用版本，2 小时内有效。 */
+    @PostMapping("/cleaning-vouchers")
+    public ResponseEntity<Results.VoucherView> confirmCleaning(
+            @RequestBody ConfirmCleaningRequest request) {
+        return respond(service.confirmCleaning(request));
+    }
+
+    @GetMapping("/cleaning-vouchers/{voucherId}")
+    public Results.VoucherView voucher(@PathVariable long voucherId) {
+        return service.getVoucher(voucherId);
+    }
+
+    /**
+     * 受控量产入口：声明生产线与占用版本；前批含新批未声明过敏原时必须引用有效清线凭证，
+     * 不得绕过门禁；旧 /production-records 入口（未指定生产线）保持兼容。
+     */
+    @PostMapping("/lines/production-records")
+    public ResponseEntity<Results.ControlledProductionView> controlledProduction(
+            @RequestBody ControlledProductionRequest request) {
+        return respond(service.controlledProduction(request));
     }
 
     private static <T> ResponseEntity<T> respond(ServiceResult<T> result) {

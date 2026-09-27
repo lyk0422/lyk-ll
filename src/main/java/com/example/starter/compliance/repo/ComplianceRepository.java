@@ -394,6 +394,217 @@ public class ComplianceRepository {
         return count == null ? 0L : count;
     }
 
+    // ---------------- 过敏原目录与配方版本过敏原登记 ----------------
+
+    public void insertAllergen(String code, String name) {
+        jdbcTemplate.update(
+                "INSERT INTO allergen(allergen_code, allergen_name) VALUES (?, ?)",
+                code, name);
+    }
+
+    public boolean allergenExists(String allergenCode) {
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(1) FROM allergen WHERE allergen_code = ?",
+                Integer.class, allergenCode);
+        return count != null && count > 0;
+    }
+
+    public Optional<AllergenRegistrationRow> findAllergenRegistration(long formulaId) {
+        try {
+            return Optional.of(jdbcTemplate.queryForObject(
+                    "SELECT formula_id, version, updated_at FROM formula_allergen "
+                            + "WHERE formula_id = ?",
+                    ALLERGEN_REGISTRATION_MAPPER, formulaId));
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    /** 配方版本已登记过敏原集合（按编码升序，无登记时为空集）。 */
+    public List<String> findAllergenCodes(long formulaId) {
+        return jdbcTemplate.query(
+                "SELECT allergen_code FROM formula_allergen_item WHERE formula_id = ? "
+                        + "ORDER BY allergen_code",
+                (rs, n) -> rs.getString("allergen_code"),
+                formulaId);
+    }
+
+    public void insertAllergenRegistration(long formulaId, String requestId, long updatedAt) {
+        jdbcTemplate.update(
+                "INSERT INTO formula_allergen(formula_id, version, request_id, updated_at) "
+                        + "VALUES (?, 1, ?, ?)",
+                formulaId, requestId, updatedAt);
+    }
+
+    /** 变更登记：版本 +1；乐观锁由服务层在同事务内校验。 */
+    public void updateAllergenRegistration(long formulaId, int newVersion, String requestId,
+            long updatedAt) {
+        jdbcTemplate.update(
+                "UPDATE formula_allergen SET version = ?, request_id = ?, updated_at = ? "
+                        + "WHERE formula_id = ?",
+                newVersion, requestId, updatedAt, formulaId);
+    }
+
+    public void replaceAllergenItems(long formulaId, List<String> allergenCodes) {
+        jdbcTemplate.update("DELETE FROM formula_allergen_item WHERE formula_id = ?", formulaId);
+        for (String code : allergenCodes) {
+            jdbcTemplate.update(
+                    "INSERT INTO formula_allergen_item(formula_id, allergen_code) VALUES (?, ?)",
+                    formulaId, code);
+        }
+    }
+
+    // ---------------- 生产线 ----------------
+
+    public void insertLine(String lineCode, String requestId, long now) {
+        jdbcTemplate.update(
+                "INSERT INTO production_line(line_code, last_formula_id, occupancy_version, "
+                        + "request_id, created_at, updated_at) VALUES (?, NULL, 1, ?, ?, ?)",
+                lineCode, requestId, now, now);
+    }
+
+    public Optional<LineRow> findLine(String lineCode) {
+        try {
+            return Optional.of(jdbcTemplate.queryForObject(
+                    "SELECT line_code, last_formula_id, occupancy_version, created_at, updated_at "
+                            + "FROM production_line WHERE line_code = ?",
+                    LINE_MAPPER, lineCode));
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    /** 行锁读取生产线：与受控量产/凭证确认/后续量产串行化，保证占用版本检查-递增原子。 */
+    public Optional<LineRow> findLineForUpdate(String lineCode) {
+        try {
+            return Optional.of(jdbcTemplate.queryForObject(
+                    "SELECT line_code, last_formula_id, occupancy_version, created_at, updated_at "
+                            + "FROM production_line WHERE line_code = ? FOR UPDATE",
+                    LINE_MAPPER, lineCode));
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 递增占用版本并更新最近量产配方：带占用版本条件的原子更新，
+     * 命中 0 行说明版本已被并发量产推进，调用方按冲突处理。
+     */
+    public int advanceLine(String lineCode, int expectedOccupancyVersion, long formulaId,
+            long updatedAt) {
+        return jdbcTemplate.update(
+                "UPDATE production_line SET occupancy_version = occupancy_version + 1, "
+                        + "last_formula_id = ?, updated_at = ? "
+                        + "WHERE line_code = ? AND occupancy_version = ?",
+                formulaId, updatedAt, lineCode, expectedOccupancyVersion);
+    }
+
+    // ---------------- 清线凭证 ----------------
+
+    public long insertVoucher(String lineCode, long cleanedAt, long confirmedAt,
+            int occupancyVersion, String operator, String reviewer, String requestId, long now) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbcTemplate.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO cleaning_voucher(line_code, cleaned_at, confirmed_at, "
+                            + "occupancy_version, operator_name, reviewer_name, status, request_id, "
+                            + "created_at) VALUES (?, ?, ?, ?, ?, ?, 'ISSUED', ?, ?)",
+                    Statement.RETURN_GENERATED_KEYS);
+            ps.setString(1, lineCode);
+            ps.setLong(2, cleanedAt);
+            ps.setLong(3, confirmedAt);
+            ps.setInt(4, occupancyVersion);
+            ps.setString(5, operator);
+            ps.setString(6, reviewer);
+            ps.setString(7, requestId);
+            ps.setLong(8, now);
+            return ps;
+        }, keyHolder);
+        Number key = keyHolder.getKey();
+        if (key == null) {
+            throw new IllegalStateException("清线凭证主键生成失败");
+        }
+        return key.longValue();
+    }
+
+    public void insertVoucherAllergen(long voucherId, String allergenCode) {
+        jdbcTemplate.update(
+                "INSERT INTO cleaning_voucher_allergen(voucher_id, allergen_code) VALUES (?, ?)",
+                voucherId, allergenCode);
+    }
+
+    public Optional<VoucherRow> findVoucherById(long voucherId) {
+        try {
+            return Optional.of(jdbcTemplate.queryForObject(
+                    "SELECT id, line_code, cleaned_at, confirmed_at, occupancy_version, "
+                            + "operator_name, reviewer_name, status, consumed_at, created_at "
+                            + "FROM cleaning_voucher WHERE id = ?",
+                    VOUCHER_MAPPER, voucherId));
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    public List<String> findVoucherAllergens(long voucherId) {
+        return jdbcTemplate.query(
+                "SELECT allergen_code FROM cleaning_voucher_allergen WHERE voucher_id = ? "
+                        + "ORDER BY allergen_code",
+                (rs, n) -> rs.getString("allergen_code"),
+                voucherId);
+    }
+
+    /** 核销凭证：仅 ISSUED 可核销，命中 0 行说明已被并发核销。 */
+    public int consumeVoucher(long voucherId, long consumedAt) {
+        return jdbcTemplate.update(
+                "UPDATE cleaning_voucher SET status = 'CONSUMED', consumed_at = ? "
+                        + "WHERE id = ? AND status = 'ISSUED'",
+                consumedAt, voucherId);
+    }
+
+    /** 受控量产记录：写入生产线、核销凭证与占用版本，返回记录主键。 */
+    public long insertControlledProductionRecord(long filingId, String batchNo,
+            BigDecimal quantityKg, long reportedAt, String lineCode, Long voucherId,
+            int occupancyVersion) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbcTemplate.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO production_record(filing_id, batch_no, quantity_kg, reported_at, "
+                            + "line_code, voucher_id, line_occupancy_version) "
+                            + "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    Statement.RETURN_GENERATED_KEYS);
+            ps.setLong(1, filingId);
+            ps.setString(2, batchNo);
+            ps.setBigDecimal(3, quantityKg);
+            ps.setLong(4, reportedAt);
+            ps.setString(5, lineCode);
+            if (voucherId == null) {
+                ps.setNull(6, java.sql.Types.BIGINT);
+            } else {
+                ps.setLong(6, voucherId);
+            }
+            ps.setInt(7, occupancyVersion);
+            return ps;
+        }, keyHolder);
+        Number key = keyHolder.getKey();
+        if (key == null) {
+            throw new IllegalStateException("量产记录主键生成失败");
+        }
+        return key.longValue();
+    }
+
+    /** 行锁读取备案：受控量产与备案暂停/注销串行化，保证唯一提交顺序。 */
+    public Optional<FilingRow> findFilingByIdForUpdate(long filingId) {
+        try {
+            return Optional.of(jdbcTemplate.queryForObject(
+                    "SELECT id, formula_id, product_code, version, status, request_id, snapshot, "
+                            + "watch_start_day, suspend_reason, created_at, finalized_at "
+                            + "FROM filing WHERE id = ? FOR UPDATE",
+                    FILING_MAPPER, filingId));
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
     // ---------------- requestId 幂等 ----------------
 
     public Optional<IdempotentRow> findIdempotent(String requestId) {
@@ -426,6 +637,11 @@ public class ComplianceRepository {
 
     public void deleteBusinessData() {
         jdbcTemplate.update("DELETE FROM production_record");
+        jdbcTemplate.update("DELETE FROM cleaning_voucher_allergen");
+        jdbcTemplate.update("DELETE FROM cleaning_voucher");
+        jdbcTemplate.update("DELETE FROM production_line");
+        jdbcTemplate.update("DELETE FROM formula_allergen_item");
+        jdbcTemplate.update("DELETE FROM formula_allergen");
         jdbcTemplate.update("DELETE FROM filing_review");
         jdbcTemplate.update("DELETE FROM active_filing");
         jdbcTemplate.update("DELETE FROM filing");
@@ -474,4 +690,24 @@ public class ComplianceRepository {
     private static final RowMapper<IdempotentRow> IDEMPOTENT_MAPPER = (rs, n) -> new IdempotentRow(
             rs.getString("request_id"), rs.getString("fingerprint"), rs.getInt("status_code"),
             rs.getString("response_json"), rs.getLong("created_at"));
+
+    private static final RowMapper<AllergenRegistrationRow> ALLERGEN_REGISTRATION_MAPPER =
+            (rs, n) -> new AllergenRegistrationRow(rs.getLong("formula_id"),
+                    rs.getInt("version"), rs.getLong("updated_at"));
+
+    private static final RowMapper<LineRow> LINE_MAPPER = (rs, n) -> new LineRow(
+            rs.getString("line_code"),
+            rs.getObject("last_formula_id", Long.class),
+            rs.getInt("occupancy_version"),
+            rs.getLong("created_at"),
+            rs.getLong("updated_at"));
+
+    private static final RowMapper<VoucherRow> VOUCHER_MAPPER = (rs, n) -> new VoucherRow(
+            rs.getLong("id"), rs.getString("line_code"),
+            rs.getLong("cleaned_at"), rs.getLong("confirmed_at"),
+            rs.getInt("occupancy_version"),
+            rs.getString("operator_name"), rs.getString("reviewer_name"),
+            rs.getString("status"),
+            rs.getObject("consumed_at", Long.class),
+            rs.getLong("created_at"));
 }

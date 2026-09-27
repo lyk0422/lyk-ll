@@ -8,19 +8,26 @@ import com.example.starter.compliance.engine.LimitEngine;
 import com.example.starter.compliance.engine.ReviewInput;
 import com.example.starter.compliance.engine.ReviewModels.ReviewReport;
 import com.example.starter.compliance.repo.AdditiveRow;
+import com.example.starter.compliance.repo.AllergenRegistrationRow;
 import com.example.starter.compliance.repo.ComplianceRepository;
 import com.example.starter.compliance.repo.FilingRow;
 import com.example.starter.compliance.repo.FormulaRow;
 import com.example.starter.compliance.repo.IngredientAdditiveRow;
 import com.example.starter.compliance.repo.LimitRow;
+import com.example.starter.compliance.repo.LineRow;
+import com.example.starter.compliance.repo.VoucherRow;
 import com.example.starter.compliance.support.JsonSupport;
 import com.example.starter.compliance.time.ComplianceClock;
+import com.example.starter.compliance.web.Requests.ConfirmCleaningRequest;
+import com.example.starter.compliance.web.Requests.ControlledProductionRequest;
 import com.example.starter.compliance.web.Requests.FileFilingRequest;
 import com.example.starter.compliance.web.Requests.FilingRefRequest;
 import com.example.starter.compliance.web.Requests.FormulaRefRequest;
 import com.example.starter.compliance.web.Requests.ProductionReportRequest;
+import com.example.starter.compliance.web.Requests.RegisterLineRequest;
 import com.example.starter.compliance.web.Requests.StandardUpdateRequest;
 import com.example.starter.compliance.web.Requests.SubmitFormulaRequest;
+import com.example.starter.compliance.web.Requests.UpsertAllergensRequest;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -33,6 +40,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.springframework.dao.DuplicateKeyException;
@@ -47,6 +55,12 @@ import org.springframework.transaction.annotation.Transactional;
  * 批准新版本时在同一事务内暂停同产品旧有效备案，随后可对批准版本做量产备案（ACTIVE）。
  * 标准更新后受影响备案进入 REVIEW_WATCH，90 个 UTC 自然日内（恰第 90 日受理）复审，
  * 逾期自动暂停；注销为终态，注销后量产上报一律拒绝。
+ *
+ * <p>生产线过敏原清线凭证门禁：配方版本登记过敏原集合（版本从 1 开始，变更携带 expectedVersion）；
+ * 生产线登记最近量产版本与递增占用版本。受控量产声明线路与占用版本，前批含新批未声明过敏原时
+ * 必须引用覆盖缺口的有效清线凭证（两名不同人员确认、确认后 2 小时内有效、恰满即失效、
+ * 后续量产先提交即失效）；受理同事务校验备案有效、凭证范围与线路版本，原子写记录、
+ * 推进占用版本、核销凭证，失败整体回滚不消耗凭证。旧未指定生产线入口保持兼容。
  *
  * <p>所有变更接口以 requestId 幂等：指纹覆盖 requestId 与全部业务字段，同键同参重放首次结果，
  * 同键异参返回 409。
@@ -276,6 +290,241 @@ public class ComplianceService {
         });
     }
 
+    // ---------------- 生产线过敏原清线凭证门禁 ----------------
+
+    /** 清线凭证有效期：确认后 2 小时（UTC 毫秒），恰满 2 小时即失效。 */
+    public static final long VOUCHER_VALIDITY_MILLIS = 2L * 60L * 60L * 1000L;
+
+    /** 登记生产线：占用版本从 1 开始，lineCode 全局唯一。 */
+    @Transactional
+    public ServiceResult<Results.LineView> registerLine(RegisterLineRequest request) {
+        return withIdempotency(request.requestId(), request, Results.LineView.class, () -> {
+            if (request.lineCode() == null || request.lineCode().isBlank()) {
+                throw invalid("生产线编码不能为空");
+            }
+            if (repository.findLine(request.lineCode()).isPresent()) {
+                throw new ApiException(HttpStatus.CONFLICT, "LINE_EXISTS",
+                        "生产线已存在：" + request.lineCode());
+            }
+            long now = clock.nowMillis();
+            repository.insertLine(request.lineCode(), request.requestId(), now);
+            LineRow row = repository.findLine(request.lineCode()).orElseThrow();
+            return new Outcome<>(buildLineView(row, false), HttpStatus.OK.value());
+        });
+    }
+
+    /**
+     * 登记/变更配方版本过敏原集合：版本从 1 开始，成功变更 +1；
+     * 首次登记 expectedVersion 传 null，变更须等于当前版本，不一致返回 409。
+     */
+    @Transactional
+    public ServiceResult<Results.AllergenView> upsertAllergens(UpsertAllergensRequest request) {
+        return withIdempotency(request.requestId(), request, Results.AllergenView.class, () -> {
+            FormulaRow formula = requireFormula(request.formulaId());
+            List<String> allergens = validateAllergenSet(request.allergens());
+            Optional<AllergenRegistrationRow> existing =
+                    repository.findAllergenRegistration(formula.id());
+            long now = clock.nowMillis();
+            int newVersion;
+            if (existing.isEmpty()) {
+                if (request.expectedVersion() != null) {
+                    throw new ApiException(HttpStatus.CONFLICT, "VERSION_CONFLICT",
+                            "该配方版本尚未登记过敏原，不能按版本变更");
+                }
+                repository.insertAllergenRegistration(formula.id(), request.requestId(), now);
+                newVersion = 1;
+            } else {
+                if (request.expectedVersion() == null
+                        || request.expectedVersion().intValue() != existing.get().version()) {
+                    throw new ApiException(HttpStatus.CONFLICT, "VERSION_CONFLICT",
+                            "过敏原登记版本不一致：当前版本 " + existing.get().version());
+                }
+                newVersion = existing.get().version() + 1;
+                repository.updateAllergenRegistration(formula.id(), newVersion,
+                        request.requestId(), now);
+            }
+            repository.replaceAllergenItems(formula.id(), allergens);
+            return new Outcome<>(new Results.AllergenView(formula.id(), allergens, newVersion,
+                    now, false), HttpStatus.OK.value());
+        });
+    }
+
+    /**
+     * 确认清线凭证：操作人与复核人须为两名不同人员；固定线路、清线时刻及确认时占用版本；
+     * 确认后 2 小时内（UTC）有效，恰满 2 小时失效；线路随后任何量产先提交即失效。
+     */
+    @Transactional
+    public ServiceResult<Results.VoucherView> confirmCleaning(ConfirmCleaningRequest request) {
+        return withIdempotency(request.requestId(), request, Results.VoucherView.class, () -> {
+            if (request.lineCode() == null || request.lineCode().isBlank()) {
+                throw invalid("生产线编码不能为空");
+            }
+            List<String> allergens = validateAllergenSet(request.allergens());
+            if (allergens.isEmpty()) {
+                throw invalid("凭证覆盖过敏原集合不能为空");
+            }
+            if (request.cleanedAt() == null) {
+                throw invalid("清线时刻不能为空");
+            }
+            if (request.expectedOccupancyVersion() == null) {
+                throw invalid("线路占用版本不能为空");
+            }
+            if (request.operator() == null || request.operator().isBlank()) {
+                throw invalid("操作人不能为空");
+            }
+            if (request.reviewer() == null || request.reviewer().isBlank()) {
+                throw invalid("复核人不能为空");
+            }
+            if (request.operator().equals(request.reviewer())) {
+                throw unprocessable("CONFIRMER_NOT_DISTINCT",
+                        "操作人与复核人须为两名不同人员共同确认");
+            }
+            long now = clock.nowMillis();
+            if (request.cleanedAt() > now) {
+                throw invalid("清线时刻不能晚于确认时刻");
+            }
+            LineRow line = repository.findLineForUpdate(request.lineCode())
+                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "LINE_NOT_FOUND",
+                            "生产线不存在：" + request.lineCode()));
+            if (line.occupancyVersion() != request.expectedOccupancyVersion()) {
+                throw new ApiException(HttpStatus.CONFLICT, "OCCUPANCY_VERSION_CONFLICT",
+                        "线路占用版本不一致：当前版本 " + line.occupancyVersion());
+            }
+            long voucherId = repository.insertVoucher(line.lineCode(), request.cleanedAt(), now,
+                    line.occupancyVersion(), request.operator(), request.reviewer(),
+                    request.requestId(), now);
+            for (String code : allergens) {
+                repository.insertVoucherAllergen(voucherId, code);
+            }
+            VoucherRow row = repository.findVoucherById(voucherId).orElseThrow();
+            return new Outcome<>(buildVoucherView(row, line.occupancyVersion(), false),
+                    HttpStatus.OK.value());
+        });
+    }
+
+    /**
+     * 受控量产受理：声明生产线与当前占用版本；前批含新批未声明的任一过敏原时，
+     * 必须引用覆盖缺口且仍有效的清线凭证。受理时同事务校验备案有效、凭证范围与线路版本，
+     * 原子写生产记录、推进占用版本、核销凭证；任何失败整体回滚，不消耗凭证。
+     */
+    @Transactional
+    public ServiceResult<Results.ControlledProductionView> controlledProduction(
+            ControlledProductionRequest request) {
+        return withIdempotency(request.requestId(), request,
+                Results.ControlledProductionView.class, () -> {
+            if (request.lineCode() == null || request.lineCode().isBlank()) {
+                throw invalid("生产线编码不能为空");
+            }
+            if (request.filingId() == null) {
+                throw invalid("filingId 不能为空");
+            }
+            if (request.batchNo() == null || request.batchNo().isBlank()) {
+                throw invalid("批次号不能为空");
+            }
+            if (request.quantityKg() == null || request.quantityKg().signum() < 0) {
+                throw invalid("量产数量必须为非负数");
+            }
+            if (request.expectedOccupancyVersion() == null) {
+                throw invalid("线路占用版本不能为空");
+            }
+            // 行锁备案：与备案暂停/注销串行化，保证唯一提交顺序。
+            FilingRow filing = repository.findFilingByIdForUpdate(request.filingId())
+                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "FILING_NOT_FOUND",
+                            "备案不存在：" + request.filingId()));
+            long today = clock.todayEpochDay();
+            if ("CANCELLED".equals(filing.status())) {
+                throw unprocessable("FILING_CANCELLED", "备案已注销，受控量产一律拒绝");
+            }
+            if ("SUSPENDED".equals(filing.status())) {
+                throw unprocessable("FILING_SUSPENDED", "备案已暂停，受控量产拒绝");
+            }
+            if ("REVIEW_WATCH".equals(filing.status())
+                    && today > filing.watchStartDay() + REVIEW_GRACE_DAYS) {
+                // 逾期未复审：独立事务立即暂停备案；量产不写入，失败不占 requestId 键。
+                transitions.suspendOverdueNewTransaction(filing);
+                throw unprocessable("FILING_OVERDUE", "备案复审逾期已自动暂停，受控量产拒绝");
+            }
+            LineRow line = repository.findLineForUpdate(request.lineCode())
+                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "LINE_NOT_FOUND",
+                            "生产线不存在：" + request.lineCode()));
+            if (line.occupancyVersion() != request.expectedOccupancyVersion()) {
+                throw new ApiException(HttpStatus.CONFLICT, "OCCUPANCY_VERSION_CONFLICT",
+                        "线路占用版本不一致：当前版本 " + line.occupancyVersion());
+            }
+
+            // 过敏原门禁：前批含新批未声明的任一过敏原 → 必须引用覆盖缺口的有效清线凭证。
+            Set<String> newAllergens =
+                    Set.copyOf(repository.findAllergenCodes(filing.formulaId()));
+            Set<String> uncovered = new TreeSet<>();
+            if (line.lastFormulaId() != null) {
+                for (String code : repository.findAllergenCodes(line.lastFormulaId())) {
+                    if (!newAllergens.contains(code)) {
+                        uncovered.add(code);
+                    }
+                }
+            }
+            Long voucherId = null;
+            if (!uncovered.isEmpty()) {
+                if (request.voucherId() == null) {
+                    throw unprocessable("CLEANING_VOUCHER_REQUIRED",
+                            "前批含新批未声明过敏原 " + uncovered + "，必须引用有效清线凭证");
+                }
+                VoucherRow voucher = repository.findVoucherById(request.voucherId())
+                        .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND,
+                                "VOUCHER_NOT_FOUND", "清线凭证不存在：" + request.voucherId()));
+                validateVoucher(voucher, line, uncovered);
+                voucherId = voucher.id();
+            }
+
+            long now = clock.nowMillis();
+            long recordId = repository.insertControlledProductionRecord(filing.id(),
+                    request.batchNo(), request.quantityKg(), now, line.lineCode(), voucherId,
+                    line.occupancyVersion());
+            if (repository.advanceLine(line.lineCode(), request.expectedOccupancyVersion(),
+                    filing.formulaId(), now) != 1) {
+                throw new ApiException(HttpStatus.CONFLICT, "OCCUPANCY_VERSION_CONFLICT",
+                        "线路占用版本已被并发量产推进");
+            }
+            if (voucherId != null && repository.consumeVoucher(voucherId, now) != 1) {
+                throw unprocessable("VOUCHER_CONSUMED", "清线凭证已被核销");
+            }
+            return new Outcome<>(new Results.ControlledProductionView(recordId, filing.id(),
+                    line.lineCode(), request.batchNo(),
+                    request.quantityKg().stripTrailingZeros().toPlainString(),
+                    line.occupancyVersion(), voucherId, now, false), HttpStatus.OK.value());
+        });
+    }
+
+    @Transactional(readOnly = true)
+    public Results.LineView getLine(String lineCode) {
+        LineRow row = repository.findLine(lineCode)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "LINE_NOT_FOUND",
+                        "生产线不存在：" + lineCode));
+        return buildLineView(row, false);
+    }
+
+    @Transactional(readOnly = true)
+    public Results.AllergenView getAllergens(long formulaId) {
+        FormulaRow formula = requireFormula(formulaId);
+        AllergenRegistrationRow registration = repository.findAllergenRegistration(formula.id())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND,
+                        "ALLERGEN_REGISTRATION_NOT_FOUND",
+                        "配方版本未登记过敏原：" + formulaId));
+        return new Results.AllergenView(formula.id(),
+                repository.findAllergenCodes(formula.id()), registration.version(),
+                registration.updatedAt(), false);
+    }
+
+    @Transactional(readOnly = true)
+    public Results.VoucherView getVoucher(long voucherId) {
+        VoucherRow row = repository.findVoucherById(voucherId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "VOUCHER_NOT_FOUND",
+                        "清线凭证不存在：" + voucherId));
+        Integer lineVersion = repository.findLine(row.lineCode())
+                .map(LineRow::occupancyVersion).orElse(null);
+        return buildVoucherView(row, lineVersion, false);
+    }
+
     // ---------------- 标准更新 / 逾期巡检 / 查询 ----------------
 
     @Transactional
@@ -386,6 +635,81 @@ public class ComplianceService {
 
     private static ApiException invalid(String message) {
         return new ApiException(HttpStatus.BAD_REQUEST, "INVALID_PARAM", message);
+    }
+
+    private static ApiException unprocessable(String code, String message) {
+        return new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, code, message);
+    }
+
+    /** 校验过敏原集合：编码须在合成目录中、非空且不重复；返回按编码升序的去重列表。 */
+    private List<String> validateAllergenSet(List<String> allergens) {
+        if (allergens == null) {
+            throw invalid("过敏原集合不能为空（可传空数组）");
+        }
+        Set<String> distinct = new TreeSet<>();
+        for (String code : allergens) {
+            if (code == null || code.isBlank()) {
+                throw invalid("过敏原编码不能为空");
+            }
+            if (!repository.allergenExists(code)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "ALLERGEN_NOT_FOUND",
+                        "过敏原目录中不存在：" + code);
+            }
+            if (!distinct.add(code)) {
+                throw invalid("过敏原编码重复：" + code);
+            }
+        }
+        return List.copyOf(distinct);
+    }
+
+    /** 校验清线凭证：固定线路、未核销、占用版本未被后续量产推进、2 小时有效期内、覆盖缺口。 */
+    private void validateVoucher(VoucherRow voucher, LineRow line, Set<String> uncovered) {
+        if (!voucher.lineCode().equals(line.lineCode())) {
+            throw unprocessable("VOUCHER_LINE_MISMATCH",
+                    "清线凭证固定线路 " + voucher.lineCode() + "，与声明线路不一致");
+        }
+        if (!"ISSUED".equals(voucher.status())) {
+            throw unprocessable("VOUCHER_CONSUMED", "清线凭证已被核销");
+        }
+        if (voucher.occupancyVersion() != line.occupancyVersion()) {
+            throw unprocessable("VOUCHER_INVALIDATED",
+                    "线路随后已有量产提交，清线凭证已失效");
+        }
+        if (clock.nowMillis() >= voucher.confirmedAt() + VOUCHER_VALIDITY_MILLIS) {
+            throw unprocessable("VOUCHER_EXPIRED", "清线凭证已超过确认后 2 小时有效期");
+        }
+        Set<String> covered = Set.copyOf(repository.findVoucherAllergens(voucher.id()));
+        Set<String> missing = new TreeSet<>(uncovered);
+        missing.removeAll(covered);
+        if (!missing.isEmpty()) {
+            throw unprocessable("VOUCHER_COVERAGE_INSUFFICIENT",
+                    "清线凭证未覆盖过敏原 " + missing);
+        }
+    }
+
+    private Results.LineView buildLineView(LineRow row, boolean replayed) {
+        return new Results.LineView(row.lineCode(), row.lastFormulaId(), row.occupancyVersion(),
+                row.createdAt(), row.updatedAt(), replayed);
+    }
+
+    private Results.VoucherView buildVoucherView(VoucherRow row, Integer currentOccupancyVersion,
+            boolean replayed) {
+        long validUntil = row.confirmedAt() + VOUCHER_VALIDITY_MILLIS;
+        String effective;
+        if (!"ISSUED".equals(row.status())) {
+            effective = row.status();
+        } else if (currentOccupancyVersion == null
+                || currentOccupancyVersion.intValue() != row.occupancyVersion()) {
+            effective = "INVALIDATED";
+        } else if (clock.nowMillis() >= validUntil) {
+            effective = "EXPIRED";
+        } else {
+            effective = "ISSUED";
+        }
+        return new Results.VoucherView(row.id(), row.lineCode(),
+                repository.findVoucherAllergens(row.id()), row.cleanedAt(), row.confirmedAt(),
+                validUntil, row.occupancyVersion(), row.status(), effective, row.consumedAt(),
+                replayed);
     }
 
     private FormulaContent validateAndBuild(SubmitFormulaRequest request) {

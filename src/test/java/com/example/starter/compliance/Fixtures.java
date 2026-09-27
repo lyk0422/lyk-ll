@@ -1,13 +1,17 @@
 package com.example.starter.compliance;
 
+import com.example.starter.compliance.web.Requests.ConfirmCleaningRequest;
+import com.example.starter.compliance.web.Requests.ControlledProductionRequest;
 import com.example.starter.compliance.web.Requests.DirectAdditiveDto;
 import com.example.starter.compliance.web.Requests.FileFilingRequest;
 import com.example.starter.compliance.web.Requests.FilingRefRequest;
 import com.example.starter.compliance.web.Requests.FormulaRefRequest;
 import com.example.starter.compliance.web.Requests.IngredientDto;
 import com.example.starter.compliance.web.Requests.ProductionReportRequest;
+import com.example.starter.compliance.web.Requests.RegisterLineRequest;
 import com.example.starter.compliance.web.Requests.StandardUpdateRequest;
 import com.example.starter.compliance.web.Requests.SubmitFormulaRequest;
+import com.example.starter.compliance.web.Requests.UpsertAllergensRequest;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.UUID;
@@ -74,5 +78,45 @@ public final class Fixtures {
             String maxAmount) {
         return new StandardUpdateRequest(requestId(), additiveCode, categoryCode,
                 new BigDecimal(maxAmount));
+    }
+
+    public static RegisterLineRequest line(String lineCode) {
+        return new RegisterLineRequest(requestId(), lineCode);
+    }
+
+    public static UpsertAllergensRequest allergens(long formulaId, List<String> allergens,
+            Integer expectedVersion) {
+        return new UpsertAllergensRequest(requestId(), formulaId, allergens, expectedVersion);
+    }
+
+    public static UpsertAllergensRequest allergens(String requestId, long formulaId,
+            List<String> allergens, Integer expectedVersion) {
+        return new UpsertAllergensRequest(requestId, formulaId, allergens, expectedVersion);
+    }
+
+    public static ConfirmCleaningRequest cleaning(String lineCode, List<String> allergens,
+            long cleanedAt, int occupancyVersion, String operator, String reviewer) {
+        return new ConfirmCleaningRequest(requestId(), lineCode, allergens, cleanedAt,
+                occupancyVersion, operator, reviewer);
+    }
+
+    public static ConfirmCleaningRequest cleaning(String requestId, String lineCode,
+            List<String> allergens, long cleanedAt, int occupancyVersion, String operator,
+            String reviewer) {
+        return new ConfirmCleaningRequest(requestId, lineCode, allergens, cleanedAt,
+                occupancyVersion, operator, reviewer);
+    }
+
+    public static ControlledProductionRequest controlledProduction(String lineCode, long filingId,
+            String batchNo, String quantityKg, int occupancyVersion, Long voucherId) {
+        return new ControlledProductionRequest(requestId(), lineCode, filingId, batchNo,
+                new BigDecimal(quantityKg), occupancyVersion, voucherId);
+    }
+
+    public static ControlledProductionRequest controlledProduction(String requestId,
+            String lineCode, long filingId, String batchNo, String quantityKg,
+            int occupancyVersion, Long voucherId) {
+        return new ControlledProductionRequest(requestId, lineCode, filingId, batchNo,
+                new BigDecimal(quantityKg), occupancyVersion, voucherId);
     }
 }

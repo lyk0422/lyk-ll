@@ -18,6 +18,8 @@ import org.springframework.transaction.annotation.Transactional;
  *       ING_SYRUP 果味糖浆（含 E102 0.5 g/kg）；</li>
  *   <li>初始限量（g/kg 终产品）：BEV01 下 E202=0.5、E211=1.0、E102=0.1、E129=0.1、E300=0.5；
  *       BAK01 下 E202=1.0、E211=1.0、E300=2.0；MEAT01 下 E202=1.5、E300=0.5。</li>
+ *   <li>过敏原：GLUTEN 麸质、EGG 蛋、MILK 乳、PEANUT 花生、SOY 大豆、NUTS 坚果、
+ *       FISH 鱼、SESAME 芝麻（合成演示数据，非真实法规）。</li>
  * </ul>
  */
 @Component
@@ -52,6 +54,16 @@ public class SyntheticDataInitializer implements ApplicationRunner {
         repository.insertIngredientAdditive("ING_SAUCE", "E202", new BigDecimal("2.000000"));
         repository.insertIngredientAdditive("ING_SAUCE", "E211", new BigDecimal("4.000000"));
         repository.insertIngredientAdditive("ING_SYRUP", "E102", new BigDecimal("0.500000"));
+
+        // 过敏原合成目录：仅用于清线凭证门禁演示，非真实法规数据。
+        repository.insertAllergen("GLUTEN", "麸质");
+        repository.insertAllergen("EGG", "蛋");
+        repository.insertAllergen("MILK", "乳");
+        repository.insertAllergen("PEANUT", "花生");
+        repository.insertAllergen("SOY", "大豆");
+        repository.insertAllergen("NUTS", "坚果");
+        repository.insertAllergen("FISH", "鱼");
+        repository.insertAllergen("SESAME", "芝麻");
 
         long now = System.currentTimeMillis();
         repository.insertLimit("E202", "BEV01", new BigDecimal("0.500000"), now);

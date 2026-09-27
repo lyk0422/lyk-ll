@@ -104,13 +104,79 @@ CREATE TABLE IF NOT EXISTS filing_review (
     created_at BIGINT NOT NULL
 );
 
--- 量产上报记录：仅 ACTIVE（含复审观察受理期内）备案可写入
+-- 量产上报记录：仅 ACTIVE（含复审观察受理期内）备案可写入；
+-- line_code/voucher_id/line_occupancy_version 仅受控量产入口写入，旧入口记录为 NULL
 CREATE TABLE IF NOT EXISTS production_record (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     filing_id BIGINT NOT NULL,
     batch_no VARCHAR(96) NOT NULL,
     quantity_kg DECIMAL(18,6) NOT NULL,
-    reported_at BIGINT NOT NULL
+    reported_at BIGINT NOT NULL,
+    -- 受控量产的生产线编码；旧入口（未指定生产线）为 NULL
+    line_code VARCHAR(64),
+    -- 本次量产核销的清线凭证；无需凭证或旧入口为 NULL
+    voucher_id BIGINT,
+    -- 本次量产声明并占用的线路占用版本（受理时校验、成功后递增）
+    line_occupancy_version INT
+);
+
+-- 过敏原合成目录
+CREATE TABLE IF NOT EXISTS allergen (
+    allergen_code VARCHAR(64) PRIMARY KEY,
+    allergen_name VARCHAR(128) NOT NULL
+);
+
+-- 配方版本过敏原登记：version 从 1 开始，每次成功变更 +1（修改须携带 expectedVersion 乐观锁）
+CREATE TABLE IF NOT EXISTS formula_allergen (
+    formula_id BIGINT PRIMARY KEY,
+    version INT NOT NULL,
+    request_id VARCHAR(96),
+    updated_at BIGINT NOT NULL
+);
+
+-- 配方版本过敏原集合明细
+CREATE TABLE IF NOT EXISTS formula_allergen_item (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    formula_id BIGINT NOT NULL,
+    allergen_code VARCHAR(64) NOT NULL,
+    UNIQUE (formula_id, allergen_code)
+);
+
+-- 生产线：last_formula_id 为最近一次量产配方版本（NULL 表示尚未量产）；
+-- occupancy_version 为递增占用版本，从 1 开始，每笔受控量产成功 +1
+CREATE TABLE IF NOT EXISTS production_line (
+    line_code VARCHAR(64) PRIMARY KEY,
+    last_formula_id BIGINT,
+    occupancy_version INT NOT NULL,
+    request_id VARCHAR(96),
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+-- 清线凭证：操作人与复核人须为两名不同人员共同确认；
+-- 固定线路、清线时刻（cleaned_at，UTC epoch 毫秒）及确认时占用版本；
+-- 确认后 2 小时内（UTC）有效，恰满 2 小时失效；线路随后任何量产先提交即失效；
+-- status 为 ISSUED 有效 / CONSUMED 已核销
+CREATE TABLE IF NOT EXISTS cleaning_voucher (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    line_code VARCHAR(64) NOT NULL,
+    cleaned_at BIGINT NOT NULL,
+    confirmed_at BIGINT NOT NULL,
+    occupancy_version INT NOT NULL,
+    operator_name VARCHAR(64) NOT NULL,
+    reviewer_name VARCHAR(64) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    request_id VARCHAR(96),
+    consumed_at BIGINT,
+    created_at BIGINT NOT NULL
+);
+
+-- 清线凭证覆盖的过敏原集合明细
+CREATE TABLE IF NOT EXISTS cleaning_voucher_allergen (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    voucher_id BIGINT NOT NULL,
+    allergen_code VARCHAR(64) NOT NULL,
+    UNIQUE (voucher_id, allergen_code)
 );
 
 -- requestId 幂等记录：fingerprint 覆盖 requestId 与全部业务字段
