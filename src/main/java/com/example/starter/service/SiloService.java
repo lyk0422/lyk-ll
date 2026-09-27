@@ -221,7 +221,8 @@ public class SiloService {
 
     private static FanView mapFan(ResultSet rs, int rowNum) throws SQLException {
         return new FanView(rs.getLong("id"), rs.getString("code"), rs.getString("name"),
-                rs.getString("status"), rs.getObject("locked_job_id", Long.class));
+                rs.getString("status"), rs.getObject("locked_job_id", Long.class),
+                rs.getObject("locked_fumigation_id", Long.class));
     }
 
     private static LateEventView mapLateEvent(ResultSet rs, int rowNum) throws SQLException {

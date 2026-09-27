@@ -43,13 +43,14 @@ public final class GrainDtos {
             @NotBlank String name) {
     }
 
-    /** 风机视图。 */
+    /** 风机视图；lockedJobId 为通风作业锁定，lockedFumigationId 为熏蒸散气锁定。 */
     public record FanView(
             long id,
             String code,
             String name,
             String status,
-            Long lockedJobId) {
+            Long lockedJobId,
+            Long lockedFumigationId) {
     }
 
     /**

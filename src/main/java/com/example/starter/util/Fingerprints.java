@@ -25,6 +25,35 @@ public final class Fingerprints {
         String raw = Stream.of(parts)
                 .map(part -> part == null ? "<null>" : part.toString())
                 .collect(Collectors.joining("|"));
+        return sha256(raw);
+    }
+
+    /**
+     * 结构化指纹：每个字段带类型标签与长度前缀编码（null 为 N;，其余为 V长度:值），
+     * 合法文本即使包含分隔符也不会产生歧义；BigDecimal 去尾零后按 plain 字符串参与，
+     * 保证 1.0 与 1.00 视为同参。
+     *
+     * @param parts requestId 及全部业务字段（含版本、集合、精确时刻）
+     * @return 64 位十六进制摘要
+     */
+    public static String structured(Object... parts) {
+        String raw = Stream.of(parts)
+                .map(Fingerprints::encodePart)
+                .collect(Collectors.joining(""));
+        return sha256(raw);
+    }
+
+    private static String encodePart(Object part) {
+        if (part == null) {
+            return "N;";
+        }
+        String value = part instanceof java.math.BigDecimal decimal
+                ? decimal.stripTrailingZeros().toPlainString()
+                : part.toString();
+        return "V" + value.length() + ":" + value;
+    }
+
+    private static String sha256(String raw) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] hash = digest.digest(raw.getBytes(StandardCharsets.UTF_8));
