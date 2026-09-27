@@ -35,23 +35,29 @@ public class RideService {
     private final RideRepository rides;
     private final RideRecordRepository records;
     private final Idempotency.Executor idempotency;
+    private final InspectionGate inspectionGate;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
     public RideService(RideRepository rides, RideRecordRepository records,
-            Idempotency.Executor idempotency, ObjectMapper objectMapper, Clock clock) {
+            Idempotency.Executor idempotency, InspectionGate inspectionGate,
+            ObjectMapper objectMapper, Clock clock) {
         this.rides = rides;
         this.records = records;
         this.idempotency = idempotency;
+        this.inspectionGate = inspectionGate;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
 
-    /** 创建设备（合成数据），初始状态为待日检。 */
+    /** 创建设备（合成数据），初始状态为待日检；inspectionRequired 缺省 false。 */
     @Transactional
     public Map<String, Object> createRide(CreateRideRequest request) {
-        Ride ride = rides.insert(request.name(), request.maxLoad(), request.maxSpeed());
-        records.insertEvent(ride.id(), "CREATE", "设备登记：" + ride.name());
+        boolean inspectionRequired = Boolean.TRUE.equals(request.inspectionRequired());
+        Ride ride = rides.insert(request.name(), request.maxLoad(), request.maxSpeed(),
+                inspectionRequired);
+        records.insertEvent(ride.id(), "CREATE", "设备登记：" + ride.name()
+                + (inspectionRequired ? "（受检设备）" : ""));
         return rideView(ride);
     }
 
@@ -120,7 +126,7 @@ public class RideService {
         });
     }
 
-    /** 开放：须当日日检合格且试运行恰3次合格；未日检设备无法开放；并发开放唯一成功。 */
+    /** 开放：须当日日检合格且试运行恰3次合格；受检设备另须年度检验与大修监督检验门禁通过。 */
     public ApiResult open(long rideId, OpenRequest request) {
         return idempotency.execute(request.requestId(), "OPEN", rideId, request, () -> {
             Ride ride = lock(rideId);
@@ -129,6 +135,7 @@ public class RideService {
             }
             requireStatus(ride, "当前状态不允许开放，须试运行恰3次合格",
                     RideStatus.READY);
+            inspectionGate.requireOpenEligibility(ride);
             update(ride, RideStatus.OPEN, ride.trialCount(), ride.reopenCount(),
                     ride.checkDate(), ride.reopenDate());
             records.insertEvent(rideId, "OPEN", "设备开放载客");
@@ -188,11 +195,12 @@ public class RideService {
         });
     }
 
-    /** 复开：同日复开最多2次，恰2次合法，超出当日禁开。 */
+    /** 复开：同日复开最多2次，恰2次合法；受检设备另须年度检验与大修监督检验门禁通过。 */
     public ApiResult reopen(long rideId, ReopenRequest request) {
         return idempotency.execute(request.requestId(), "REOPEN", rideId, request, () -> {
             Ride ride = lock(rideId);
             requireStatus(ride, "仅复检合格设备可复开", RideStatus.RECHECKED);
+            inspectionGate.requireOpenEligibility(ride);
             LocalDate today = LocalDate.now(clock);
             int used = today.equals(ride.reopenDate()) ? ride.reopenCount() : 0;
             if (used >= Ride.MAX_DAILY_REOPEN) {
@@ -245,6 +253,20 @@ public class RideService {
         }
         boolean exceeded = request.loadValue() > ride.maxLoad()
                 || request.speedValue() > ride.maxSpeed();
+        if (ride.inspectionRequired() && !inspectionGate.certificateValid(ride)) {
+            // 证书过期/撤销设备：载客读数只记录并告警，不以收到正常读数恢复资格
+            records.insertReading(rideId, request.loadValue(), request.speedValue(),
+                    exceeded, false);
+            records.insertEvent(rideId, "CERT_INVALID_ALARM",
+                    "年度检验证书失效，载客读数仅记录并告警：载荷=" + request.loadValue()
+                            + "，速度=" + request.speedValue());
+            Map<String, Object> body = rideView(rideId);
+            body.put("exceeded", exceeded);
+            body.put("alarm", true);
+            body.put("certificateValid", false);
+            body.put("message", "年度检验证书失效，读数仅记录并告警，不恢复开放资格");
+            return body;
+        }
         records.insertReading(rideId, request.loadValue(), request.speedValue(), exceeded, false);
         if (exceeded) {
             update(ride, RideStatus.SUSPENDED, ride.trialCount(), ride.reopenCount(),
@@ -346,6 +368,10 @@ public class RideService {
         view.put("trialCount", ride.trialCount());
         view.put("reopenCount", ride.reopenCount());
         view.put("checkDate", ride.checkDate() == null ? null : ride.checkDate().toString());
+        view.put("inspectionRequired", ride.inspectionRequired());
+        view.put("overhaulVersion", ride.overhaulVersion());
+        view.put("currentCertificateId", ride.currentCertificateId());
+        view.put("version", ride.version());
         return view;
     }
 

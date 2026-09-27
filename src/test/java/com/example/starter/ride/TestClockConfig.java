@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Primary;
 
 /**
  * 测试时钟：固定为 2026-09-26（Asia/Shanghai），保证“当日”边界可控、测试可重复。
+ * 时钟可推进，用于证书有效期边界场景；推进后须由各测试自行复位。
  */
 @TestConfiguration
 public class TestClockConfig {
@@ -18,7 +19,7 @@ public class TestClockConfig {
 
     @Bean
     @Primary
-    public Clock testClock() {
-        return Clock.fixed(FIXED_NOW, ZoneId.of("Asia/Shanghai"));
+    public MutableClock testClock() {
+        return new MutableClock(FIXED_NOW, ZoneId.of("Asia/Shanghai"));
     }
 }

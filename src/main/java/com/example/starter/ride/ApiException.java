@@ -32,4 +32,9 @@ public class ApiException extends RuntimeException {
     public static ApiException notFound(String message) {
         return new ApiException(HttpStatus.NOT_FOUND, message);
     }
+
+    /** 参数非法（如有效截止不晚于检验合格时刻）。 */
+    public static ApiException badRequest(String message) {
+        return new ApiException(HttpStatus.BAD_REQUEST, message);
+    }
 }
