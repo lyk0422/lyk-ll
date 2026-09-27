@@ -84,6 +84,48 @@ public final class Requests {
         return write(m, body);
     }
 
+    public static String controlledPlan(ObjectMapper m, String requestId, String diveRequestId,
+                                        int depth, int bottom, int expectedVersion, Instant planAt) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("requestId", requestId);
+        body.put("diveRequestId", diveRequestId);
+        body.put("depthM", depth);
+        body.put("bottomMin", bottom);
+        body.put("expectedVersion", expectedVersion);
+        if (planAt != null) {
+            body.put("planAt", planAt.toString());
+        }
+        return write(m, body);
+    }
+
+    public static String controlledSurface(ObjectMapper m, String requestId, String diveRequestId,
+                                           int expectedVersion, Instant surfacedAt) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("requestId", requestId);
+        body.put("diveRequestId", diveRequestId);
+        body.put("expectedVersion", expectedVersion);
+        if (surfacedAt != null) {
+            body.put("surfacedAt", surfacedAt.toString());
+        }
+        return write(m, body);
+    }
+
+    public static String correction(ObjectMapper m, String requestId, String diveRequestId,
+                                    long recordId, int correctedDurationMin, int expectedVersion,
+                                    Instant correctedAt, String reason) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("requestId", requestId);
+        body.put("diveRequestId", diveRequestId);
+        body.put("recordId", recordId);
+        body.put("correctedDurationMin", correctedDurationMin);
+        body.put("expectedVersion", expectedVersion);
+        if (correctedAt != null) {
+            body.put("correctedAt", correctedAt.toString());
+        }
+        body.put("reason", reason);
+        return write(m, body);
+    }
+
     private static String write(ObjectMapper m, Map<String, Object> body) {
         try {
             return m.writeValueAsString(body);

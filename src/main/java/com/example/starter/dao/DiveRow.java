@@ -18,6 +18,7 @@ public record DiveRow(
         int currentPlanVersion,
         Instant surfacedAtUtc,
         boolean symptomatic,
+        boolean controlled,
         Instant closedAtUtc,
         Instant createdAtUtc,
         Instant updatedAtUtc) {

@@ -39,6 +39,8 @@ public abstract class AbstractIntegrationTest {
     protected DiveEventRepository eventRepository;
     @Autowired
     protected DiveService diveService;
+    @Autowired
+    protected com.example.starter.service.ResidualService residualService;
 
     @BeforeEach
     void cleanBusinessTables() {
@@ -48,6 +50,11 @@ public abstract class AbstractIntegrationTest {
         jdbc.update("DELETE FROM bottom_time_ledger");
         jdbc.update("DELETE FROM dive_record");
         jdbc.update("DELETE FROM dive_plan");
+        jdbc.update("DELETE FROM residual_point_movement");
+        jdbc.update("DELETE FROM residual_plan_snapshot");
+        jdbc.update("DELETE FROM diver_active_slot");
+        jdbc.update("DELETE FROM residual_point_account");
+        jdbc.update("DELETE FROM dive_record_correction");
         jdbc.update("DELETE FROM dive");
     }
 }

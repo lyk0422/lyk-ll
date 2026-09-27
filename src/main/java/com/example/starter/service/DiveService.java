@@ -56,11 +56,13 @@ public class DiveService {
     private final DiveEventRepository events;
     private final CatalogRepository catalog;
     private final IdempotencyService idempotency;
+    private final ResidualService residual;
     private final Clock clock;
 
     public DiveService(DiveRepository dives, PlanRepository plans, RecordRepository records,
                        AlertRepository alerts, DiveEventRepository events,
-                       CatalogRepository catalog, IdempotencyService idempotency, Clock clock) {
+                       CatalogRepository catalog, IdempotencyService idempotency,
+                       ResidualService residual, Clock clock) {
         this.dives = dives;
         this.plans = plans;
         this.records = records;
@@ -68,6 +70,7 @@ public class DiveService {
         this.events = events;
         this.catalog = catalog;
         this.idempotency = idempotency;
+        this.residual = residual;
         this.clock = clock;
     }
 
@@ -97,7 +100,7 @@ public class DiveService {
                     }});
             DiveRow row = new DiveRow(req.requestId(), fingerprint, teamKey, teamKey,
                     req.diverACode(), req.diverBCode(), req.plannedDepthM(), req.plannedBottomMin(),
-                    "APPLIED", 0, null, false, null, now, now);
+                    "APPLIED", 0, null, false, false, null, now, now);
             // 唯一冲突（同 requestId 并发，或同组 active_team_slot 占用）原样抛出，
             // 由幂等层在胜方事务提交后区分：等到同 requestId 台账则重放/409，等不到则同组 409
             dives.insert(row);
@@ -129,6 +132,10 @@ public class DiveService {
         return idempotency.execute(req.requestId(), "PLAN", fields, () -> {
             // 动作内重读最新状态：仅首次受理执行，重放不进入，不会因潜次已流转而误判
             DiveRow latest = requireDive(req.diveRequestId());
+            if (latest.controlled()) {
+                throw new ApiException(409, "潜次已启用反复潜水余量积分控制，"
+                        + "请使用受控方案入口（含积分冻结与门禁）");
+            }
             if ("SURFACED".equals(latest.status()) || "CLOSED".equals(latest.status())
                     || "FROZEN".equals(latest.status())) {
                 throw new ApiException(409, "潜次已进入" + latest.status() + "阶段，减压方案不可变更");
@@ -230,12 +237,16 @@ public class DiveService {
                 pairedWith = peer.diverCode();
                 newStatus = "DIVING";
 
-                if (Phase.BOTTOM.name().equals(req.phase())) {
-                    cumulative = settleBottomPair(dive, plan,
-                            records.getById(recordId), records.getById(peer.id()), now);
+                RecordRow mineRow = records.getById(recordId);
+                if (Phase.DESCENT.name().equals(req.phase())) {
+                    // 受控潜次实际下潜前：重查冻结来源未变并获取两人占用槽，
+                    // 来源已变须重做方案；共享潜水员并发下潜由占用槽唯一索引拒绝
+                    residual.verifyDescentAndAcquireSlots(dive, plan, mineRow, peer, now);
+                    speedAlert = settleSpeedPair(dive, plan, mineRow, peer, now);
+                } else if (Phase.BOTTOM.name().equals(req.phase())) {
+                    cumulative = settleBottomPair(dive, plan, mineRow, peer, now);
                 } else {
-                    speedAlert = settleSpeedPair(dive, plan,
-                            records.getById(recordId), records.getById(peer.id()), now);
+                    speedAlert = settleSpeedPair(dive, plan, mineRow, peer, now);
                 }
                 dives.updateStatus(req.diveRequestId(), newStatus, now);
             }
@@ -328,6 +339,10 @@ public class DiveService {
 
         return idempotency.execute(req.requestId(), "SURFACE", fields, () -> {
             DiveRow latest = requireDive(req.diveRequestId());
+            if (latest.controlled()) {
+                throw new ApiException(409, "潜次已启用反复潜水余量积分控制，"
+                        + "请使用受控出水入口（原子更新两人积分账）");
+            }
             if (!"DIVING".equals(latest.status())) {
                 throw new ApiException(409,
                         "潜次处于 " + latest.status() + " 阶段，不能登记出水（须先成对执行）");

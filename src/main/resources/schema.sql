@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS dive (
     current_plan_version INT         NOT NULL DEFAULT 0 COMMENT '当前减压方案版本号，0 表示尚未出方案',
     surfaced_at_utc     DATETIME(3)  COMMENT '出水时刻（UTC），观察期起点；空值表示尚未出水',
     symptomatic         BOOLEAN      NOT NULL DEFAULT FALSE COMMENT '观察期是否出现症状：TRUE 即启动加压舱预案并冻结结案',
+    controlled          BOOLEAN      NOT NULL DEFAULT FALSE COMMENT '是否为反复潜水余量积分受控潜次：TRUE 启用积分联锁（受控方案/下潜门禁/出水积分）；FALSE 旧潜次保持原语义',
     closed_at_utc       DATETIME(3)  COMMENT '结案时刻（UTC），终态时间戳；空值表示未结案',
     created_at_utc      DATETIME(3)  NOT NULL COMMENT '申请受理时刻（UTC）',
     updated_at_utc      DATETIME(3)  NOT NULL,
@@ -110,10 +111,87 @@ CREATE TABLE IF NOT EXISTS dive_event (
 -- 幂等台账：requestId 为键，指纹覆盖 requestId 与全部业务字段
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id          VARCHAR(64) NOT NULL COMMENT '操作幂等键 requestId',
-    operation           VARCHAR(24) NOT NULL COMMENT '操作类型：APPLY/PLAN/RECORD/SURFACE/SYMPTOM/CLOSE',
+    operation           VARCHAR(24) NOT NULL COMMENT '操作类型：APPLY/PLAN/RECORD/SURFACE/SYMPTOM/CLOSE/RPLAN/RSURFACE/CORRECT',
     fingerprint         VARCHAR(64) NOT NULL COMMENT '请求指纹（含 requestId 与全部业务字段）',
     status_code         INT         NOT NULL COMMENT '首次响应 HTTP 状态码',
     response_json       TEXT        NOT NULL COMMENT '首次响应体，重放原样返回',
     created_at_utc      DATETIME(3) NOT NULL,
     CONSTRAINT pk_idempotency PRIMARY KEY (request_id)
+);
+
+-- ======================================================================
+-- 反复潜水余量积分（虚构模型，仅供软件验证，不用于真实潜水减压）
+-- ======================================================================
+
+-- 潜水员余量积分账户：每名潜水员至多一行，仅受控潜次出水登记时在同一事务内原子更新
+CREATE TABLE IF NOT EXISTS residual_point_account (
+    diver_code              VARCHAR(32) NOT NULL COMMENT '潜水员工号',
+    last_surfaced_at_utc    DATETIME(3) NOT NULL COMMENT '最近一次受控潜次确认出水时刻（UTC）；积分消减与60分钟间隔均以此为起点',
+    residual_points         INT         NOT NULL COMMENT '该次出水残留积分=本次整数水下分钟+下潜前冻结积分，上限100；水面每满30分钟消减5分（查询时推导）',
+    source_dive_request_id  VARCHAR(64) NOT NULL COMMENT '产生该积分的潜次 requestId',
+    source_plan_version     INT         NOT NULL COMMENT '产生该积分的受控方案版本',
+    version                 INT         NOT NULL COMMENT '账户版本：首次出水为1，此后每次成功出水原子加1',
+    created_at_utc          DATETIME(3) NOT NULL,
+    updated_at_utc          DATETIME(3) NOT NULL,
+    CONSTRAINT pk_residual_account PRIMARY KEY (diver_code)
+);
+
+-- 受控方案的每人积分来源冻结快照：方案时刻冻结最近潜次版本、出水时刻与积分
+CREATE TABLE IF NOT EXISTS residual_plan_snapshot (
+    id                      BIGINT AUTO_INCREMENT PRIMARY KEY,
+    dive_request_id         VARCHAR(64) NOT NULL COMMENT '所属受控潜次',
+    plan_version            INT         NOT NULL COMMENT '所属受控方案版本，从1递增',
+    diver_code              VARCHAR(32) NOT NULL COMMENT '被冻结来源的潜水员工号',
+    source_dive_request_id  VARCHAR(64) COMMENT '积分来源潜次（最近确认出水潜次）；空值表示该潜水员首潜、下潜前积分0',
+    source_plan_version     INT         COMMENT '积分来源潜次的方案版本；首潜为空',
+    source_surfaced_at_utc  DATETIME(3) COMMENT '冻结的最近确认出水时刻（UTC）；首潜为空',
+    source_residual_points  INT         COMMENT '冻结的来源出水残留积分（消减前）；首潜为空',
+    source_account_version  INT         COMMENT '冻结时来源积分账户版本；首潜为空。下潜前重查版本与出水时刻未变才放行，否则须重做方案',
+    frozen_points           INT         NOT NULL COMMENT '方案时刻按每满30分钟消减5分推导出的下潜前积分，最低0',
+    ndl_minutes             INT         NOT NULL COMMENT '方案深度对应的合成免减压表分钟数',
+    allowed_minutes         INT         NOT NULL COMMENT '该潜水员允许分钟数=NDL-当前积分；全队取两人较小值；恰用尽合法，<=0拒绝方案',
+    created_at_utc          DATETIME(3) NOT NULL,
+    CONSTRAINT uk_residual_snapshot UNIQUE (dive_request_id, plan_version, diver_code)
+);
+
+-- 潜水员受控下潜占用槽：受控潜次下潜成对生效时获取，受控出水登记同事务释放。
+-- 唯一索引保证：两组共享同一潜水员并发下潜时最多一组成功。
+CREATE TABLE IF NOT EXISTS diver_active_slot (
+    diver_code        VARCHAR(32) NOT NULL COMMENT '被占用的潜水员工号',
+    dive_request_id   VARCHAR(64) NOT NULL COMMENT '占用该潜水员的受控潜次',
+    plan_version      INT         NOT NULL COMMENT '占用时的受控方案版本',
+    acquired_at_utc   DATETIME(3) NOT NULL COMMENT '占用获取时刻（UTC）',
+    CONSTRAINT pk_diver_active_slot PRIMARY KEY (diver_code)
+);
+
+-- 积分变动流水：受控出水时与两人积分账户、潜次状态在同一事务内写入
+CREATE TABLE IF NOT EXISTS residual_point_movement (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    diver_code          VARCHAR(32) NOT NULL COMMENT '潜水员工号',
+    dive_request_id     VARCHAR(64) NOT NULL COMMENT '来源受控潜次',
+    plan_version        INT         NOT NULL COMMENT '来源受控方案版本',
+    pre_dive_points     INT         NOT NULL COMMENT '下潜前冻结积分（方案快照值）',
+    bottom_min          INT         NOT NULL COMMENT '本次实际整数水下分钟（生效 BOTTOM 记录）',
+    residual_points     INT         NOT NULL COMMENT '出水残留积分=下潜前积分+水下分钟，上限100',
+    surfaced_at_utc     DATETIME(3) NOT NULL COMMENT '确认出水时刻（UTC）',
+    created_at_utc      DATETIME(3) NOT NULL,
+    CONSTRAINT uk_residual_movement UNIQUE (dive_request_id, diver_code)
+);
+
+-- 历史水下记录更正差异：独立记录差异，不追改已关闭潜次的原记录、台账与积分
+CREATE TABLE IF NOT EXISTS dive_record_correction (
+    id                      BIGINT AUTO_INCREMENT PRIMARY KEY,
+    dive_request_id         VARCHAR(64) NOT NULL COMMENT '被更正记录所属潜次（允许已关闭）',
+    target_record_id        BIGINT      NOT NULL COMMENT '被更正的水下记录 id',
+    plan_version            INT         NOT NULL COMMENT '被更正记录所属方案版本（expectedVersion 校验值）',
+    diver_code              VARCHAR(32) NOT NULL COMMENT '被更正记录的潜水员工号',
+    phase                   VARCHAR(16) NOT NULL COMMENT '被更正记录阶段：DESCENT/BOTTOM/ASCENT',
+    recorded_duration_min   INT         NOT NULL COMMENT '原记录历时，分钟',
+    corrected_duration_min  INT         NOT NULL COMMENT '更正后历时，分钟（合成值，不回写原记录）',
+    delta_min               INT         NOT NULL COMMENT '差异分钟=更正后-原记录，可为负；仅独立留痕，不追改已关闭潜次',
+    reason                  VARCHAR(512) NOT NULL COMMENT '更正说明文本；允许包含任意分隔符，指纹仍可无歧义区分',
+    version                 INT         NOT NULL COMMENT '该潜次更正序号：首条为1，每次成功更正加1',
+    corrected_at_utc        DATETIME(3) NOT NULL COMMENT '更正参数指定的精确时刻（UTC）',
+    created_at_utc          DATETIME(3) NOT NULL,
+    CONSTRAINT uk_correction_version UNIQUE (dive_request_id, version)
 );

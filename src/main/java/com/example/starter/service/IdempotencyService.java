@@ -72,7 +72,23 @@ public class IdempotencyService {
      */
     public <T> Outcome<T> execute(String requestId, String operation, Map<String, Object> fields,
                                   Supplier<FirstResult<T>> action) {
-        String fingerprint = Fingerprints.sha256(withRequestId(fields, requestId));
+        return doExecute(requestId, operation, Fingerprints.sha256(withRequestId(fields, requestId)),
+                action);
+    }
+
+    /**
+     * 与 {@link #execute} 相同的幂等语义，但指纹采用长度前缀的结构化编码，
+     * 供新增写操作使用：参数值内含任意分隔符也不会发生指纹碰撞。
+     */
+    public <T> Outcome<T> executeStructured(String requestId, String operation,
+                                            Map<String, Object> fields,
+                                            Supplier<FirstResult<T>> action) {
+        return doExecute(requestId, operation,
+                Fingerprints.sha256Structured(withRequestId(fields, requestId)), action);
+    }
+
+    private <T> Outcome<T> doExecute(String requestId, String operation, String fingerprint,
+                                     Supplier<FirstResult<T>> action) {
         Optional<IdempotencyRow> existing = repository.find(requestId);
         if (existing.isPresent()) {
             return replay(existing.get(), fingerprint);
@@ -84,7 +100,7 @@ public class IdempotencyService {
             // 败方事务已整体回滚；等待胜方提交后按重放/409 返回
             IdempotencyRow winner = awaitWinner(requestId);
             if (winner == null) {
-                throw new ApiException(409, "并发申请冲突：同一潜水组同时刻只允许一个进行中潜次");
+                throw new ApiException(409, "并发冲突：同一潜水员/潜水组同时刻只允许一个受控下潜或申请");
             }
             return replay(winner, fingerprint);
         }

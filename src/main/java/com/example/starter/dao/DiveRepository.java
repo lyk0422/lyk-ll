@@ -31,6 +31,7 @@ public class DiveRepository {
             rs.getTimestamp("surfaced_at_utc") == null ? null
                     : rs.getTimestamp("surfaced_at_utc").toInstant(),
             rs.getBoolean("symptomatic"),
+            rs.getBoolean("controlled"),
             rs.getTimestamp("closed_at_utc") == null ? null
                     : rs.getTimestamp("closed_at_utc").toInstant(),
             rs.getTimestamp("created_at_utc").toInstant(),
@@ -46,14 +47,14 @@ public class DiveRepository {
         return jdbc.update("INSERT INTO dive "
                         + "(request_id, apply_fingerprint, team_key, active_team_slot, "
                         + "diver_a_code, diver_b_code, planned_depth_m, planned_bottom_min, "
-                        + "status, current_plan_version, surfaced_at_utc, symptomatic, "
+                        + "status, current_plan_version, surfaced_at_utc, symptomatic, controlled, "
                         + "closed_at_utc, created_at_utc, updated_at_utc) "
-                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 row.requestId(), row.applyFingerprint(), row.teamKey(), row.activeTeamSlot(),
                 row.diverACode(), row.diverBCode(), row.plannedDepthM(), row.plannedBottomMin(),
                 row.status(), row.currentPlanVersion(), ts(row.surfacedAtUtc()),
-                row.symptomatic(), ts(row.closedAtUtc()), ts(row.createdAtUtc()),
-                ts(row.updatedAtUtc()));
+                row.symptomatic(), row.controlled(), ts(row.closedAtUtc()),
+                ts(row.createdAtUtc()), ts(row.updatedAtUtc()));
     }
 
     public Optional<DiveRow> find(String requestId) {
@@ -69,6 +70,12 @@ public class DiveRepository {
     public void updateStatus(String requestId, String status, Instant now) {
         jdbc.update("UPDATE dive SET status = ?, updated_at_utc = ? WHERE request_id = ?",
                 status, ts(now), requestId);
+    }
+
+    /** 首次受控方案生效：标记潜次为余量积分受控潜次（与方案同事务）。 */
+    public void markControlled(String requestId, Instant now) {
+        jdbc.update("UPDATE dive SET controlled = TRUE, updated_at_utc = ? WHERE request_id = ?",
+                ts(now), requestId);
     }
 
     /** 出水登记。 */
