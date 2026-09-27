@@ -85,9 +85,15 @@ public class IdempotencyService {
                 .stream().findFirst().orElse(null);
     }
 
+    /**
+     * 结构化指纹：以 JSON 数组 [endpoint, requestId, 请求报文] 序列化后取 SHA-256。
+     * JSON 字符串转义保证无歧义——即使 requestId 或业务文本本身含有分隔符、
+     * 换行或引号，不同字段取值也不会拼接出相同的指纹输入。
+     */
     private String fingerprint(String endpoint, String requestId, Object request) {
         try {
-            String payload = endpoint + "\n" + requestId + "\n" + objectMapper.writeValueAsString(request);
+            String payload = objectMapper.writeValueAsString(objectMapper.createArrayNode()
+                    .add(endpoint).add(requestId).add(objectMapper.valueToTree(request)));
             return HexFormat.of().formatHex(
                     MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException e) {

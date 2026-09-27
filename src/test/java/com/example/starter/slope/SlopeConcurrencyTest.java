@@ -53,6 +53,9 @@ class SlopeConcurrencyTest {
     @AfterAll
     static void releaseData(@Autowired JdbcTemplate jdbc) {
         jdbc.update("DELETE FROM idempotency_record");
+        jdbc.update("DELETE FROM resumption_evidence");
+        jdbc.update("DELETE FROM threshold_strategy");
+        jdbc.update("DELETE FROM rainfall_hourly");
         jdbc.update("DELETE FROM late_event");
         jdbc.update("DELETE FROM resumption_assessment");
         jdbc.update("DELETE FROM evacuation_confirmation");
@@ -63,6 +66,9 @@ class SlopeConcurrencyTest {
 
     private void truncateAll() {
         jdbcTemplate.update("DELETE FROM idempotency_record");
+        jdbcTemplate.update("DELETE FROM resumption_evidence");
+        jdbcTemplate.update("DELETE FROM threshold_strategy");
+        jdbcTemplate.update("DELETE FROM rainfall_hourly");
         jdbcTemplate.update("DELETE FROM late_event");
         jdbcTemplate.update("DELETE FROM resumption_assessment");
         jdbcTemplate.update("DELETE FROM evacuation_confirmation");
