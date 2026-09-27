@@ -35,6 +35,11 @@ public abstract class AbstractCosmeticIntegrationTest {
         jdbc.update("DELETE FROM filing_sequence");
         jdbc.update("INSERT INTO filing_sequence (id, seq) VALUES (1, 0)");
         jdbc.update("DELETE FROM test_report");
+        jdbc.update("DELETE FROM child_filing_revision");
+        jdbc.update("DELETE FROM child_filing");
+        jdbc.update("DELETE FROM child_filing_sequence");
+        jdbc.update("INSERT INTO child_filing_sequence (id, seq) VALUES (1, 0)");
+        jdbc.update("DELETE FROM child_safety_report");
         clock.setInstant(INITIAL_NOW);
     }
 }

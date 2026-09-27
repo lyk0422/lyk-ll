@@ -1,5 +1,6 @@
 package com.example.starter.cosmetic.web;
 
+import com.example.starter.cosmetic.child.service.BusinessRejectionException;
 import com.example.starter.cosmetic.service.ConflictException;
 import com.example.starter.cosmetic.service.NotFoundException;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -13,7 +14,8 @@ import java.time.Instant;
 import java.util.Map;
 
 /**
- * 统一异常到 HTTP 状态的映射：404 不存在，409 业务冲突（含同键异参），400 参数非法。
+ * 统一异常到 HTTP 状态的映射：404 不存在，409 业务冲突（含同键异参），
+ * 422 业务拒绝（儿童分龄通道），400 参数非法。
  */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -28,6 +30,13 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ConflictException.class)
     public ResponseEntity<Map<String, Object>> handleConflict(ConflictException e) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(body(e.code(), e.getMessage()));
+    }
+
+    /** 422 业务拒绝（儿童分龄通道：版本不一致、状态不允许、伪装简易变更等）。 */
+    @ExceptionHandler(BusinessRejectionException.class)
+    public ResponseEntity<Map<String, Object>> handleBusinessRejection(BusinessRejectionException e) {
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                .body(body(e.code(), e.getMessage()));
     }
 
     /** 400 参数校验。 */
