@@ -85,6 +85,15 @@ public class SurveyRepository {
                 .stream().findFirst();
     }
 
+    /**
+     * 事务内行锁检验记录（FOR UPDATE）。
+     * 发证与报告更正失效处理据此串行化：冻结一致的报告修订与规则版本后才允许发证。
+     */
+    public Optional<Survey> findByIdForUpdate(long id) {
+        return jdbc.query("SELECT * FROM survey WHERE id = ? FOR UPDATE", MAPPER, id)
+                .stream().findFirst();
+    }
+
     /** 查找同船同类型当前进行中（未发证）检验。 */
     public Optional<Survey> findInProgress(long shipId, SurveyType type) {
         return jdbc.query("""

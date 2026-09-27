@@ -2,6 +2,7 @@ package com.example.starter.survey.service;
 
 import com.example.starter.survey.data.CertificateRepository;
 import com.example.starter.survey.data.DefectRepository;
+import com.example.starter.survey.data.RecognitionBindingRepository;
 import com.example.starter.survey.data.ShipRepository;
 import com.example.starter.survey.data.SurveyRepository;
 import com.example.starter.survey.domain.Certificate;
@@ -43,17 +44,20 @@ public class CertificateService {
     private final SurveyRepository surveyRepository;
     private final ShipRepository shipRepository;
     private final DefectRepository defectRepository;
+    private final RecognitionBindingRepository recognitionBindingRepository;
     private final IdempotentExecutor executor;
 
     public CertificateService(CertificateRepository certificateRepository,
                               SurveyRepository surveyRepository,
                               ShipRepository shipRepository,
                               DefectRepository defectRepository,
+                              RecognitionBindingRepository recognitionBindingRepository,
                               IdempotentExecutor executor) {
         this.certificateRepository = certificateRepository;
         this.surveyRepository = surveyRepository;
         this.shipRepository = shipRepository;
         this.defectRepository = defectRepository;
+        this.recognitionBindingRepository = recognitionBindingRepository;
         this.executor = executor;
     }
 
@@ -110,9 +114,11 @@ public class CertificateService {
         // 行锁旧有效证书，随后“挂起插入新证 -> 旧证失效 -> 新证生效”同事务完成。
         Certificate old = certificateRepository.findValidForUpdate(ship.id(), survey.type())
                 .orElse(null);
+        // 行锁检验记录（FOR UPDATE）：与报告更正的失效处理串行化，
+        // 保证发证冻结一致的报告修订与规则版本，不以旧互认可用标志先发证。
         // 拿到行锁后重读检验状态：并发重复发证时，若对方已在锁等待期间完成发证，
         // 按终态幂等返回已产生的证书，不再产生新版本。
-        Survey latest = surveyRepository.findById(survey.id()).orElseThrow();
+        Survey latest = surveyRepository.findByIdForUpdate(survey.id()).orElseThrow();
         if (latest.status() == SurveyStatus.CERTIFIED) {
             Certificate produced = certificateRepository
                     .findVersions(ship.id(), survey.type()).stream()
@@ -122,6 +128,11 @@ public class CertificateService {
                             "终态检验缺少证书记录"));
             return new CertifyResponse(SurveyResponse.from(latest, ship.imo()),
                     CertificateResponse.from(produced, ship.imo()), null);
+        }
+        // 互认门禁：存在被报告更正失效且未替代的互认绑定时不得发证。
+        if (recognitionBindingRepository.existsUnresolvedInvalidation(survey.id())) {
+            throw new BusinessRuleException("RECOGNITION_INVALIDATED",
+                    "互认证据已被报告更正失效且未替代，不得发证: surveyId=" + survey.id());
         }
         int version = certificateRepository.nextVersion(ship.id(), survey.type());
 

@@ -7,6 +7,7 @@ import com.example.starter.survey.service.CertificateQueryService;
 import com.example.starter.survey.service.CertificateService;
 import com.example.starter.survey.service.DefectService;
 import com.example.starter.survey.service.ExtensionService;
+import com.example.starter.survey.service.RecognitionService;
 import com.example.starter.survey.service.ShipService;
 import com.example.starter.survey.service.SurveyService;
 import com.example.starter.survey.service.WindowLedgerService;
@@ -21,7 +22,9 @@ import com.example.starter.survey.web.dto.CertifyRequest;
 import com.example.starter.survey.web.dto.CertifyResponse;
 import com.example.starter.survey.web.dto.CreateShipRequest;
 import com.example.starter.survey.web.dto.DefectResponse;
+import com.example.starter.survey.web.dto.EvidenceChainResponse;
 import com.example.starter.survey.web.dto.ExtensionResponse;
+import com.example.starter.survey.web.dto.RecognitionBindingResponse;
 import com.example.starter.survey.web.dto.RectifyDefectRequest;
 import com.example.starter.survey.web.dto.RectifyResponse;
 import com.example.starter.survey.web.dto.ShipResponse;
@@ -49,6 +52,7 @@ public class SurveyController {
     private final CertificateQueryService certificateQueryService;
     private final ExtensionService extensionService;
     private final WindowLedgerService ledgerService;
+    private final RecognitionService recognitionService;
     private final SurveyEventRepository eventRepository;
 
     public SurveyController(ShipService shipService,
@@ -58,6 +62,7 @@ public class SurveyController {
                             CertificateQueryService certificateQueryService,
                             ExtensionService extensionService,
                             WindowLedgerService ledgerService,
+                            RecognitionService recognitionService,
                             SurveyEventRepository eventRepository) {
         this.shipService = shipService;
         this.surveyService = surveyService;
@@ -66,6 +71,7 @@ public class SurveyController {
         this.certificateQueryService = certificateQueryService;
         this.extensionService = extensionService;
         this.ledgerService = ledgerService;
+        this.recognitionService = recognitionService;
         this.eventRepository = eventRepository;
     }
 
@@ -108,6 +114,18 @@ public class SurveyController {
     public List<SurveyEvent> listEvents(@PathVariable long id) {
         surveyService.getSurveyOrThrow(id);
         return eventRepository.findBySurvey(id);
+    }
+
+    // ---- 互认绑定与证据链查询 ----
+
+    @GetMapping("/surveys/{id}/recognitions")
+    public List<RecognitionBindingResponse> listRecognitions(@PathVariable long id) {
+        return recognitionService.listBySurvey(id);
+    }
+
+    @GetMapping("/surveys/{id}/evidence-chain")
+    public EvidenceChainResponse evidenceChain(@PathVariable long id) {
+        return recognitionService.evidenceChain(id);
     }
 
     // ---- 缺陷整改复查 ----

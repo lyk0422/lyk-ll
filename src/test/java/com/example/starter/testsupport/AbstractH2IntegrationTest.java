@@ -35,6 +35,12 @@ public abstract class AbstractH2IntegrationTest {
 
     @BeforeEach
     void cleanDatabase() {
+        jdbc.update("DELETE FROM recognition_risk");
+        jdbc.update("DELETE FROM recognition_binding");
+        jdbc.update("DELETE FROM flag_report_item");
+        jdbc.update("DELETE FROM flag_inspection_report");
+        jdbc.update("DELETE FROM flag_rule_item");
+        jdbc.update("DELETE FROM flag_rule_version");
         jdbc.update("DELETE FROM survey_event");
         jdbc.update("DELETE FROM defect");
         jdbc.update("DELETE FROM certificate");
@@ -145,5 +151,46 @@ public abstract class AbstractH2IntegrationTest {
 
     protected Map<String, Object> extensionApproveBody(String requestId, long extensionId) {
         return Map.of("requestId", requestId, "extensionId", extensionId);
+    }
+
+    // ---- 船旗互认辅助 ----
+
+    protected Map<String, String> mapping(String flagItem, String classItem) {
+        return Map.of("flagItemCode", flagItem, "classItemCode", classItem);
+    }
+
+    protected Map<String, Object> ruleBody(String requestId, String flagCode, int expectedVersion,
+                                           int maxEvidenceAgeDays,
+                                           java.util.List<Map<String, String>> mappings) {
+        return Map.of("requestId", requestId, "flagCode", flagCode,
+                "expectedVersion", expectedVersion,
+                "maxEvidenceAgeDays", maxEvidenceAgeDays,
+                "mappings", mappings);
+    }
+
+    protected Map<String, String> reportItem(String flagItem, String conclusion) {
+        return Map.of("flagItemCode", flagItem, "conclusion", conclusion);
+    }
+
+    protected Map<String, Object> reportBody(String requestId, String reportNo, String imo,
+                                             String flagCode, java.time.Instant completedAt,
+                                             java.util.List<Map<String, String>> items) {
+        return Map.of("requestId", requestId, "reportNo", reportNo, "imo", imo,
+                "flagCode", flagCode, "completedAt", completedAt.toString(),
+                "syntheticSignoff", "SYNTHETIC-SIGNOFF", "items", items);
+    }
+
+    protected Map<String, Object> correctBody(String requestId, int expectedVersion,
+                                              java.time.Instant completedAt,
+                                              java.util.List<Map<String, String>> items) {
+        return Map.of("requestId", requestId, "expectedVersion", expectedVersion,
+                "completedAt", completedAt.toString(),
+                "syntheticSignoff", "SYNTHETIC-SIGNOFF", "items", items);
+    }
+
+    protected Map<String, Object> recognitionBody(String requestId, String reportNo, long surveyId,
+                                                  int ruleVersion, java.util.List<String> classItems) {
+        return Map.of("requestId", requestId, "reportNo", reportNo, "surveyId", surveyId,
+                "ruleVersion", ruleVersion, "classItems", classItems);
     }
 }
