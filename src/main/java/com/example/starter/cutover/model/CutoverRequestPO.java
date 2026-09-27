@@ -19,6 +19,10 @@ public class CutoverRequestPO {
     private String rejectReason;
     private LocalDateTime execStartedAt;
     private String rollbackCause;
+    /** 乐观锁版本，从 1 开始，每次成功变更加 1。 */
+    private int version;
+    /** 所属依赖批次 ID；null 表示未绑定批次。 */
+    private String batchId;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
@@ -48,6 +52,10 @@ public class CutoverRequestPO {
     public void setExecStartedAt(LocalDateTime execStartedAt) { this.execStartedAt = execStartedAt; }
     public String getRollbackCause() { return rollbackCause; }
     public void setRollbackCause(String rollbackCause) { this.rollbackCause = rollbackCause; }
+    public int getVersion() { return version; }
+    public void setVersion(int version) { this.version = version; }
+    public String getBatchId() { return batchId; }
+    public void setBatchId(String batchId) { this.batchId = batchId; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }

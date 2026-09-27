@@ -28,8 +28,12 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import org.springframework.beans.factory.annotation.Value;
@@ -51,7 +55,10 @@ import org.springframework.transaction.annotation.Transactional;
  *       恰在窗口终点（reportedAt==end）完成的步骤有效；</li>
  *   <li>requestId/requestUid 幂等：指纹覆盖全部业务字段，同键同参返回首次结果，
  *       同键异参 409 且不产生新记录；</li>
- *   <li>回退与验证/封板依靠请求行 FOR UPDATE 串行化，终态唯一。</li>
+ *   <li>回退与验证/封板依靠请求行 FOR UPDATE 串行化，终态唯一；</li>
+ *   <li>批次执行门禁：批内成员开始执行前全部直接前置须 SEALED，否则返回等待且不写步骤；
+ *       前置回退/超期时与状态提交同事务将尚未开始的可达后继传播为 DEPENDENCY_BLOCKED，
+ *       保留首个阻断来源；未绑定批次的旧单申请行为不变。</li>
  * </ul>
  */
 @Service
@@ -270,6 +277,20 @@ public class CutoverService {
         if (req.startTime().isBefore(po.getWindowStart())
                 || req.startTime().isAfter(po.getWindowEnd())) {
             throw new BusinessRuleException("执行开始时间必须落在窗口 [start,end] 内");
+        }
+        // 批次执行门禁：批内成员须全部直接前置验证通过并封板（SEALED）方可开始。
+        // 前置仍在途 -> 返回等待，不写步骤、不改状态、不占幂等键；
+        // 前置已回退/超期 -> 传播已同事务将本申请置为 DEPENDENCY_BLOCKED，
+        // 在上面的状态校验处以业务拒绝（422）返回。
+        // 串行化点为本申请行锁：传播的条件更新与本方法的状态推进互斥，只形成一致顺序。
+        if (po.getBatchId() != null) {
+            List<String> unsealed = repo.listUnsealedPrerequisites(
+                    po.getBatchId(), req.requestId());
+            if (!unsealed.isEmpty()) {
+                return ActionResult.waiting("批次 " + po.getBatchId()
+                        + " 前置割接尚未全部验证封板，等待中: "
+                        + String.join(",", unsealed), toView(po));
+            }
         }
         po.setStatus(RequestStatus.EXECUTING.name());
         po.setExecStartedAt(req.startTime());
@@ -604,6 +625,55 @@ public class CutoverService {
                     FingerprintUtil.sha256("ROLLBACK", po.getRequestId(), cause, triggerSeq),
                     "命中回退判据: " + cause, false);
         }
+
+        // 批次依赖阻断传播：与前置状态提交同事务，不依赖后台扫描。
+        propagateDependencyBlock(po);
+    }
+
+    /**
+     * 依赖阻断传播（与前置回退/超期同事务）：沿批内依赖边 BFS，全部尚未开始
+     * （APPROVED）的可达后继原子转 DEPENDENCY_BLOCKED 并记录首个阻断来源；
+     * 已开始成员按原回退流程处理、已封板结果不改，无关支路不受影响。
+     * 后继按申请编号升序逐个条件更新（仅 APPROVED 生效），以后继申请行锁为
+     * 串行化点，与并发后继启动只形成一致顺序。
+     */
+    private void propagateDependencyBlock(CutoverRequestPO po) {
+        if (po.getBatchId() == null) {
+            return;
+        }
+        // BFS 收集全部可达后继（含已阻断节点，其更下游仍须覆盖）。
+        List<String> reachable = new ArrayList<>();
+        Set<String> visited = new HashSet<>();
+        Deque<String> queue = new ArrayDeque<>();
+        queue.add(po.getRequestId());
+        visited.add(po.getRequestId());
+        while (!queue.isEmpty()) {
+            String current = queue.poll();
+            for (String successor : repo.listSuccessorIds(po.getBatchId(), current)) {
+                if (visited.add(successor)) {
+                    reachable.add(successor);
+                    queue.add(successor);
+                }
+            }
+        }
+        Collections.sort(reachable);
+        LocalDateTime now = LocalDateTime.now();
+        for (String successor : reachable) {
+            // 条件更新：仅 APPROVED（尚未开始）成员转阻断，返回 0 表示已开始/已封板/已阻断。
+            if (repo.blockIfApproved(successor, now) == 0) {
+                continue;
+            }
+            // 首个阻断来源：仅当成员尚无来源时写入，更早波次的来源保留。
+            repo.markMemberBlocked(po.getBatchId(), successor, po.getRequestId());
+            String uid = "SYS-DEPBLOCK-" + po.getBatchId() + "-" + successor;
+            if (repo.findEvent(uid) == null) {
+                insertEvent(uid, successor, EventType.DEPENDENCY_BLOCK, null,
+                        FingerprintUtil.sha256("DEPENDENCY_BLOCK", po.getBatchId(),
+                                successor, po.getRequestId()),
+                        "前置 " + po.getRequestId() + " 回退/超期，尚未开始的后继转依赖阻断",
+                        false);
+            }
+        }
     }
 
     private void persistStep(CutoverStepPO step) {
@@ -666,6 +736,7 @@ public class CutoverService {
         po.setStatus(status.name());
         po.setFingerprint(fp);
         po.setRejectReason(rejectReason);
+        po.setVersion(1);
         po.setCreatedAt(now);
         po.setUpdatedAt(now);
         return po;
@@ -700,7 +771,8 @@ public class CutoverService {
         return new RequestView(po.getRequestId(), po.getTitle(), po.getDeviceCode(),
                 po.getPriority(), po.getWindowStart(), po.getWindowEnd(), po.getStatus(),
                 po.getImpactSystems() == null ? null : impacts,
-                po.getRejectReason(), po.getRollbackCause(), stepViews);
+                po.getRejectReason(), po.getRollbackCause(), po.getVersion(), po.getBatchId(),
+                stepViews);
     }
 
     private String writeSnapshot(String message) {
