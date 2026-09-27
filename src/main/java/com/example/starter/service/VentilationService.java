@@ -3,6 +3,8 @@ package com.example.starter.service;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 
@@ -31,6 +33,9 @@ public class VentilationService {
 
     /** 通风最多两轮，两轮复测仍超标转人工处置 */
     static final int MAX_ROUNDS = 2;
+
+    /** 通风作业窗的存储时区 */
+    private static final ZoneId VENTILATION_ZONE = ZoneId.of("Asia/Shanghai");
 
     private final JdbcTemplate jdbc;
     private final SiloService siloService;
@@ -104,6 +109,24 @@ public class VentilationService {
                 Integer.class, siloId, request.windowEnd(), request.windowStart());
         if (conflicts != null && conflicts > 0) {
             throw ApiException.conflict("WINDOW_CONFLICT", "作业窗与既有作业重叠（半开区间端点相接不冲突）");
+        }
+
+        // 与熏蒸作业窗互斥：熏蒸窗为 UTC，换算到 Asia/Shanghai 后按半开区间比较
+        List<LocalDateTime[]> fumigationWindows = jdbc.query(
+                "SELECT window_start, window_end FROM fumigation WHERE silo_id = ?",
+                (rs, rowNum) -> new LocalDateTime[]{
+                        rs.getTimestamp("window_start").toLocalDateTime(),
+                        rs.getTimestamp("window_end").toLocalDateTime()},
+                siloId);
+        for (LocalDateTime[] window : fumigationWindows) {
+            LocalDateTime fumStart = window[0].atOffset(ZoneOffset.UTC)
+                    .atZoneSameInstant(VENTILATION_ZONE).toLocalDateTime();
+            LocalDateTime fumEnd = window[1].atOffset(ZoneOffset.UTC)
+                    .atZoneSameInstant(VENTILATION_ZONE).toLocalDateTime();
+            if (fumStart.isBefore(request.windowEnd()) && request.windowStart().isBefore(fumEnd)) {
+                throw ApiException.conflict("WINDOW_CONFLICT",
+                        "作业窗与熏蒸作业窗重叠（半开区间端点相接不冲突）");
+            }
         }
 
         // 风机存在性校验
