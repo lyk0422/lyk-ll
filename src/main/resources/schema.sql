@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS slaughter_batch (
     pre_quarantined_at VARCHAR(40) NULL,
     judged_at VARCHAR(40) NULL,
     released_at VARCHAR(40) NULL,
+    version INT NOT NULL DEFAULT 1,
     created_at VARCHAR(40) NOT NULL,
     CONSTRAINT uk_slaughter_batch_no UNIQUE (batch_no)
 );
@@ -25,6 +26,7 @@ COMMENT ON COLUMN slaughter_batch.declared_at IS '最近一次申报时间（UTC
 COMMENT ON COLUMN slaughter_batch.pre_quarantined_at IS '宰前检疫通过时间（UTC ISO-8601），NULL 表示未检疫';
 COMMENT ON COLUMN slaughter_batch.judged_at IS '判定分流完成时间（UTC ISO-8601），NULL 表示未判定';
 COMMENT ON COLUMN slaughter_batch.released_at IS '出厂核销时间（UTC ISO-8601），NULL 表示未核销';
+COMMENT ON COLUMN slaughter_batch.version IS '乐观锁版本号：从 1 开始，风险抽检相关写操作携带 expectedVersion 校验，成功变更加 1';
 COMMENT ON COLUMN slaughter_batch.created_at IS '记录创建时间（UTC ISO-8601）';
 
 CREATE TABLE IF NOT EXISTS head_ledger (
@@ -117,3 +119,45 @@ COMMENT ON COLUMN idempotency_record.endpoint IS '受理接口标识';
 COMMENT ON COLUMN idempotency_record.fingerprint IS '请求指纹：requestId 与全部业务字段的 SHA-256';
 COMMENT ON COLUMN idempotency_record.response_body IS '首次受理的响应报文（JSON），同键同参重放时原样返回';
 COMMENT ON COLUMN idempotency_record.created_at IS '登记时间（UTC ISO-8601）';
+
+CREATE TABLE IF NOT EXISTS sample_list (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    list_no INT NOT NULL,
+    risk_level VARCHAR(16) NOT NULL,
+    rule_version VARCHAR(32) NOT NULL,
+    ratio_percent INT NOT NULL,
+    required_count INT NOT NULL,
+    declared_heads CLOB NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    created_at VARCHAR(40) NOT NULL,
+    completed_at VARCHAR(40) NULL,
+    CONSTRAINT uk_sample_list_no UNIQUE (batch_id, list_no)
+);
+COMMENT ON TABLE sample_list IS '风险抽检清单：绑定风险等级时冻结编号清单、风险规则版本与申报头只集合，同一批次只一个当前清单';
+COMMENT ON COLUMN sample_list.batch_id IS '所属屠宰批次主键';
+COMMENT ON COLUMN sample_list.list_no IS '清单序号：1 为初始清单，2 起为已完成后另开的补充清单，批次内唯一';
+COMMENT ON COLUMN sample_list.risk_level IS '风险等级：NORMAL 普通抽检 10% / STRICT 加严抽检 30%（合成规则）';
+COMMENT ON COLUMN sample_list.rule_version IS '风险规则版本（合成），清单冻结时写入，不随规则演进而变';
+COMMENT ON COLUMN sample_list.ratio_percent IS '冻结抽检比例（百分比整数，10 或 30）';
+COMMENT ON COLUMN sample_list.required_count IS '冻结应抽头只数：头只数乘比例向上取整且至少 1；提高风险等级原子扩充时上调，降低不缩减';
+COMMENT ON COLUMN sample_list.declared_heads IS '冻结申报头只集合（JSON 数组，字典序），作为抽样基数证据';
+COMMENT ON COLUMN sample_list.status IS '清单状态：ACTIVE 当前清单（抽检中）/ COMPLETED 已完成（全部样本出结果，不可改）';
+COMMENT ON COLUMN sample_list.created_at IS '清单创建时间（UTC ISO-8601）';
+COMMENT ON COLUMN sample_list.completed_at IS '全部样本出结果时间（UTC ISO-8601），NULL 表示未完成';
+
+CREATE TABLE IF NOT EXISTS sample_item (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    list_id BIGINT NOT NULL,
+    batch_id BIGINT NOT NULL,
+    head_no VARCHAR(64) NOT NULL,
+    result VARCHAR(16) NULL,
+    submitted_at VARCHAR(40) NULL,
+    CONSTRAINT uk_sample_item UNIQUE (list_id, head_no)
+);
+COMMENT ON TABLE sample_item IS '抽检明细：清单内每只一行，结果逐只提交，同只同结果重复提交不新增记录';
+COMMENT ON COLUMN sample_item.list_id IS '所属抽检清单主键';
+COMMENT ON COLUMN sample_item.batch_id IS '所属屠宰批次主键（冗余便于按批核查）';
+COMMENT ON COLUMN sample_item.head_no IS '头只编号，按字典序选取的前 N 只之一，清单内唯一';
+COMMENT ON COLUMN sample_item.result IS '抽检结果：NEGATIVE 阴性 / POSITIVE 阳性，NULL 表示未提交';
+COMMENT ON COLUMN sample_item.submitted_at IS '结果提交时间（UTC ISO-8601），NULL 表示未提交';
