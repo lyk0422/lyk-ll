@@ -87,4 +87,113 @@ public final class Views {
     /** 检验照片登记结果：ATTACHED 正常归档 / LATE_RECORDED 结案后迟到仅记事件 */
     public record PhotoResult(String result) {
     }
+
+    /** 资格版本视图；frozen=true 表示定标后已冻结 */
+    public record QualificationView(
+            long id,
+            int version,
+            List<String> methods,
+            LocalDateTime validFrom,
+            LocalDateTime validUntil,
+            String status,
+            boolean frozen) {
+    }
+
+    /** 供应商视图：含当前资格版本 */
+    public record SupplierView(
+            long id,
+            String supplierNo,
+            String name,
+            int version,
+            QualificationView qualification) {
+    }
+
+    /** 供应商全量明细：含全部资格版本历史与风险事件 */
+    public record SupplierDetailView(
+            long id,
+            String supplierNo,
+            String name,
+            int version,
+            List<QualificationView> qualifications,
+            List<RiskEventView> riskEvents) {
+    }
+
+    /** 询价版本视图 */
+    public record InquiryView(
+            long id,
+            long caseId,
+            int version,
+            LocalDateTime deadline,
+            String status) {
+    }
+
+    /** 询价项视图：残损项 ID 与允许工法集合 */
+    public record InquiryItemView(
+            long id,
+            long itemId,
+            List<String> methods) {
+    }
+
+    /** 报价行视图；金额单位为正整数分 */
+    public record QuotationLineView(
+            long itemId,
+            String method,
+            long amountCents) {
+    }
+
+    /** 报价版本视图 */
+    public record QuotationView(
+            long id,
+            long inquiryId,
+            long supplierId,
+            int version,
+            long totalAmount,
+            String status,
+            boolean frozen,
+            List<QuotationLineView> lines) {
+    }
+
+    /** 开标明细视图：资格失效报价列明排除原因 */
+    public record BidOpeningEntryView(
+            long quotationId,
+            long supplierId,
+            String supplierNo,
+            long totalAmount,
+            boolean included,
+            String exclusionReason,
+            Integer qualVersion,
+            Integer rank) {
+    }
+
+    /** 开标结果视图；winnerQuotationId 为 null 表示零有效报价 */
+    public record BidOpeningView(
+            long id,
+            long inquiryId,
+            LocalDateTime openedAt,
+            Long winnerQuotationId,
+            List<BidOpeningEntryView> entries) {
+    }
+
+    /** 复核记录视图 */
+    public record ReviewView(long id, String reviewer) {
+    }
+
+    /** 询价全量明细：询价版本 + 固定项 + 报价 + 开标结果 + 复核记录 */
+    public record InquiryDetailView(
+            InquiryView inquiry,
+            List<InquiryItemView> items,
+            List<QuotationView> quotations,
+            BidOpeningView opening,
+            List<ReviewView> reviews) {
+    }
+
+    /** 风险事件视图（如定标后撤销资格） */
+    public record RiskEventView(
+            long id,
+            Long caseId,
+            Long inquiryId,
+            long supplierId,
+            String eventType,
+            String detail) {
+    }
 }
