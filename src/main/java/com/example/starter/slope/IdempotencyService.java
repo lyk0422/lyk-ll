@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.function.Supplier;
 
 /**
@@ -85,9 +86,15 @@ public class IdempotencyService {
                 .stream().findFirst().orElse(null);
     }
 
+    /**
+     * 结构化指纹：端点、幂等键与请求报文作为 JSON 数组的三个元素序列化后再哈希。
+     * 数组边界由 JSON 结构保证，业务文本合法包含换行、竖线等分隔符也不会与
+     * 结构边界混淆，指纹无歧义。
+     */
     private String fingerprint(String endpoint, String requestId, Object request) {
         try {
-            String payload = endpoint + "\n" + requestId + "\n" + objectMapper.writeValueAsString(request);
+            String payload = objectMapper.writeValueAsString(
+                    List.of(endpoint, requestId, objectMapper.valueToTree(request)));
             return HexFormat.of().formatHex(
                     MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException e) {

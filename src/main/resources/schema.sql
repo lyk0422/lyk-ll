@@ -69,6 +69,44 @@ CREATE TABLE IF NOT EXISTS late_event (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录时间'
 ) COMMENT='归档后迟到位移事件';
 
+CREATE TABLE IF NOT EXISTS rainfall_hourly (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '雨量记录主键',
+    zone_id BIGINT NOT NULL COMMENT '所属测区',
+    hour_start TIMESTAMP NOT NULL COMMENT '小时起点（UTC整点；Asia/Shanghai为UTC+8，同为整点）；与测区、版本联合唯一',
+    rainfall_mm DOUBLE NOT NULL COMMENT '该小时合成雨量，单位毫米；有限非负',
+    version INT NOT NULL COMMENT '更正版本，从1开始；每次显式更正加1，当前值取最大版本',
+    corrected_at TIMESTAMP NOT NULL COMMENT '本次上报/更正的提交时刻',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '入库时间',
+    CONSTRAINT uk_rainfall_zone_hour_version UNIQUE (zone_id, hour_start, version)
+) COMMENT='合成雨量小时数据（仅合成规则，不用于生产；JVM退出后丢失）';
+
+CREATE TABLE IF NOT EXISTS threshold_policy (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '策略版本主键',
+    zone_id BIGINT NOT NULL COMMENT '所属测区',
+    version INT NOT NULL COMMENT '策略版本，从1开始；发布时携带expectedVersion等于当前最新版本（无策略为0）',
+    yellow_hourly_rate DOUBLE NOT NULL COMMENT '黄色预警基础小时速率阈值，单位毫米/小时；0<黄<红',
+    red_hourly_rate DOUBLE NOT NULL COMMENT '红色报警基础小时速率阈值，单位毫米/小时；严格超过才报警，恰等判正常',
+    rain_24h_threshold DOUBLE NOT NULL COMMENT '24小时雨量门槛，单位毫米；此前24个完整小时雨量合计达到（含恰等）门槛即启用折减',
+    reduction_factor DOUBLE NOT NULL COMMENT '折减系数，0<系数<=1；启用折减时有效阈值=基础阈值×系数',
+    effective_at TIMESTAMP NOT NULL COMMENT '生效时刻；不得早于提交时刻，只影响生效时刻（含）之后的读数评价',
+    submitted_at TIMESTAMP NOT NULL COMMENT '提交时刻',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    CONSTRAINT uk_threshold_policy_zone_version UNIQUE (zone_id, version)
+) COMMENT='雨量联动阈值策略版本';
+
+CREATE TABLE IF NOT EXISTS resumption_evidence (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '复工证据主键',
+    assessment_id BIGINT NOT NULL COMMENT '所属复工评估',
+    chain_id BIGINT NOT NULL COMMENT '所属处置链',
+    zone_id BIGINT NOT NULL COMMENT '所属测区',
+    phase VARCHAR(8) NOT NULL COMMENT '冻结阶段：APPLY申请时冻结、APPROVE批准时冻结',
+    window_start TIMESTAMP NOT NULL COMMENT '安全累计窗口起点（取红色触发时刻与最迟变严策略生效时刻的较晚者）',
+    window_end TIMESTAMP NOT NULL COMMENT '安全累计窗口终点（复工申请时刻）',
+    result VARCHAR(8) NOT NULL COMMENT '冻结结果：PASS门禁通过',
+    detail CLOB NOT NULL COMMENT '逐读数判定明细JSON：时刻、小时速率、策略版本、24小时雨量、是否折减、有效阈值、是否通过',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '冻结时间'
+) COMMENT='复工安全门禁冻结证据';
+
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id VARCHAR(128) PRIMARY KEY COMMENT '幂等键，来自请求requestId',
     endpoint VARCHAR(128) NOT NULL COMMENT '受理端点',

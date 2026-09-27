@@ -53,6 +53,23 @@ public class SlopeRepository {
                                double displacementMm, String reason) {
     }
 
+    /** 雨量小时数据行（含更正历史，当前值取每小时最大版本）。 */
+    public record RainfallRow(long id, long zoneId, LocalDateTime hourStart, double rainfallMm,
+                              int version, LocalDateTime correctedAt) {
+    }
+
+    /** 阈值策略版本行。 */
+    public record PolicyRow(long id, long zoneId, int version, double yellowHourlyRate,
+                            double redHourlyRate, double rain24hThreshold, double reductionFactor,
+                            LocalDateTime effectiveAt, LocalDateTime submittedAt) {
+    }
+
+    /** 复工安全门禁冻结证据行。 */
+    public record EvidenceRow(long id, long assessmentId, long chainId, long zoneId, String phase,
+                              LocalDateTime windowStart, LocalDateTime windowEnd, String result,
+                              String detail, LocalDateTime createdAt) {
+    }
+
     private static final RowMapper<ZoneRow> ZONE_MAPPER = (rs, rowNum) -> new ZoneRow(
             rs.getLong("id"), rs.getString("code"), rs.getString("name"),
             rs.getDouble("warn_hourly_rate"), rs.getDouble("alarm_daily_rate"),
@@ -90,6 +107,27 @@ public class SlopeRepository {
             rs.getObject("chain_id") == null ? null : rs.getLong("chain_id"),
             rs.getTimestamp("measured_at").toLocalDateTime(),
             rs.getDouble("displacement_mm"), rs.getString("reason"));
+
+    private static final RowMapper<RainfallRow> RAINFALL_MAPPER = (rs, rowNum) -> new RainfallRow(
+            rs.getLong("id"), rs.getLong("zone_id"),
+            rs.getTimestamp("hour_start").toLocalDateTime(),
+            rs.getDouble("rainfall_mm"), rs.getInt("version"),
+            rs.getTimestamp("corrected_at").toLocalDateTime());
+
+    private static final RowMapper<PolicyRow> POLICY_MAPPER = (rs, rowNum) -> new PolicyRow(
+            rs.getLong("id"), rs.getLong("zone_id"), rs.getInt("version"),
+            rs.getDouble("yellow_hourly_rate"), rs.getDouble("red_hourly_rate"),
+            rs.getDouble("rain_24h_threshold"), rs.getDouble("reduction_factor"),
+            rs.getTimestamp("effective_at").toLocalDateTime(),
+            rs.getTimestamp("submitted_at").toLocalDateTime());
+
+    private static final RowMapper<EvidenceRow> EVIDENCE_MAPPER = (rs, rowNum) -> new EvidenceRow(
+            rs.getLong("id"), rs.getLong("assessment_id"), rs.getLong("chain_id"),
+            rs.getLong("zone_id"), rs.getString("phase"),
+            rs.getTimestamp("window_start").toLocalDateTime(),
+            rs.getTimestamp("window_end").toLocalDateTime(),
+            rs.getString("result"), rs.getString("detail"),
+            rs.getTimestamp("created_at").toLocalDateTime());
 
     private final JdbcTemplate jdbcTemplate;
 
@@ -313,5 +351,129 @@ public class SlopeRepository {
     public List<LateEventRow> findLateEventsByZone(long zoneId) {
         return jdbcTemplate.query("SELECT * FROM late_event WHERE zone_id = ? ORDER BY id",
                 LATE_EVENT_MAPPER, zoneId);
+    }
+
+    // ------------------------------------------------------------------
+    // 雨量小时数据
+    // ------------------------------------------------------------------
+
+    public long insertRainfall(long zoneId, LocalDateTime hourStart, double rainfallMm,
+                               int version, LocalDateTime correctedAt) {
+        return insertAndGetKey(
+                "INSERT INTO rainfall_hourly (zone_id, hour_start, rainfall_mm, version, corrected_at) "
+                        + "VALUES (?, ?, ?, ?, ?)",
+                ps -> {
+                    ps.setLong(1, zoneId);
+                    ps.setTimestamp(2, Timestamp.valueOf(hourStart));
+                    ps.setDouble(3, rainfallMm);
+                    ps.setInt(4, version);
+                    ps.setTimestamp(5, Timestamp.valueOf(correctedAt));
+                });
+    }
+
+    /** 某测区某小时的当前雨量（最大版本）。 */
+    public Optional<RainfallRow> findLatestRainfall(long zoneId, LocalDateTime hourStart) {
+        return jdbcTemplate.query(
+                        "SELECT * FROM rainfall_hourly WHERE zone_id = ? AND hour_start = ? "
+                                + "ORDER BY version DESC LIMIT 1",
+                        RAINFALL_MAPPER, zoneId, Timestamp.valueOf(hourStart))
+                .stream().findFirst();
+    }
+
+    /** 某测区 [from, to) 内每小时的当前雨量（每小时取最大版本），按小时升序。 */
+    public List<RainfallRow> findLatestRainfallInRange(long zoneId, LocalDateTime from, LocalDateTime to) {
+        return jdbcTemplate.query(
+                "SELECT * FROM rainfall_hourly r WHERE r.zone_id = ? "
+                        + "AND r.hour_start >= ? AND r.hour_start < ? "
+                        + "AND r.version = (SELECT MAX(x.version) FROM rainfall_hourly x "
+                        + "WHERE x.zone_id = r.zone_id AND x.hour_start = r.hour_start) "
+                        + "ORDER BY r.hour_start",
+                RAINFALL_MAPPER, zoneId, Timestamp.valueOf(from), Timestamp.valueOf(to));
+    }
+
+    /** 某测区全部小时的当前雨量，按小时升序。 */
+    public List<RainfallRow> findLatestRainfallByZone(long zoneId) {
+        return jdbcTemplate.query(
+                "SELECT * FROM rainfall_hourly r WHERE r.zone_id = ? "
+                        + "AND r.version = (SELECT MAX(x.version) FROM rainfall_hourly x "
+                        + "WHERE x.zone_id = r.zone_id AND x.hour_start = r.hour_start) "
+                        + "ORDER BY r.hour_start",
+                RAINFALL_MAPPER, zoneId);
+    }
+
+    /** 更正历史（含全部版本）；hourStart 为 null 时返回该测区全部历史。 */
+    public List<RainfallRow> findRainfallHistory(long zoneId, LocalDateTime hourStart) {
+        if (hourStart == null) {
+            return jdbcTemplate.query(
+                    "SELECT * FROM rainfall_hourly WHERE zone_id = ? ORDER BY hour_start, version",
+                    RAINFALL_MAPPER, zoneId);
+        }
+        return jdbcTemplate.query(
+                "SELECT * FROM rainfall_hourly WHERE zone_id = ? AND hour_start = ? ORDER BY version",
+                RAINFALL_MAPPER, zoneId, Timestamp.valueOf(hourStart));
+    }
+
+    // ------------------------------------------------------------------
+    // 阈值策略版本
+    // ------------------------------------------------------------------
+
+    public long insertPolicy(long zoneId, int version, double yellowHourlyRate, double redHourlyRate,
+                             double rain24hThreshold, double reductionFactor,
+                             LocalDateTime effectiveAt, LocalDateTime submittedAt) {
+        return insertAndGetKey(
+                "INSERT INTO threshold_policy (zone_id, version, yellow_hourly_rate, red_hourly_rate, "
+                        + "rain_24h_threshold, reduction_factor, effective_at, submitted_at) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ps -> {
+                    ps.setLong(1, zoneId);
+                    ps.setInt(2, version);
+                    ps.setDouble(3, yellowHourlyRate);
+                    ps.setDouble(4, redHourlyRate);
+                    ps.setDouble(5, rain24hThreshold);
+                    ps.setDouble(6, reductionFactor);
+                    ps.setTimestamp(7, Timestamp.valueOf(effectiveAt));
+                    ps.setTimestamp(8, Timestamp.valueOf(submittedAt));
+                });
+    }
+
+    /** 当前最新策略版本（版本号最大）。 */
+    public Optional<PolicyRow> findLatestPolicyByZone(long zoneId) {
+        return jdbcTemplate.query(
+                        "SELECT * FROM threshold_policy WHERE zone_id = ? ORDER BY version DESC LIMIT 1",
+                        POLICY_MAPPER, zoneId)
+                .stream().findFirst();
+    }
+
+    /** 全部策略版本，按版本号升序。 */
+    public List<PolicyRow> findPoliciesByZone(long zoneId) {
+        return jdbcTemplate.query("SELECT * FROM threshold_policy WHERE zone_id = ? ORDER BY version",
+                POLICY_MAPPER, zoneId);
+    }
+
+    // ------------------------------------------------------------------
+    // 复工安全门禁冻结证据
+    // ------------------------------------------------------------------
+
+    public long insertEvidence(long assessmentId, long chainId, long zoneId, String phase,
+                               LocalDateTime windowStart, LocalDateTime windowEnd,
+                               String result, String detail) {
+        return insertAndGetKey(
+                "INSERT INTO resumption_evidence (assessment_id, chain_id, zone_id, phase, "
+                        + "window_start, window_end, result, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ps -> {
+                    ps.setLong(1, assessmentId);
+                    ps.setLong(2, chainId);
+                    ps.setLong(3, zoneId);
+                    ps.setString(4, phase);
+                    ps.setTimestamp(5, Timestamp.valueOf(windowStart));
+                    ps.setTimestamp(6, Timestamp.valueOf(windowEnd));
+                    ps.setString(7, result);
+                    ps.setString(8, detail);
+                });
+    }
+
+    public List<EvidenceRow> findEvidenceByChain(long chainId) {
+        return jdbcTemplate.query("SELECT * FROM resumption_evidence WHERE chain_id = ? ORDER BY id",
+                EVIDENCE_MAPPER, chainId);
     }
 }
