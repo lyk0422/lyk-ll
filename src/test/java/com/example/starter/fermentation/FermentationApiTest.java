@@ -209,12 +209,4 @@ class FermentationApiTest extends BaseFermentationTest {
                 + " (100, 'COOLING', 1, 3.00, 48),"
                 + " (100, 'MATURATION', 1, -1.00, 168)");
     }
-
-    JsonNode batch(long id) throws Exception {
-        MvcResult result = mockMvc.perform(
-                org.springframework.test.web.servlet.request.MockMvcRequestBuilders
-                        .get("/api/batches/" + id)).andReturn();
-        assertEquals(200, result.getResponse().getStatus());
-        return json(result);
-    }
 }

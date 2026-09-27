@@ -3,6 +3,8 @@ package com.example.starter.fermentation.service;
 import com.example.starter.fermentation.error.IdempotencyConflictException;
 import com.example.starter.fermentation.repository.IdempotencyRepository;
 import com.example.starter.fermentation.repository.IdempotencyRepository.IdempotencyRecord;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -33,10 +35,13 @@ public class IdempotencyService {
 
     private final IdempotencyRepository repository;
     private final Clock clock;
+    private final ObjectMapper objectMapper;
 
-    public IdempotencyService(IdempotencyRepository repository, Clock clock) {
+    public IdempotencyService(IdempotencyRepository repository, Clock clock,
+                              ObjectMapper objectMapper) {
         this.repository = repository;
         this.clock = clock;
+        this.objectMapper = objectMapper;
     }
 
     /**
@@ -47,10 +52,34 @@ public class IdempotencyService {
         for (String field : businessFields) {
             canonical.append('|').append(field);
         }
+        return sha256(canonical.toString());
+    }
+
+    /**
+     * 结构化指纹：先将 [endpoint, requestId, 业务字段...] 序列化为 JSON 数组再求 SHA-256。
+     *
+     * <p>字段按 Java 实际类型（String/Integer/Boolean/BigDecimal/LocalDateTime/集合/数组）
+     * 编码，元素边界由 JSON 语法确定：业务文本即使包含 {@code |}、{@code "}、换行或形如
+     * 多字段拼接（如 {@code "a|b"} 与两个元素 {@code "a","b"}）也产生不同指纹，无歧义。
+     * 集合与精确时刻作为独立类型字段参与编码。
+     */
+    public String structuredFingerprint(String endpoint, String requestId, Object... businessFields) {
+        Object[] canonical = new Object[businessFields.length + 2];
+        canonical[0] = endpoint;
+        canonical[1] = requestId;
+        System.arraycopy(businessFields, 0, canonical, 2, businessFields.length);
+        try {
+            return sha256(objectMapper.writeValueAsString(canonical));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("幂等指纹序列化失败", e);
+        }
+    }
+
+    private static String sha256(String canonical) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             return HexFormat.of().formatHex(
-                    digest.digest(canonical.toString().getBytes(StandardCharsets.UTF_8)));
+                    digest.digest(canonical.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 不可用", e);
         }

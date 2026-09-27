@@ -33,7 +33,8 @@ public class BatchRepository {
             toLdt(rs.getTimestamp("maturation_started_at")),
             rs.getInt("maturation_extended") != 0,
             toLdt(rs.getTimestamp("judged_at")),
-            toLdt(rs.getTimestamp("transferred_at")));
+            toLdt(rs.getTimestamp("transferred_at")),
+            rs.getString("yeast_unit_code"));
 
     private final JdbcTemplate jdbc;
 
@@ -99,6 +100,16 @@ public class BatchRepository {
         jdbc.update("UPDATE fermentation_batch SET status = ?, curve_version = ?, cooling_started_at = ?"
                         + " WHERE id = ?",
                 BatchStatus.COOLING.name(), newCurveVersion, Timestamp.valueOf(instructedAt), id);
+    }
+
+    /**
+     * 受控投酵：开始主酵的同时绑定酵母单元（同一条更新语句）。
+     * 酵母占用由酵母表唯一约束与乐观版本兜底，本方法只做批次侧绑定。
+     */
+    public void startMainFermentWithYeast(long id, String yeastUnitCode, LocalDateTime startedAt) {
+        jdbc.update("UPDATE fermentation_batch SET status = ?, main_ferment_started_at = ?,"
+                        + " yeast_unit_code = ? WHERE id = ?",
+                BatchStatus.MAIN_FERMENT.name(), Timestamp.valueOf(startedAt), yeastUnitCode, id);
     }
 
     /**

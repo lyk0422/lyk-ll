@@ -85,8 +85,8 @@ public class BatchService {
     @Transactional
     public StoredResponse createBatch(CreateBatchRequest req) {
         String endpoint = "POST /api/batches";
-        String fingerprint = idempotencyService.fingerprint(endpoint, req.requestId(),
-                req.batchNo(), req.tankCode(), req.curveCode(), req.filledAt().toString());
+        String fingerprint = idempotencyService.structuredFingerprint(endpoint, req.requestId(),
+                req.batchNo(), req.tankCode(), req.curveCode(), req.filledAt());
         return idempotent(req.requestId(), endpoint, fingerprint, () -> {
             long tankId = batchRepository.findTankIdByCode(req.tankCode())
                     .orElseThrow(() -> ApiException.notFound("发酵罐不存在: " + req.tankCode()));
@@ -110,8 +110,8 @@ public class BatchService {
     @Transactional
     public StoredResponse startMainFerment(long batchId, StartPhaseRequest req) {
         String endpoint = "POST /api/batches/" + batchId + "/main-ferment/start";
-        String fingerprint = idempotencyService.fingerprint(endpoint, req.requestId(),
-                req.startedAt().toString());
+        String fingerprint = idempotencyService.structuredFingerprint(endpoint, req.requestId(),
+                req.startedAt());
         return idempotent(req.requestId(), endpoint, fingerprint, () -> {
             FermentationBatch batch = mustFind(batchId);
             requireStatus(batch, BatchStatus.FILLED, "仅满罐批次可开始主酵");
@@ -127,8 +127,8 @@ public class BatchService {
     @Transactional
     public StoredResponse addTemperatureReading(long batchId, TemperatureReadingRequest req) {
         String endpoint = "POST /api/batches/" + batchId + "/temperature-readings";
-        String fingerprint = idempotencyService.fingerprint(endpoint, req.requestId(),
-                req.sampledAt().toString(), req.temperature().toPlainString());
+        String fingerprint = idempotencyService.structuredFingerprint(endpoint, req.requestId(),
+                req.sampledAt(), req.temperature());
         return idempotent(req.requestId(), endpoint, fingerprint, () -> {
             FermentationBatch batch = mustFind(batchId);
             if (batch.status() == BatchStatus.TRANSFERRED) {
@@ -186,8 +186,8 @@ public class BatchService {
     @Transactional
     public StoredResponse addDiacetylTest(long batchId, DiacetylTestRequest req) {
         String endpoint = "POST /api/batches/" + batchId + "/diacetyl-tests";
-        String fingerprint = idempotencyService.fingerprint(endpoint, req.requestId(),
-                req.testedAt().toString(), req.valueMgPerLiter().toPlainString());
+        String fingerprint = idempotencyService.structuredFingerprint(endpoint, req.requestId(),
+                req.testedAt(), req.valueMgPerLiter());
         return idempotent(req.requestId(), endpoint, fingerprint, () -> {
             FermentationBatch batch = mustFind(batchId);
             if (batch.status() == BatchStatus.TRANSFERRED) {
@@ -212,8 +212,8 @@ public class BatchService {
     @Transactional
     public StoredResponse cooling(long batchId, CoolingRequest req) {
         String endpoint = "POST /api/batches/" + batchId + "/cooling";
-        String fingerprint = idempotencyService.fingerprint(endpoint, req.requestId(),
-                req.instructedAt().toString());
+        String fingerprint = idempotencyService.structuredFingerprint(endpoint, req.requestId(),
+                req.instructedAt());
         return idempotent(req.requestId(), endpoint, fingerprint, () -> {
             FermentationBatch batch = mustFind(batchId);
             requireStatus(batch, BatchStatus.MAIN_FERMENT, "仅主酵期可下达降温指令");
@@ -232,8 +232,8 @@ public class BatchService {
     @Transactional
     public StoredResponse startMaturation(long batchId, StartPhaseRequest req) {
         String endpoint = "POST /api/batches/" + batchId + "/maturation/start";
-        String fingerprint = idempotencyService.fingerprint(endpoint, req.requestId(),
-                req.startedAt().toString());
+        String fingerprint = idempotencyService.structuredFingerprint(endpoint, req.requestId(),
+                req.startedAt());
         return idempotent(req.requestId(), endpoint, fingerprint, () -> {
             FermentationBatch batch = mustFind(batchId);
             requireStatus(batch, BatchStatus.COOLING, "仅降温结束批次可开始后熟");
@@ -248,8 +248,8 @@ public class BatchService {
     @Transactional
     public StoredResponse extendMaturation(long batchId, ExtendMaturationRequest req) {
         String endpoint = "POST /api/batches/" + batchId + "/maturation/extend";
-        String fingerprint = idempotencyService.fingerprint(endpoint, req.requestId(),
-                req.extendedAt().toString());
+        String fingerprint = idempotencyService.structuredFingerprint(endpoint, req.requestId(),
+                req.extendedAt());
         return idempotent(req.requestId(), endpoint, fingerprint, () -> {
             FermentationBatch batch = mustFind(batchId);
             requireStatus(batch, BatchStatus.MATURATION, "仅后熟期可延长后熟");
@@ -268,8 +268,8 @@ public class BatchService {
     @Transactional
     public StoredResponse judge(long batchId, JudgeRequest req) {
         String endpoint = "POST /api/batches/" + batchId + "/judge";
-        String fingerprint = idempotencyService.fingerprint(endpoint, req.requestId(),
-                req.judgedAt().toString());
+        String fingerprint = idempotencyService.structuredFingerprint(endpoint, req.requestId(),
+                req.judgedAt());
         return idempotent(req.requestId(), endpoint, fingerprint, () -> {
             FermentationBatch batch = mustFind(batchId);
             requireStatus(batch, BatchStatus.MATURATION, "仅后熟期可判定成熟度");
@@ -301,8 +301,8 @@ public class BatchService {
     @Transactional
     public StoredResponse transfer(long batchId, TransferRequest req) {
         String endpoint = "POST /api/batches/" + batchId + "/transfer";
-        String fingerprint = idempotencyService.fingerprint(endpoint, req.requestId(),
-                req.transferredAt().toString());
+        String fingerprint = idempotencyService.structuredFingerprint(endpoint, req.requestId(),
+                req.transferredAt());
         return idempotent(req.requestId(), endpoint, fingerprint, () -> {
             FermentationBatch batch = mustFind(batchId);
             if (batch.status() == BatchStatus.TRANSFERRED) {
@@ -414,7 +414,7 @@ public class BatchService {
     private BatchResponse toResponse(FermentationBatch b) {
         return new BatchResponse(b.id(), b.batchNo(), b.status(), b.curveCode(), b.curveVersion(),
                 b.maturationExtended(), b.filledAt(), b.mainFermentStartedAt(), b.coolingStartedAt(),
-                b.maturationStartedAt(), b.judgedAt(), b.transferredAt());
+                b.maturationStartedAt(), b.judgedAt(), b.transferredAt(), b.yeastUnitCode());
     }
 
     private String toJson(Object dto) {

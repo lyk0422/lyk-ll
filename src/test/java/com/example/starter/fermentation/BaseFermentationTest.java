@@ -8,12 +8,16 @@ import com.example.starter.fermentation.api.BatchDtos.JudgeRequest;
 import com.example.starter.fermentation.api.BatchDtos.StartPhaseRequest;
 import com.example.starter.fermentation.api.BatchDtos.TemperatureReadingRequest;
 import com.example.starter.fermentation.api.BatchDtos.TransferRequest;
+import com.example.starter.fermentation.api.YeastDtos.PitchYeastRequest;
+import com.example.starter.fermentation.api.YeastDtos.RegisterYeastRequest;
+import com.example.starter.fermentation.api.YeastDtos.YeastRecoveryRequest;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
@@ -24,6 +28,7 @@ import java.time.LocalDateTime;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 
 /**
@@ -32,6 +37,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
  */
 @SpringBootTest
 @AutoConfigureMockMvc
+@Import(TestClockConfig.class)
 public abstract class BaseFermentationTest {
 
     /** 合成基准时间：满罐时刻。 */
@@ -51,8 +57,10 @@ public abstract class BaseFermentationTest {
         jdbc.update("DELETE FROM late_event");
         jdbc.update("DELETE FROM temperature_reading");
         jdbc.update("DELETE FROM diacetyl_test");
+        jdbc.update("DELETE FROM yeast_recovery_record");
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM fermentation_batch");
+        jdbc.update("DELETE FROM yeast_unit");
         jdbc.update("DELETE FROM curve_segment WHERE curve_id IN"
                 + " (SELECT id FROM process_curve WHERE version > 1)");
         jdbc.update("DELETE FROM process_curve WHERE version > 1");
@@ -145,5 +153,40 @@ public abstract class BaseFermentationTest {
     /** 后熟开始时间（与 {@link #driveToMaturation} 保持一致）。 */
     LocalDateTime maturationStart() {
         return T0.plusHours(15);
+    }
+
+    /** 登记合成酵母单元，断言 201。 */
+    void registerYeast(String requestId, String unitCode) throws Exception {
+        MvcResult result = doPost("/api/yeast-units", new RegisterYeastRequest(requestId, unitCode));
+        assertEquals(201, result.getResponse().getStatus(), "登记酵母单元应返回 201");
+    }
+
+    /** 受控投酵请求。 */
+    MvcResult pitch(long batchId, String requestId, String unitCode, int expectedVersion,
+                    LocalDateTime at) throws Exception {
+        return doPost("/api/batches/" + batchId + "/yeast-pitch",
+                new PitchYeastRequest(requestId, unitCode, expectedVersion, at));
+    }
+
+    /** 回收请求。 */
+    MvcResult recover(long batchId, String requestId, int expectedVersion, LocalDateTime at,
+                      String viabilityPercent, boolean contaminated) throws Exception {
+        return doPost("/api/batches/" + batchId + "/yeast-recovery",
+                new YeastRecoveryRequest(requestId, expectedVersion, at,
+                        new BigDecimal(viabilityPercent), contaminated));
+    }
+
+    /** 查酵母单元。 */
+    JsonNode yeastUnit(String unitCode) throws Exception {
+        MvcResult result = mockMvc.perform(get("/api/yeast-units/" + unitCode)).andReturn();
+        assertEquals(200, result.getResponse().getStatus());
+        return json(result);
+    }
+
+    /** 查批次详情。 */
+    JsonNode batch(long id) throws Exception {
+        MvcResult result = mockMvc.perform(get("/api/batches/" + id)).andReturn();
+        assertEquals(200, result.getResponse().getStatus());
+        return json(result);
     }
 }

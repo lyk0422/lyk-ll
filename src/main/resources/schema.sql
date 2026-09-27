@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS fermentation_batch (
     judged_at TIMESTAMP NULL COMMENT '最近一次成熟度判定时间，未判定为 NULL',
     transferred_at TIMESTAMP NULL COMMENT '清酒转出时间，未转出为 NULL',
     active_tank_key VARCHAR(64) NULL COMMENT '进行中批次占用发酵罐的占用键（等于罐编号），批次进入终态后置 NULL；唯一约束保证同罐同时刻仅一个进行中批次',
+    yeast_unit_code VARCHAR(64) NULL COMMENT '受控投酵绑定的酵母单元编号；未启用受控投酵的历史批次为 NULL，回收后保留以便追溯',
     CONSTRAINT uk_batch_no UNIQUE (batch_no),
     CONSTRAINT uk_batch_active_tank UNIQUE (active_tank_key),
     CONSTRAINT fk_batch_tank FOREIGN KEY (tank_id) REFERENCES fermentation_tank (id)
@@ -91,3 +92,32 @@ CREATE TABLE IF NOT EXISTS late_event (
     created_at TIMESTAMP NOT NULL COMMENT '事件记录时间',
     CONSTRAINT fk_late_batch FOREIGN KEY (batch_id) REFERENCES fermentation_batch (id)
 ) COMMENT '批次终态后到达的迟到数据事件';
+
+CREATE TABLE IF NOT EXISTS yeast_unit (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    unit_code VARCHAR(64) NOT NULL COMMENT '酵母单元唯一编号（合成数据）',
+    generation INT NOT NULL DEFAULT 0 COMMENT '当前代次：初始登记为 0，每次合格回收后加 1；代次 6 不允许再投酵',
+    status VARCHAR(16) NOT NULL COMMENT '状态：AVAILABLE 可用 / IN_USE 已被主酵批次占用 / SCRAPPED 已报废（回收不合格） / EXPIRED 已失效（距回收超过 72 小时）',
+    last_recovered_at TIMESTAMP NULL COMMENT '最近一次合格回收时刻；首次登记单元无回收时刻为 NULL，不受 72 小时失效限制',
+    occupied_by_batch_id BIGINT NULL COMMENT '当前占用该单元的正在主酵批次 ID；回收受理同事务置 NULL',
+    version INT NOT NULL DEFAULT 1 COMMENT '乐观锁版本号，从 1 开始，每次成功写变更加 1；写请求须携带 expectedVersion',
+    created_at TIMESTAMP NOT NULL COMMENT '单元登记时间',
+    CONSTRAINT uk_yeast_unit_code UNIQUE (unit_code),
+    CONSTRAINT uk_yeast_occupant UNIQUE (occupied_by_batch_id)
+) COMMENT '合成酵母单元：代次限用、投酵占用与回收追溯';
+
+CREATE TABLE IF NOT EXISTS yeast_recovery_record (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    yeast_unit_code VARCHAR(64) NOT NULL COMMENT '被回收酵母单元编号（追溯用，即使报废也保留）',
+    batch_id BIGINT NOT NULL COMMENT '发起回收的发酵批次 ID；一个批次只能回收一次（含失败判定）',
+    viability_percent DECIMAL(5,2) NOT NULL COMMENT '回收活率，单位百分比；恰 90.00% 判定合格，低于 90% 报废',
+    contaminated TINYINT NOT NULL COMMENT '污染判定：0 无污染 / 1 有污染；有污染即报废',
+    qualified TINYINT NOT NULL COMMENT '回收结论：1 合格（活率≥90% 且无污染）转可用并代次加 1 / 0 不合格报废',
+    generation_after INT NOT NULL COMMENT '回收后的单元代次：合格为原代次+1，不合格保持原代次',
+    unit_version_after INT NOT NULL COMMENT '回收后的酵母单元乐观版本（业务结论与版本结果同事务）',
+    recovered_at TIMESTAMP NOT NULL COMMENT '回收受理的业务时刻（精确时刻，幂等指纹组成部分）',
+    created_at TIMESTAMP NOT NULL COMMENT '记录创建时间',
+    CONSTRAINT uk_recovery_batch UNIQUE (batch_id),
+    CONSTRAINT fk_recovery_yeast FOREIGN KEY (yeast_unit_code) REFERENCES yeast_unit (unit_code),
+    CONSTRAINT fk_recovery_batch FOREIGN KEY (batch_id) REFERENCES fermentation_batch (id)
+) COMMENT '酵母回收记录：活率/污染判定与代次追溯，每批次唯一';

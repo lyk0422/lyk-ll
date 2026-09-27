@@ -18,6 +18,7 @@ import java.time.LocalDateTime;
  * @param maturationExtended     后熟是否已延长（仅允许一次）
  * @param judgedAt               最近一次判定时间，未判定为 null
  * @param transferredAt          清酒转出时间，未转出为 null
+ * @param yeastUnitCode          受控投酵绑定的酵母单元编号；未启用受控投酵的历史批次为 null
  */
 public record FermentationBatch(
         long id,
@@ -32,5 +33,6 @@ public record FermentationBatch(
         LocalDateTime maturationStartedAt,
         boolean maturationExtended,
         LocalDateTime judgedAt,
-        LocalDateTime transferredAt) {
+        LocalDateTime transferredAt,
+        String yeastUnitCode) {
 }

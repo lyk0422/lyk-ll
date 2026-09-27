@@ -85,7 +85,8 @@ public final class BatchDtos {
             LocalDateTime coolingStartedAt,
             LocalDateTime maturationStartedAt,
             LocalDateTime judgedAt,
-            LocalDateTime transferredAt) {
+            LocalDateTime transferredAt,
+            String yeastUnitCode) {
     }
 
     /** 温度采样响应。 */
