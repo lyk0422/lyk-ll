@@ -101,6 +101,20 @@ public class LevelReadingRepository {
         return times.isEmpty() ? null : times.get(0);
     }
 
+    /** 某站点在预降期内、指定时刻或之前最近一条液位值（强排切换安全校验用），无则 null。 */
+    public BigDecimal latestLevelAtOrBefore(String stationCode, Long pumpdownId,
+                                            LocalDateTime atOrBefore) {
+        List<BigDecimal> levels = jdbc.query(
+                """
+                SELECT level FROM level_reading
+                WHERE station_code = ? AND pumpdown_id = ? AND reading_time <= ?
+                ORDER BY reading_time DESC, id DESC LIMIT 1
+                """,
+                (rs, n) -> rs.getBigDecimal("level"),
+                stationCode, pumpdownId, atOrBefore);
+        return levels.isEmpty() ? null : levels.get(0);
+    }
+
     /** 复算：预降事件全部站点的水位曲线，按站点、时刻排序。 */
     public List<ReplayResult.LevelPoint> loadCurve(Long pumpdownId) {
         return jdbc.query(

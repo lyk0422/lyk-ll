@@ -20,6 +20,12 @@ import java.util.List;
 public abstract class AbstractIntegrationTest {
 
     private static final List<String> BUSINESS_TABLES = List.of(
+            "switch_gate_receipt",
+            "switch_gate_target",
+            "mode_switch_candidate",
+            "mode_trajectory",
+            "tide_reading",
+            "tide_control",
             "gate_opening_log",
             "pump_task",
             "pump_sequence",

@@ -23,9 +23,31 @@ public final class Fingerprints {
             }
             joined.append(parts[i] == null ? "" : parts[i].toString());
         }
+        return sha256Hex(joined.toString());
+    }
+
+    /**
+     * 结构化指纹：每个字段以“长度:内容”自描述编码后再拼接，null 记为 -1。
+     * 字段值本身含分隔符也不会与字段边界混淆，保证无歧义。
+     */
+    public static String structured(Object... parts) {
+        StringBuilder joined = new StringBuilder();
+        for (Object part : parts) {
+            String value = part == null ? null : part.toString();
+            if (value == null) {
+                joined.append("-1:");
+            } else {
+                joined.append(value.length()).append(':').append(value);
+            }
+            joined.append(';');
+        }
+        return sha256Hex(joined.toString());
+    }
+
+    private static String sha256Hex(String text) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(joined.toString().getBytes(StandardCharsets.UTF_8));
+            byte[] hash = digest.digest(text.getBytes(StandardCharsets.UTF_8));
             StringBuilder hex = new StringBuilder(hash.length * 2);
             for (byte b : hash) {
                 hex.append(String.format("%02x", b));

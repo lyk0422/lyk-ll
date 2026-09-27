@@ -39,4 +39,29 @@ class FingerprintsTest {
     void nullAndEmptyAreStable() {
         assertThat(Fingerprints.sha256("r", null)).isEqualTo(Fingerprints.sha256("r", (Object) null));
     }
+
+    @Test
+    void structured_sameParams_produceSameFingerprint() {
+        String a = Fingerprints.structured("req-1", "ZN", 1, t);
+        String b = Fingerprints.structured("req-1", "ZN", 1, t);
+        assertThat(a).isEqualTo(b).hasSize(64);
+    }
+
+    @Test
+    void structured_separatorInsideValue_staysUnambiguous() {
+        // 合法文本含分隔符：单字段 "a|b" 不得与两字段 "a","b" 混淆
+        assertThat(Fingerprints.structured("a|b")).isNotEqualTo(Fingerprints.structured("a", "b"));
+        // 字段边界移动：("ab", "c") 不得与 ("a", "bc") 混淆
+        assertThat(Fingerprints.structured("ab", "c")).isNotEqualTo(Fingerprints.structured("a", "bc"));
+        // 长度前缀样式文本本身作为字段值也不歧义
+        assertThat(Fingerprints.structured("1:a", "b")).isNotEqualTo(Fingerprints.structured("1:a;b"));
+    }
+
+    @Test
+    void structured_nullAndVersionAndCollectionParts_differentiate() {
+        String base = Fingerprints.structured("req-1", 7L, 1, t);
+        assertThat(Fingerprints.structured("req-1", 7L, 2, t)).isNotEqualTo(base);
+        assertThat(Fingerprints.structured("req-1", 7L, null, t)).isNotEqualTo(base);
+        assertThat(Fingerprints.structured("req-1", 7L, 1, t, "PS-01")).isNotEqualTo(base);
+    }
 }

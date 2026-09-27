@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS pump_sequence (
     pumpdown_id BIGINT NOT NULL COMMENT '所属预降事件ID',
     zone_code VARCHAR(32) NOT NULL COMMENT '流域分区代码',
     task_time TIMESTAMP NOT NULL COMMENT '序列联动时刻',
+    status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE' COMMENT '序列状态 ACTIVE生效中/TERMINATED已被强排切换终结',
+    terminated_at TIMESTAMP NULL COMMENT '被终结时刻，NULL表示仍生效',
     created_at TIMESTAMP NOT NULL COMMENT '序列创建时刻',
     CONSTRAINT uk_zone_time_sequence UNIQUE (pumpdown_id, zone_code, task_time)
 );
@@ -118,4 +120,75 @@ CREATE TABLE IF NOT EXISTS review_archive (
     request_id VARCHAR(64) NOT NULL UNIQUE COMMENT '归档请求ID',
     summary CLOB NOT NULL COMMENT '复盘摘要（曲线、启停序列、失联台账复算结果）',
     archived_at TIMESTAMP NOT NULL COMMENT '归档时刻'
+);
+
+-- ============ 潮汐顶托工况切换与强排联锁（合成数据，仅 JVM 内保留） ============
+
+-- 分区潮汐控制配置：顶托门槛与工况版本；未配置的分区保持原行为
+CREATE TABLE IF NOT EXISTS tide_control (
+    zone_code VARCHAR(32) PRIMARY KEY COMMENT '流域分区代码',
+    threshold DECIMAL(8,3) NOT NULL COMMENT '顶托门槛潮位（米，非负）：潮位>=门槛进入强排，恰等进入',
+    mode VARCHAR(16) NOT NULL DEFAULT 'NORMAL' COMMENT '当前工况 NORMAL常规/FORCED强排',
+    version INT NOT NULL COMMENT '工况版本：从1开始，每次成功变更（调门槛/工况切换）加1',
+    updated_at TIMESTAMP NOT NULL COMMENT '最近变更时刻（Asia/Shanghai）',
+    CONSTRAINT chk_tide_threshold CHECK (threshold >= 0)
+);
+
+-- 分区潮位数据：按分区+UTC采集时刻唯一，非负；迟到较旧数据只留证据不参与判定
+CREATE TABLE IF NOT EXISTS tide_reading (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '潮位数据ID',
+    zone_code VARCHAR(32) NOT NULL COMMENT '流域分区代码',
+    reading_time TIMESTAMP NOT NULL COMMENT '潮位采集时刻（UTC）',
+    level DECIMAL(8,3) NOT NULL COMMENT '潮位（米），非负',
+    late TINYINT NOT NULL COMMENT '是否迟到证据：1只留证据不让工况倒退 0正常参与判定',
+    received_at TIMESTAMP NOT NULL COMMENT '服务接收时刻（Asia/Shanghai）',
+    CONSTRAINT uk_zone_tide_time UNIQUE (zone_code, reading_time),
+    CONSTRAINT chk_tide_level CHECK (level >= 0)
+);
+
+-- 工况切换候选序列：潮位越限生成，固定潮位版本与全部相关站闸门目标
+CREATE TABLE IF NOT EXISTS mode_switch_candidate (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '切换候选ID',
+    zone_code VARCHAR(32) NOT NULL COMMENT '流域分区代码',
+    direction VARCHAR(16) NOT NULL COMMENT '切换方向 ENTER_FORCED进入强排/EXIT_FORCED退出强排',
+    tide_reading_id BIGINT NOT NULL COMMENT '触发潮位数据ID',
+    tide_time TIMESTAMP NOT NULL COMMENT '触发潮位时刻（UTC）',
+    tide_level DECIMAL(8,3) NOT NULL COMMENT '触发潮位（米）',
+    pinned_version INT NOT NULL COMMENT '生成时固定的分区工况版本',
+    status VARCHAR(16) NOT NULL COMMENT '状态 PENDING待确认/CONFIRMED已确认/SUPERSEDED已被取代',
+    created_at TIMESTAMP NOT NULL COMMENT '候选生成时刻（Asia/Shanghai）'
+);
+
+-- 候选固定的各站闸门目标（确认时逐站校验回执并按此写任务）
+CREATE TABLE IF NOT EXISTS switch_gate_target (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '闸门目标ID',
+    candidate_id BIGINT NOT NULL COMMENT '所属切换候选ID',
+    station_code VARCHAR(32) NOT NULL COMMENT '泵站代码',
+    target_opening DECIMAL(5,2) NOT NULL COMMENT '目标闸门开度（百分比，0-100）',
+    CONSTRAINT uk_candidate_station_target UNIQUE (candidate_id, station_code),
+    CONSTRAINT chk_target_opening CHECK (target_opening >= 0 AND target_opening <= 100)
+);
+
+-- 闸门合成到位回执：按候选+站点唯一，确认前必须齐全且与目标一致
+CREATE TABLE IF NOT EXISTS switch_gate_receipt (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '回执ID',
+    candidate_id BIGINT NOT NULL COMMENT '所属切换候选ID',
+    station_code VARCHAR(32) NOT NULL COMMENT '泵站代码',
+    opening DECIMAL(5,2) NOT NULL COMMENT '到位开度（百分比，0-100）',
+    received_at TIMESTAMP NOT NULL COMMENT '回执接收时刻（Asia/Shanghai）',
+    CONSTRAINT uk_candidate_station_receipt UNIQUE (candidate_id, station_code),
+    CONSTRAINT chk_receipt_opening CHECK (opening >= 0 AND opening <= 100)
+);
+
+-- 工况轨迹：每次成功切换一条，含切换前后工况与切换后版本
+CREATE TABLE IF NOT EXISTS mode_trajectory (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '轨迹ID',
+    zone_code VARCHAR(32) NOT NULL COMMENT '流域分区代码',
+    candidate_id BIGINT NOT NULL COMMENT '对应切换候选ID',
+    from_mode VARCHAR(16) NOT NULL COMMENT '切换前工况 NORMAL/FORCED',
+    to_mode VARCHAR(16) NOT NULL COMMENT '切换后工况 NORMAL/FORCED',
+    zone_version INT NOT NULL COMMENT '切换后的分区工况版本',
+    tide_time TIMESTAMP NOT NULL COMMENT '触发潮位时刻（UTC）',
+    switch_time TIMESTAMP NOT NULL COMMENT '各站任务生效时刻（Asia/Shanghai）',
+    created_at TIMESTAMP NOT NULL COMMENT '轨迹记录时刻（Asia/Shanghai）'
 );

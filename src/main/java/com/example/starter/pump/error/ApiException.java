@@ -29,6 +29,17 @@ public class ApiException extends RuntimeException {
         return new ApiException(HttpStatus.CONFLICT, "IDEMPOTENT_CONFLICT", message);
     }
 
+    /** 请求引用的对象不存在：404。 */
+    public static ApiStatusBuilder notFound(String code) {
+        return new ApiStatusBuilder(HttpStatus.NOT_FOUND, code);
+    }
+
+    /** 版本失配：409，消息中携带当前最新版本。 */
+    public static ApiException versionConflict(String code, int currentVersion, String message) {
+        return new ApiException(HttpStatus.CONFLICT, code,
+                message + "（当前版本: " + currentVersion + "）");
+    }
+
     /** 请求引用的数据不存在或状态非法：422。 */
     public static ApiStatusBuilder unprocessable(String code) {
         return new ApiStatusBuilder(HttpStatus.UNPROCESSABLE_ENTITY, code);

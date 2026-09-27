@@ -158,6 +158,32 @@ public class PumpTaskRepository {
         }
     }
 
+    /** 某泵站在指定时刻是否已存在启停任务（占用校验）。 */
+    public boolean taskExistsAt(String stationCode, LocalDateTime taskTime) {
+        Integer cnt = jdbc.queryForObject(
+                "SELECT COUNT(1) FROM pump_task WHERE station_code = ? AND task_time = ?",
+                Integer.class, stationCode, taskTime);
+        return cnt != null && cnt > 0;
+    }
+
+    /** 终结分区在指定预降事件下全部生效中的旧序列（强排切换原子启用新序列前调用）。 */
+    public void terminateActiveSequences(Long pumpdownId, String zoneCode,
+                                         LocalDateTime terminatedAt) {
+        jdbc.update(
+                """
+                UPDATE pump_sequence SET status = 'TERMINATED', terminated_at = ?
+                WHERE pumpdown_id = ? AND zone_code = ? AND status = 'ACTIVE'
+                """,
+                terminatedAt, pumpdownId, zoneCode);
+    }
+
+    /** 启用序列为当前生效序列（强排切换原子启用新序列）。 */
+    public void activateSequence(Long sequenceId) {
+        jdbc.update(
+                "UPDATE pump_sequence SET status = 'ACTIVE', terminated_at = NULL WHERE id = ?",
+                sequenceId);
+    }
+
     /** 复算：预降事件的启停序列（LEFT JOIN 闸门开度）。 */
     public List<ReplayResult.TaskItem> loadTasks(Long pumpdownId) {
         return jdbc.query(
