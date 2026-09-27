@@ -7,6 +7,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -19,6 +20,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.example.starter.error.ApiException;
+import com.example.starter.ground.GroundWireService;
 import com.example.starter.interlock.InterlockResult;
 import com.example.starter.interlock.InterlockService;
 import com.example.starter.ticket.TicketDtos.ArchiveRequest;
@@ -42,6 +44,9 @@ public class SwitchingOrderService {
 
     /** 操作票自预发起的有效期：24 小时，恰满即作废。 */
     public static final Duration VALIDITY = Duration.ofHours(24);
+
+    /** 送电类操作类型：确认时须在事务内重新检查间隔临时接地线均已拆除。 */
+    private static final Set<String> ENERGIZE_TYPES = Set.of("CLOSE_BREAKER", "CLOSE_DISCONNECTOR");
 
     private static final RowMapper<TicketRow> TICKET_MAPPER = (rs, rowNum) -> new TicketRow(
             rs.getLong("id"),
@@ -70,13 +75,15 @@ public class SwitchingOrderService {
     private final JdbcTemplate jdbc;
     private final Clock clock;
     private final InterlockService interlockService;
+    private final GroundWireService groundWireService;
     private final TransactionTemplate requiresNewTx;
 
     public SwitchingOrderService(JdbcTemplate jdbc, Clock businessClock, InterlockService interlockService,
-                                 PlatformTransactionManager txManager) {
+                                 GroundWireService groundWireService, PlatformTransactionManager txManager) {
         this.jdbc = jdbc;
         this.clock = businessClock;
         this.interlockService = interlockService;
+        this.groundWireService = groundWireService;
         this.requiresNewTx = new TransactionTemplate(txManager);
         this.requiresNewTx.setPropagationBehavior(
                 org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
@@ -148,6 +155,8 @@ public class SwitchingOrderService {
     public ConfirmView confirm(long ticketId, int seq, ConfirmStepRequest req) {
         TicketRow ticket = mustLoad(ticketId);
         refreshExpiry(ticket, true);
+        // 持票行锁：与临时接地线挂接/拆除互斥，保证送电门禁与挂接并发不双通
+        ticket = mustLoadForUpdate(ticketId);
         if (!"ISSUED".equals(ticket.status()) && !"EXECUTING".equals(ticket.status())) {
             throw ApiException.conflict("TICKET_STATE", "仅预发或执行中状态可执行步骤，当前状态: " + ticket.status());
         }
@@ -174,6 +183,10 @@ public class SwitchingOrderService {
             throw ApiException.conflict("INTERLOCK_BLOCKED",
                     interlock.detail() + " [" + interlock.ruleCode() + "]");
         }
+        // 送电门禁：事务内重新检查该间隔所有临时接地线均已拆除，不信任拟票时快照
+        if (ENERGIZE_TYPES.contains(step.operationType())) {
+            groundWireService.assertNoAttachedForInterval(ticket.intervalId(), ticketId, seq);
+        }
         Instant now = Instant.now(clock);
         jdbc.update("UPDATE switching_step SET status = 'DONE', operator_id = ?, guardian_id = ?, executed_at = ?"
                         + " WHERE id = ? AND status = 'PENDING'",
@@ -195,6 +208,8 @@ public class SwitchingOrderService {
         ticket = refreshExpiry(ticket, false);
         switch (ticket.status()) {
             case "ISSUED", "EXECUTING", "EXCEPTION", "EXPIRED" -> {
+                // 归档门禁：本票借用的临时接地线须全部归还核销
+                groundWireService.assertAllReturned(ticketId);
                 jdbc.update("UPDATE switching_ticket SET status = 'ARCHIVED', updated_at = ? WHERE id = ?",
                         Timestamp.from(Instant.now(clock)), ticketId);
                 releaseLock(ticket.intervalId(), ticketId);
@@ -286,6 +301,12 @@ public class SwitchingOrderService {
 
     private TicketRow mustLoad(long ticketId) {
         return jdbc.query("SELECT * FROM switching_ticket WHERE id = ?", TICKET_MAPPER, ticketId)
+                .stream().findFirst()
+                .orElseThrow(() -> ApiException.notFound("TICKET_NOT_FOUND", "操作票不存在: " + ticketId));
+    }
+
+    private TicketRow mustLoadForUpdate(long ticketId) {
+        return jdbc.query("SELECT * FROM switching_ticket WHERE id = ? FOR UPDATE", TICKET_MAPPER, ticketId)
                 .stream().findFirst()
                 .orElseThrow(() -> ApiException.notFound("TICKET_NOT_FOUND", "操作票不存在: " + ticketId));
     }

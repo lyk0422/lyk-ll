@@ -134,6 +134,53 @@ COMMENT ON COLUMN telemetry.state IS '回报状态：OPEN/CLOSED/APPLIED/REMOVED
 COMMENT ON COLUMN telemetry.late IS '是否迟到遥信（票已归档后到达，仅记录不处理）';
 COMMENT ON COLUMN telemetry.created_at IS '入库时刻（UTC）';
 
+CREATE TABLE IF NOT EXISTS ground_wire (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    wire_no          VARCHAR(32) NOT NULL,
+    status           VARCHAR(16) NOT NULL,
+    holder_ticket_id BIGINT,
+    interval_id      VARCHAR(64),
+    version          INT         NOT NULL DEFAULT 1,
+    created_at       TIMESTAMP   NOT NULL,
+    updated_at       TIMESTAMP   NOT NULL,
+    CONSTRAINT uk_ground_wire_no UNIQUE (wire_no)
+);
+COMMENT ON TABLE ground_wire IS '临时接地线实物台账：唯一编号、状态机与占用票，乐观版本从1起每次成功变更加1';
+COMMENT ON COLUMN ground_wire.id IS '主键，自增';
+COMMENT ON COLUMN ground_wire.wire_no IS '接地线唯一编号（合成数据）';
+COMMENT ON COLUMN ground_wire.status IS '状态：AVAILABLE可用/BORROWED借出/ATTACHED已挂接/DETACHED已拆除待归还';
+COMMENT ON COLUMN ground_wire.holder_ticket_id IS '当前占用操作票主键，归还核销后为空；同一实物最多被一张票占用';
+COMMENT ON COLUMN ground_wire.interval_id IS '借用绑定的间隔编号，归还核销后为空';
+COMMENT ON COLUMN ground_wire.version IS '乐观版本号，从1开始，每次成功状态变更加1';
+COMMENT ON COLUMN ground_wire.created_at IS '登记时刻（UTC）';
+COMMENT ON COLUMN ground_wire.updated_at IS '最近变更时刻（UTC）';
+
+CREATE TABLE IF NOT EXISTS ground_wire_event (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    wire_id     BIGINT       NOT NULL,
+    wire_no     VARCHAR(32)  NOT NULL,
+    ticket_id   BIGINT       NOT NULL,
+    action      VARCHAR(16)  NOT NULL,
+    step_seq    INT,
+    operator_id VARCHAR(64),
+    guardian_id VARCHAR(64),
+    keeper_id   VARCHAR(64),
+    occurred_at TIMESTAMP    NOT NULL,
+    created_at  TIMESTAMP    NOT NULL
+);
+COMMENT ON TABLE ground_wire_event IS '临时接地线操作证据表：借用/挂接/拆除/归还全程留痕，只插入不更新，不可覆盖';
+COMMENT ON COLUMN ground_wire_event.id IS '主键，自增';
+COMMENT ON COLUMN ground_wire_event.wire_id IS '接地线主键';
+COMMENT ON COLUMN ground_wire_event.wire_no IS '接地线唯一编号（冗余便于核对）';
+COMMENT ON COLUMN ground_wire_event.ticket_id IS '关联操作票主键';
+COMMENT ON COLUMN ground_wire_event.action IS '动作：BORROW借用/ATTACH挂接/DETACH拆除/RETURN归还核销';
+COMMENT ON COLUMN ground_wire_event.step_seq IS '挂接引用的本票步序，仅挂接动作有值，其余为空';
+COMMENT ON COLUMN ground_wire_event.operator_id IS '操作人编号，挂接/拆除双人确认时记录，其余为空';
+COMMENT ON COLUMN ground_wire_event.guardian_id IS '监护人编号，必须与操作人不同，挂接/拆除时记录，其余为空';
+COMMENT ON COLUMN ground_wire_event.keeper_id IS '仓管编号，归还核销时记录，其余为空';
+COMMENT ON COLUMN ground_wire_event.occurred_at IS '操作发生时刻（UTC，请求方提供的精确时刻）';
+COMMENT ON COLUMN ground_wire_event.created_at IS '记录入库时刻（UTC）';
+
 CREATE TABLE IF NOT EXISTS unlock_record (
     id           BIGINT AUTO_INCREMENT PRIMARY KEY,
     device_id    VARCHAR(64)  NOT NULL,
