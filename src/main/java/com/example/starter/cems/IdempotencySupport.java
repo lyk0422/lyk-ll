@@ -3,6 +3,7 @@ package com.example.starter.cems;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -12,8 +13,9 @@ import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
- * 幂等支持：指纹覆盖 requestId 与全部业务字段（按字段名排序后规范化），
+ * 幂等支持：指纹覆盖 requestId 与全部业务字段（按字段名排序后结构化 JSON 规范化再取 SHA-256），
  * 同键同参回放首次结果，同键异参由调用方抛出 409。
+ * 指纹为结构化 JSON：合法文本含分隔符（如 |、=、,）也按 JSON 字符串边界区分，无拼接歧义。
  */
 @Component
 public class IdempotencySupport {
@@ -24,16 +26,19 @@ public class IdempotencySupport {
         this.objectMapper = objectMapper;
     }
 
-    /** 计算 SHA-256 指纹：requestId + 按 key 排序后的业务字段。 */
+    /** 计算 SHA-256 指纹：requestId 与按 key 排序后的业务字段一起序列化为结构化 JSON 后取哈希。 */
     public String fingerprint(String requestId, Map<String, ?> businessFields) {
         Map<String, Object> sorted = new TreeMap<>();
         if (businessFields != null) {
             sorted.putAll(businessFields);
         }
-        String canonical = "requestId=" + nullToEmpty(requestId) + "|" + sorted;
+        Map<String, Object> canonical = new LinkedHashMap<>();
+        canonical.put("requestId", nullToEmpty(requestId));
+        canonical.put("fields", sorted);
+        String canonicalJson = toJson(canonical);
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(canonical.getBytes(StandardCharsets.UTF_8));
+            byte[] hash = digest.digest(canonicalJson.getBytes(StandardCharsets.UTF_8));
             StringBuilder hex = new StringBuilder(hash.length * 2);
             for (byte b : hash) {
                 hex.append(String.format("%02x", b));

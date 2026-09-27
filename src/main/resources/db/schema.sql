@@ -126,3 +126,126 @@ CREATE TABLE IF NOT EXISTS idempotent_request (
     CONSTRAINT pk_idempotent_request PRIMARY KEY (request_id)
 );
 COMMENT ON COLUMN idempotent_request.fingerprint IS '请求指纹：SHA-256( requestId + 全部业务字段 )，同键同参回放首次结果，同键异参返回 409';
+
+-- ================= 雨季溢流证据与双口径统计（cems-02 新增，合成数据，不用于生产） =================
+-- 溢流证据独立留痕：原排放浓度读数、超标链与限排令记录不因溢流标记而改变。
+
+CREATE TABLE IF NOT EXISTS overflow_permit (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    outlet_code         VARCHAR(64)  NOT NULL,
+    version             INT          NOT NULL,
+    window_start_utc    TIMESTAMP    NOT NULL,
+    window_end_utc      TIMESTAMP    NOT NULL,
+    min_rainfall_mm     DECIMAL(18,4) NOT NULL,
+    max_consecutive_hours INT        NOT NULL,
+    status              VARCHAR(16)  NOT NULL,
+    created_at          TIMESTAMP    NOT NULL,
+    CONSTRAINT uk_overflow_permit_version UNIQUE (outlet_code, version)
+);
+COMMENT ON COLUMN overflow_permit.outlet_code IS '排口编码，关联 discharge_outlet.outlet_code';
+COMMENT ON COLUMN overflow_permit.version IS '许可版本号：从 1 开始，每次成功变更加 1；同排口内唯一';
+COMMENT ON COLUMN overflow_permit.window_start_utc IS 'UTC 半开适用窗口起点（含本时刻），秒级精确时刻';
+COMMENT ON COLUMN overflow_permit.window_end_utc IS 'UTC 半开适用窗口终点（不含本时刻）';
+COMMENT ON COLUMN overflow_permit.min_rainfall_mm IS '最低小时雨量门槛，单位 mm；恰等门槛合法';
+COMMENT ON COLUMN overflow_permit.max_consecutive_hours IS '允许的最大连续溢流小时数；连续段严格超过即专项异常';
+COMMENT ON COLUMN overflow_permit.status IS '许可状态：ACTIVE 现行 / SUPERSEDED 已被新版本取代';
+COMMENT ON COLUMN overflow_permit.created_at IS '创建时刻（Asia/Shanghai 本地时间，由应用时钟写入）';
+
+CREATE TABLE IF NOT EXISTS overflow_hour (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    outlet_code     VARCHAR(64)  NOT NULL,
+    hour_utc        TIMESTAMP    NOT NULL,
+    rainfall_mm     DECIMAL(18,4),
+    overflow_flag   BOOLEAN      NOT NULL,
+    avg_value       DECIMAL(18,4) NOT NULL,
+    mark_status     VARCHAR(16)  NOT NULL,
+    permit_version  INT,
+    created_at      TIMESTAMP    NOT NULL,
+    updated_at      TIMESTAMP    NOT NULL,
+    CONSTRAINT uk_overflow_hour UNIQUE (outlet_code, hour_utc)
+);
+COMMENT ON COLUMN overflow_hour.hour_utc IS 'UTC 整点时刻（分秒必须为 0），排口＋整点唯一';
+COMMENT ON COLUMN overflow_hour.rainfall_mm IS '该小时雨量，单位 mm；NULL 表示缺雨量（只能待核，不当零也不豁免）';
+COMMENT ON COLUMN overflow_hour.overflow_flag IS '该小时是否发生溢流（合成标记）';
+COMMENT ON COLUMN overflow_hour.avg_value IS '该小时排放浓度均值，单位 mg/L（合成数据）；原浓度记录永远保留';
+COMMENT ON COLUMN overflow_hour.mark_status IS '溢流标记状态：PENDING 待核（缺雨量）/ COMPLIANT 合规溢流（证据齐全）/ NORMAL 非合规溢流或普通小时';
+COMMENT ON COLUMN overflow_hour.permit_version IS '判定合规溢流时所用许可版本；非合规标记为 NULL';
+COMMENT ON COLUMN overflow_hour.created_at IS '创建时刻（Asia/Shanghai 本地时间）';
+COMMENT ON COLUMN overflow_hour.updated_at IS '最近更新时刻（Asia/Shanghai 本地时间）';
+
+CREATE TABLE IF NOT EXISTS overflow_counter (
+    outlet_code      VARCHAR(64) PRIMARY KEY,
+    rainfall_version INT          NOT NULL,
+    updated_at       TIMESTAMP    NOT NULL
+);
+COMMENT ON COLUMN overflow_counter.rainfall_version IS '雨量版本号：首次上报小时数据置 1，每次成功雨量更正/调差加 1；无记录表示尚无雨量数据';
+COMMENT ON COLUMN overflow_counter.updated_at IS '最近变更时刻（Asia/Shanghai 本地时间）';
+
+CREATE TABLE IF NOT EXISTS overflow_review (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    outlet_code      VARCHAR(64)  NOT NULL,
+    day_utc          DATE         NOT NULL,
+    permit_version   INT,
+    rainfall_version INT          NOT NULL,
+    normal_avg       DECIMAL(18,4),
+    normal_count     INT          NOT NULL,
+    all_avg          DECIMAL(18,4),
+    all_count        INT          NOT NULL,
+    missing_count    INT          NOT NULL,
+    status           VARCHAR(16)  NOT NULL,
+    frozen_at        TIMESTAMP    NOT NULL,
+    request_id       VARCHAR(80),
+    CONSTRAINT uk_overflow_review UNIQUE (outlet_code, day_utc)
+);
+COMMENT ON COLUMN overflow_review.day_utc IS 'UTC 日结日期；同排口每日仅可冻结一次';
+COMMENT ON COLUMN overflow_review.permit_version IS '冻结时现行溢流许可版本；无许可为 NULL';
+COMMENT ON COLUMN overflow_review.rainfall_version IS '冻结时雨量版本号；无雨量数据记 0';
+COMMENT ON COLUMN overflow_review.normal_avg IS '正常排放均值（mg/L）：仅排除证据齐全的合规溢流小时；空集合为 NULL（无结果而非零）';
+COMMENT ON COLUMN overflow_review.normal_count IS '正常排放口径分母（计入小时数）';
+COMMENT ON COLUMN overflow_review.all_avg IS '全部排放均值（mg/L）：不排除任何已上报小时；空集合为 NULL';
+COMMENT ON COLUMN overflow_review.all_count IS '全部排放口径分母（计入小时数）';
+COMMENT ON COLUMN overflow_review.missing_count IS '当日缺点数：UTC 日内无小时数据的整点数';
+COMMENT ON COLUMN overflow_review.status IS '快照状态：FROZEN 已冻结（冻结后只能独立调差，不改本快照）';
+COMMENT ON COLUMN overflow_review.frozen_at IS '冻结时刻（Asia/Shanghai 本地时间）';
+COMMENT ON COLUMN overflow_review.request_id IS '冻结请求的幂等键';
+
+CREATE TABLE IF NOT EXISTS overflow_adjustment (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    outlet_code      VARCHAR(64)  NOT NULL,
+    day_utc          DATE         NOT NULL,
+    hour_utc         TIMESTAMP    NOT NULL,
+    old_rainfall_mm  DECIMAL(18,4),
+    new_rainfall_mm  DECIMAL(18,4) NOT NULL,
+    rainfall_version INT          NOT NULL,
+    request_id       VARCHAR(80),
+    created_at       TIMESTAMP    NOT NULL
+);
+COMMENT ON COLUMN overflow_adjustment.day_utc IS '所属已冻结 UTC 日结日期';
+COMMENT ON COLUMN overflow_adjustment.hour_utc IS '被调差的 UTC 整点';
+COMMENT ON COLUMN overflow_adjustment.old_rainfall_mm IS '调差前雨量（mm）；NULL 表示原缺雨量';
+COMMENT ON COLUMN overflow_adjustment.new_rainfall_mm IS '调差后雨量（mm）';
+COMMENT ON COLUMN overflow_adjustment.rainfall_version IS '本次调差后的雨量版本号';
+COMMENT ON COLUMN overflow_adjustment.request_id IS '调差请求的幂等键';
+COMMENT ON COLUMN overflow_adjustment.created_at IS '调差登记时刻（Asia/Shanghai 本地时间）；独立调差不改日结快照';
+
+CREATE TABLE IF NOT EXISTS overflow_anomaly (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    outlet_code       VARCHAR(64)  NOT NULL,
+    segment_start_utc TIMESTAMP    NOT NULL,
+    segment_end_utc   TIMESTAMP    NOT NULL,
+    hour_count        INT          NOT NULL,
+    max_allowed       INT          NOT NULL,
+    permit_version    INT          NOT NULL,
+    reason            VARCHAR(255) NOT NULL,
+    status            VARCHAR(16)  NOT NULL,
+    created_at        TIMESTAMP    NOT NULL,
+    CONSTRAINT uk_overflow_anomaly UNIQUE (outlet_code, segment_start_utc, segment_end_utc)
+);
+COMMENT ON COLUMN overflow_anomaly.segment_start_utc IS '连续合规溢流段起点（UTC 整点，含）；跨许可版本或出现缺点必须断段';
+COMMENT ON COLUMN overflow_anomaly.segment_end_utc IS '连续合规溢流段终点（UTC 整点，不含）';
+COMMENT ON COLUMN overflow_anomaly.hour_count IS '该连续段小时数（严格超过许可最长连续小时数才登记）';
+COMMENT ON COLUMN overflow_anomaly.max_allowed IS '判定所用许可允许的最大连续溢流小时数';
+COMMENT ON COLUMN overflow_anomaly.permit_version IS '该段所用溢流许可版本';
+COMMENT ON COLUMN overflow_anomaly.reason IS '专项异常原因说明';
+COMMENT ON COLUMN overflow_anomaly.status IS '异常状态：OPEN 待处置 / CLOSED 已处置';
+COMMENT ON COLUMN overflow_anomaly.created_at IS '登记时刻（Asia/Shanghai 本地时间）';

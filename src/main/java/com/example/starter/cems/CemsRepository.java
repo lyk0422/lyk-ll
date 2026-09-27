@@ -361,4 +361,13 @@ public class CemsRepository {
         jdbc.update("UPDATE idempotent_request SET result_json = ? WHERE request_id = ?",
                 resultJson, requestId);
     }
+
+    /**
+     * 排口行锁（SELECT ... FOR UPDATE）：溢流标记写路径与日结冻结在同一事务内先取锁，
+     * 保证“标记与日结竞争”时冻结到一致的双口径快照。
+     */
+    public void lockOutlet(String code) {
+        jdbc.queryForList("SELECT outlet_code FROM discharge_outlet WHERE outlet_code = ? FOR UPDATE",
+                String.class, code);
+    }
 }
