@@ -15,3 +15,9 @@ MERGE INTO device_state (device_id, interval_id, device_type, state, updated_at)
     ('BUS-1', 'BUS-1', 'BUS', 'ENERGIZED', TIMESTAMP '2026-01-01 00:00:00'),
     ('BR-F1', 'BUS-1', 'BREAKER', 'CLOSED', TIMESTAMP '2026-01-01 00:00:00'),
     ('BR-F2', 'BUS-1', 'BREAKER', 'CLOSED', TIMESTAMP '2026-01-01 00:00:00');
+
+-- 合成接地线实物台账（编号唯一，初始均在库可用）
+MERGE INTO ground_wire (wire_no, status, version, created_at, updated_at) KEY(wire_no) VALUES
+    ('GW-SYN-001', 'AVAILABLE', 1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00'),
+    ('GW-SYN-002', 'AVAILABLE', 1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00'),
+    ('GW-SYN-003', 'AVAILABLE', 1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00');

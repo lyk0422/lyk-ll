@@ -87,6 +87,14 @@ class SwitchingOrderIntegrationTest {
         jdbc.update("DELETE FROM interval_execution_lock");
         jdbc.update("DELETE FROM telemetry");
         jdbc.update("DELETE FROM unlock_record");
+        jdbc.update("DELETE FROM ground_wire_operation");
+        jdbc.update("DELETE FROM ground_wire_borrow");
+        jdbc.update("DELETE FROM ground_wire");
+        // 恢复合成接地线实物台账初始状态
+        jdbc.update("INSERT INTO ground_wire (wire_no, status, version, created_at, updated_at) VALUES"
+                + " ('GW-SYN-001','AVAILABLE',1,TIMESTAMP '2026-01-01 00:00:00',TIMESTAMP '2026-01-01 00:00:00'),"
+                + " ('GW-SYN-002','AVAILABLE',1,TIMESTAMP '2026-01-01 00:00:00',TIMESTAMP '2026-01-01 00:00:00'),"
+                + " ('GW-SYN-003','AVAILABLE',1,TIMESTAMP '2026-01-01 00:00:00',TIMESTAMP '2026-01-01 00:00:00')");
         // 恢复合成设备初始状态
         jdbc.update("UPDATE device_state SET state = 'CLOSED', updated_at = TIMESTAMP '2026-01-01 00:00:00'"
                 + " WHERE device_id IN ('BR-1101','DS-1101','BR-F1','BR-F2')");

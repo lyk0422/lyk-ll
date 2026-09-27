@@ -7,6 +7,7 @@ import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.function.Supplier;
 
 import org.springframework.dao.DuplicateKeyException;
@@ -41,6 +42,32 @@ public class IdempotencyService {
         for (String field : businessFields) {
             sb.append('|').append(field == null ? "" : field);
         }
+        return sha256(sb);
+    }
+
+    /**
+     * 结构化指纹：对字段做长度前缀编码（TLV 风格），字段数与每个字段的长度均入摘要，
+     * 合法文本即使包含分隔符 '|' 也无法伪造字段边界，杜绝 ["a|b", "c"] 与 ["a", "b|c"] 碰撞。
+     *
+     * @param endpoint 接口标识
+     * @param fields   参与摘要的有序业务字段（含 requestId、版本、集合、精确时刻）
+     * @return SHA-256 十六进制摘要
+     */
+    public static String structuredFingerprint(String endpoint, List<String> fields) {
+        StringBuilder sb = new StringBuilder(endpoint).append('|').append(fields.size());
+        for (String field : fields) {
+            sb.append('|');
+            if (field == null) {
+                // 空值用 -1: 表示，空字符串为 0:，二者编码不同
+                sb.append("-1:");
+            } else {
+                sb.append(field.length()).append(':').append(field);
+            }
+        }
+        return sha256(sb);
+    }
+
+    private static String sha256(StringBuilder sb) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             return HexFormat.of().formatHex(digest.digest(sb.toString().getBytes(StandardCharsets.UTF_8)));

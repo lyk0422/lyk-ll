@@ -19,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.example.starter.error.ApiException;
+import com.example.starter.groundwire.GroundWireService;
 import com.example.starter.interlock.InterlockResult;
 import com.example.starter.interlock.InterlockService;
 import com.example.starter.ticket.TicketDtos.ArchiveRequest;
@@ -70,13 +71,15 @@ public class SwitchingOrderService {
     private final JdbcTemplate jdbc;
     private final Clock clock;
     private final InterlockService interlockService;
+    private final GroundWireService groundWireService;
     private final TransactionTemplate requiresNewTx;
 
     public SwitchingOrderService(JdbcTemplate jdbc, Clock businessClock, InterlockService interlockService,
-                                 PlatformTransactionManager txManager) {
+                                 GroundWireService groundWireService, PlatformTransactionManager txManager) {
         this.jdbc = jdbc;
         this.clock = businessClock;
         this.interlockService = interlockService;
+        this.groundWireService = groundWireService;
         this.requiresNewTx = new TransactionTemplate(txManager);
         this.requiresNewTx.setPropagationBehavior(
                 org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
@@ -168,11 +171,29 @@ public class SwitchingOrderService {
         if (nextSeq == null || nextSeq != seq) {
             throw ApiException.conflict("STEP_ORDER", "须逐项执行，当前应执行步序: " + nextSeq);
         }
+        if (("APPLY_GROUND".equals(step.operationType()) || "REMOVE_GROUND".equals(step.operationType()))
+                && isPhysicalGroundWire(step.deviceId())) {
+            // 实物台账接地线必须走借用/挂接/拆除双确认接口，普通步确认不得绕过实物联锁
+            throw ApiException.unprocessable("PHYSICAL_GROUND_WIRE_STEP",
+                    "设备 " + step.deviceId() + " 为实物台账接地线，须经借用与挂接/拆除双确认接口执行，"
+                            + "不得直接确认步序");
+        }
         InterlockResult interlock = interlockService.evaluate(step.operationType(), step.deviceId());
         if (interlock.blocked()) {
             interlockService.recordHit(ticketId, seq, interlock.ruleCode(), interlock.detail());
             throw ApiException.conflict("INTERLOCK_BLOCKED",
                     interlock.detail() + " [" + interlock.ruleCode() + "]");
+        }
+        if ("CLOSE_BREAKER".equals(step.operationType())) {
+            // 送电类步实物联锁：事务内重新检查该间隔所有借用接地线均已拆除，
+            // 不信任拟票时快照；行锁与挂接操作串行，任何仍挂接者拒绝且步序不前进
+            List<String> appliedWires = groundWireService.findAppliedWiresForEnergize(ticket.intervalId());
+            if (!appliedWires.isEmpty()) {
+                String detail = "带地线送电：间隔 " + ticket.intervalId() + " 挂接接地线 " + appliedWires
+                        + " 尚未拆除，实物联锁拦截送电";
+                interlockService.recordHit(ticketId, seq, "GROUNDED_ENERGIZE", detail);
+                throw ApiException.unprocessable("GROUND_WIRE_STILL_APPLIED", detail);
+            }
         }
         Instant now = Instant.now(clock);
         jdbc.update("UPDATE switching_step SET status = 'DONE', operator_id = ?, guardian_id = ?, executed_at = ?"
@@ -195,6 +216,12 @@ public class SwitchingOrderService {
         ticket = refreshExpiry(ticket, false);
         switch (ticket.status()) {
             case "ISSUED", "EXECUTING", "EXCEPTION", "EXPIRED" -> {
+                // 归档要求本票借用接地线全部归还核销，历史借用与解锁记录保留
+                List<String> openWires = groundWireService.openWireNosForTicket(ticketId);
+                if (!openWires.isEmpty()) {
+                    throw ApiException.unprocessable("GROUND_WIRE_NOT_RETURNED",
+                            "本票借用接地线尚未全部归还，禁止归档，未归还编号: " + openWires);
+                }
                 jdbc.update("UPDATE switching_ticket SET status = 'ARCHIVED', updated_at = ? WHERE id = ?",
                         Timestamp.from(Instant.now(clock)), ticketId);
                 releaseLock(ticket.intervalId(), ticketId);
@@ -282,6 +309,13 @@ public class SwitchingOrderService {
     private void releaseLock(String intervalId, long ticketId) {
         jdbc.update("DELETE FROM interval_execution_lock WHERE interval_id = ? AND ticket_id = ?",
                 intervalId, ticketId);
+    }
+
+    /** 设备编号是否为实物台账中登记的合成接地线（区分旧流程中仅在 device_state 的接地线设备）。 */
+    private boolean isPhysicalGroundWire(String deviceId) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ground_wire WHERE wire_no = ?", Integer.class, deviceId);
+        return count != null && count > 0;
     }
 
     private TicketRow mustLoad(long ticketId) {

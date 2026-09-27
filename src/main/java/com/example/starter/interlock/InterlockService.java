@@ -65,6 +65,13 @@ public class InterlockService {
         if (intervalId == null) {
             return InterlockResult.pass();
         }
+        return evaluateInInterval(operationType, intervalId);
+    }
+
+    /**
+     * 按间隔评估一步操作是否被闭锁（实物接地线挂接时按借用绑定间隔评估，不依赖设备台账行）。
+     */
+    public InterlockResult evaluateInInterval(String operationType, String intervalId) {
         return switch (operationType) {
             case "OPEN_DISCONNECTOR", "CLOSE_DISCONNECTOR" -> checkLoadDisconnector(intervalId);
             case "APPLY_GROUND" -> checkLiveGround(intervalId);
