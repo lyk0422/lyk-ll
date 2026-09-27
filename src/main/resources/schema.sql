@@ -69,6 +69,47 @@ CREATE TABLE IF NOT EXISTS late_event (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录时间'
 ) COMMENT='归档后迟到位移事件';
 
+CREATE TABLE IF NOT EXISTS rainfall_hourly (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '雨量记录主键',
+    zone_id BIGINT NOT NULL COMMENT '所属测区',
+    hour_start TIMESTAMP NOT NULL COMMENT '小时起点，UTC整点（Asia/Shanghai为UTC+8整时偏移，本地整点即UTC整点）；与测区联合唯一',
+    rainfall_mm DOUBLE NOT NULL COMMENT '合成小时雨量，单位毫米；有限非负，缺数据不得当零',
+    version INT NOT NULL COMMENT '记录版本，从1开始；每次显式更正加1',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    CONSTRAINT uk_rainfall_hourly_zone_hour UNIQUE (zone_id, hour_start)
+) COMMENT='合成雨量小时数据';
+
+CREATE TABLE IF NOT EXISTS threshold_strategy (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '策略版本主键',
+    zone_id BIGINT NOT NULL COMMENT '所属测区',
+    version INT NOT NULL COMMENT '策略版本，测区内从1开始递增；发布携带expectedVersion乐观并发',
+    yellow_hourly_rate DOUBLE NOT NULL COMMENT '黄色预警基础小时速率阈值，单位毫米/小时；须满足0<黄<红，恰等判正常',
+    red_daily_rate DOUBLE NOT NULL COMMENT '红色报警基础日速率阈值，单位毫米/天；须满足0<黄<红，恰等判正常',
+    rainfall_24h_threshold DOUBLE NOT NULL COMMENT '24小时雨量门槛，单位毫米；前24个完整小时累计雨量达到（含恰等）即启用折减',
+    reduction_factor DOUBLE NOT NULL COMMENT '折减系数，0<系数<=1；雨量达门槛时有效阈值=基础阈值×系数',
+    submitted_at TIMESTAMP NOT NULL COMMENT '策略提交时刻（请求报文业务时间）',
+    effective_from TIMESTAMP NOT NULL COMMENT '生效时刻，不得早于提交时刻；仅影响之后读数的评价，不重算已归档告警或撤人证据',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    CONSTRAINT uk_threshold_strategy_zone_version UNIQUE (zone_id, version)
+) COMMENT='阈值策略版本';
+
+CREATE TABLE IF NOT EXISTS resumption_evidence (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '证据主键',
+    assessment_id BIGINT NOT NULL COMMENT '所属复工评估',
+    chain_id BIGINT NOT NULL COMMENT '所属处置链',
+    zone_id BIGINT NOT NULL COMMENT '所属测区',
+    phase VARCHAR(16) NOT NULL COMMENT '证据阶段：APPLY申请评估、APPROVE批准复核',
+    evaluated_at TIMESTAMP NOT NULL COMMENT '评价时刻（安全窗口右端，取复工申请时刻）',
+    window_start TIMESTAMP NOT NULL COMMENT '安全连续计时窗口起点；策略变严后自版本生效时刻重新累计',
+    reading_count INT NOT NULL COMMENT '窗口内参与判定的读数条数',
+    strategy_version INT NULL COMMENT '评价时刻生效的策略版本；无策略为NULL',
+    rainfall_24h_mm DOUBLE NULL COMMENT '评价时刻前24个完整小时累计雨量，单位毫米；无策略为NULL，缺点不冻结',
+    reduction_applied BOOLEAN NOT NULL DEFAULT FALSE COMMENT '评价时刻是否启用雨量折减',
+    result VARCHAR(16) NOT NULL COMMENT '评价结论：SAFE满足安全连续24小时',
+    detail CLOB NOT NULL COMMENT '逐读数判定明细JSON（冻结证据：时刻、小时速率、有效安全阈值、策略版本、24小时雨量、是否折减）',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间'
+) COMMENT='复工安全评价冻结证据';
+
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id VARCHAR(128) PRIMARY KEY COMMENT '幂等键，来自请求requestId',
     endpoint VARCHAR(128) NOT NULL COMMENT '受理端点',

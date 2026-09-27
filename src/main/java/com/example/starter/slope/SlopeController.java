@@ -3,13 +3,19 @@ package com.example.starter.slope;
 import com.example.starter.slope.dto.ApiDtos.ArchiveRequest;
 import com.example.starter.slope.dto.ApiDtos.ChainDetailResponse;
 import com.example.starter.slope.dto.ApiDtos.CreateZoneRequest;
+import com.example.starter.slope.dto.ApiDtos.EffectiveThresholdResponse;
 import com.example.starter.slope.dto.ApiDtos.EvacuationConfirmRequest;
 import com.example.starter.slope.dto.ApiDtos.IngestReadingRequest;
 import com.example.starter.slope.dto.ApiDtos.LateEventItem;
+import com.example.starter.slope.dto.ApiDtos.PublishStrategyRequest;
+import com.example.starter.slope.dto.ApiDtos.RainfallHourRequest;
 import com.example.starter.slope.dto.ApiDtos.RateCurveResponse;
 import com.example.starter.slope.dto.ApiDtos.ResumptionApplyRequest;
 import com.example.starter.slope.dto.ApiDtos.ResumptionConfirmRequest;
+import com.example.starter.slope.dto.ApiDtos.ResumptionEvidenceItem;
+import com.example.starter.slope.dto.ApiDtos.StrategyInfo;
 import jakarta.validation.Valid;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -17,8 +23,10 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -82,6 +90,35 @@ public class SlopeController {
     @GetMapping("/zones/{zoneId}/late-events")
     public List<LateEventItem> lateEvents(@PathVariable long zoneId) {
         return slopeService.lateEvents(zoneId);
+    }
+
+    @PostMapping("/zones/{zoneId}/rainfall-hours")
+    public ResponseEntity<String> submitRainfallHour(@PathVariable long zoneId,
+                                                     @Valid @RequestBody RainfallHourRequest request) {
+        return stored(slopeService.submitRainfallHour(zoneId, request));
+    }
+
+    @PostMapping("/zones/{zoneId}/strategies")
+    public ResponseEntity<String> publishStrategy(@PathVariable long zoneId,
+                                                  @Valid @RequestBody PublishStrategyRequest request) {
+        return stored(slopeService.publishStrategy(zoneId, request));
+    }
+
+    @GetMapping("/zones/{zoneId}/strategies")
+    public List<StrategyInfo> listStrategies(@PathVariable long zoneId) {
+        return slopeService.listStrategies(zoneId);
+    }
+
+    @GetMapping("/zones/{zoneId}/effective-thresholds")
+    public EffectiveThresholdResponse effectiveThresholds(
+            @PathVariable long zoneId,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime at) {
+        return slopeService.effectiveThresholds(zoneId, at);
+    }
+
+    @GetMapping("/chains/{chainId}/resumption-evidence")
+    public List<ResumptionEvidenceItem> resumptionEvidence(@PathVariable long chainId) {
+        return slopeService.resumptionEvidence(chainId);
     }
 
     private ResponseEntity<String> stored(IdempotencyService.Stored result) {
