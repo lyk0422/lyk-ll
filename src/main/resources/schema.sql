@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS resumption_assessment (
     applied_at TIMESTAMP NOT NULL COMMENT '复工申请时刻；须不早于红色预警触发后24小时（恰满24小时允许）',
     site_check_confirmed BOOLEAN NOT NULL DEFAULT FALSE COMMENT '现场核查是否已确认',
     monitoring_review_confirmed BOOLEAN NOT NULL DEFAULT FALSE COMMENT '监测复核是否已确认',
+    site_check_confirmed_at TIMESTAMP NULL COMMENT '现场核查确认时刻（Asia/Shanghai）；NULL表示未确认，复工冻结证据原样记录',
+    monitoring_review_confirmed_at TIMESTAMP NULL COMMENT '监测复核确认时刻（Asia/Shanghai）；NULL表示未确认，复工冻结证据原样记录',
     status VARCHAR(16) NOT NULL DEFAULT 'APPLIED' COMMENT '评估状态：APPLIED已申请、APPROVED双确认通过已批准',
     approved_at TIMESTAMP NULL COMMENT '批准时刻（第二个确认到达时刻）；NULL表示未批准',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间'
@@ -68,6 +70,46 @@ CREATE TABLE IF NOT EXISTS late_event (
     reason VARCHAR(128) NOT NULL COMMENT '迟到原因，如ARCHIVED_LATE_DATA（归档后迟到位移）',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录时间'
 ) COMMENT='归档后迟到位移事件';
+
+CREATE TABLE IF NOT EXISTS rainfall_hour (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '小时雨量主键',
+    zone_id BIGINT NOT NULL COMMENT '所属测区',
+    hour_utc TIMESTAMP NOT NULL COMMENT '雨量小时起点（UTC整点）；与测区联合唯一，评价时按Asia/Shanghai时刻换算到UTC取点',
+    rain_mm DOUBLE NOT NULL COMMENT '该小时降雨量，单位毫米；有限且非负',
+    version INT NOT NULL COMMENT '小时数据版本，从1开始；同小时异值显式更正成功后加1',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次写入时间',
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最近更正时间',
+    CONSTRAINT uk_rainfall_hour_zone_hour UNIQUE (zone_id, hour_utc)
+) COMMENT='合成小时雨量（UTC整点，仅JVM内存合成数据）';
+
+CREATE TABLE IF NOT EXISTS threshold_policy_version (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '策略版本主键',
+    zone_id BIGINT NOT NULL COMMENT '所属测区',
+    version INT NOT NULL COMMENT '策略版本号，测区内从1开始；发布成功加1，发布须携带expectedVersion',
+    yellow_hourly_rate DOUBLE NOT NULL COMMENT '黄色预警小时速率基础阈值，单位毫米/小时；要求0<黄<红，恰等判正常',
+    red_daily_rate DOUBLE NOT NULL COMMENT '红色报警日速率基础阈值，单位毫米/天；要求严格大于黄色阈值',
+    rain_gate_mm DOUBLE NOT NULL COMMENT '近24个完整小时累计雨量门槛，单位毫米；累计雨量恰达该值即启用折减',
+    reduction_factor DOUBLE NOT NULL COMMENT '折减系数，取值(0,1]；启用折减后阈值=基础阈值×系数',
+    submitted_at TIMESTAMP NOT NULL COMMENT '策略提交时刻（Asia/Shanghai业务时间）',
+    effective_at TIMESTAMP NOT NULL COMMENT '策略生效时刻（Asia/Shanghai）；不得早于提交时刻，仅影响该时刻及之后的读数评价',
+    tightened_from_previous BOOLEAN NOT NULL COMMENT '相对上一版本是否变严：黄色/红色基础阈值降低或折减系数变小为TRUE；变宽为FALSE，变宽不撤销既有红色处置链',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '写入时间',
+    CONSTRAINT uk_threshold_policy_zone_version UNIQUE (zone_id, version)
+) COMMENT='雨量联动阈值策略版本';
+
+CREATE TABLE IF NOT EXISTS resumption_evidence (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '复工证据主键',
+    assessment_id BIGINT NOT NULL COMMENT '所属复工评估；一次批准仅一条冻结证据',
+    chain_id BIGINT NOT NULL COMMENT '所属处置链',
+    zone_id BIGINT NOT NULL COMMENT '所属测区',
+    frozen_at TIMESTAMP NOT NULL COMMENT '证据冻结时刻（第二次复工确认的confirmedAt，Asia/Shanghai）',
+    window_start TIMESTAMP NOT NULL COMMENT '安全连续计时起点：红色触发时刻，或窗口内最近一次变严策略的生效时刻',
+    window_end TIMESTAMP NOT NULL COMMENT '证据评价截止时刻（批准时刻）',
+    last_tightened_at TIMESTAMP NULL COMMENT '窗口内最近一次策略变严生效时刻；NULL表示窗口内未发生变严切换',
+    evidence_json CLOB NOT NULL COMMENT '冻结的一致证据快照（结构化JSON）：逐时刻实际有效阈值、24小时雨量与折减、双确认结果',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '写入时间',
+    CONSTRAINT uk_resumption_evidence_assessment UNIQUE (assessment_id)
+) COMMENT='复工批准冻结的一致证据';
 
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id VARCHAR(128) PRIMARY KEY COMMENT '幂等键，来自请求requestId',
