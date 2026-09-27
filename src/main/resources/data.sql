@@ -15,3 +15,10 @@ MERGE INTO device_state (device_id, interval_id, device_type, state, updated_at)
     ('BUS-1', 'BUS-1', 'BUS', 'ENERGIZED', TIMESTAMP '2026-01-01 00:00:00'),
     ('BR-F1', 'BUS-1', 'BREAKER', 'CLOSED', TIMESTAMP '2026-01-01 00:00:00'),
     ('BR-F2', 'BUS-1', 'BREAKER', 'CLOSED', TIMESTAMP '2026-01-01 00:00:00');
+
+-- 合成实物接地线台账（与设备遥信状态相互独立：实物占用以本台账为准）
+MERGE INTO ground_wire (code, status, version, created_at, updated_at) KEY(code) VALUES
+    ('JDX-1001', 'AVAILABLE', 1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00'),
+    ('JDX-1002', 'AVAILABLE', 1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00'),
+    ('JDX-1003', 'AVAILABLE', 1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00'),
+    ('JDX-1004', 'AVAILABLE', 1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00');

@@ -19,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.example.starter.error.ApiException;
+import com.example.starter.ground.GroundWireService;
 import com.example.starter.interlock.InterlockResult;
 import com.example.starter.interlock.InterlockService;
 import com.example.starter.ticket.TicketDtos.ArchiveRequest;
@@ -70,13 +71,15 @@ public class SwitchingOrderService {
     private final JdbcTemplate jdbc;
     private final Clock clock;
     private final InterlockService interlockService;
+    private final GroundWireService groundWireService;
     private final TransactionTemplate requiresNewTx;
 
     public SwitchingOrderService(JdbcTemplate jdbc, Clock businessClock, InterlockService interlockService,
-                                 PlatformTransactionManager txManager) {
+                                 GroundWireService groundWireService, PlatformTransactionManager txManager) {
         this.jdbc = jdbc;
         this.clock = businessClock;
         this.interlockService = interlockService;
+        this.groundWireService = groundWireService;
         this.requiresNewTx = new TransactionTemplate(txManager);
         this.requiresNewTx.setPropagationBehavior(
                 org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
@@ -174,6 +177,15 @@ public class SwitchingOrderService {
             throw ApiException.conflict("INTERLOCK_BLOCKED",
                     interlock.detail() + " [" + interlock.ruleCode() + "]");
         }
+        // 实物联锁（不信任拟票快照）：送电类步在同一事务内复查该间隔所有实物接地线均已拆除。
+        if (isEnergizing(step.operationType())) {
+            try {
+                groundWireService.assertNoAppliedWireOnEnergize(ticket.intervalId());
+            } catch (ApiException e) {
+                interlockService.recordHit(ticketId, seq, "GROUNDED_ENERGIZE", e.getMessage());
+                throw e;
+            }
+        }
         Instant now = Instant.now(clock);
         jdbc.update("UPDATE switching_step SET status = 'DONE', operator_id = ?, guardian_id = ?, executed_at = ?"
                         + " WHERE id = ? AND status = 'PENDING'",
@@ -195,6 +207,8 @@ public class SwitchingOrderService {
         ticket = refreshExpiry(ticket, false);
         switch (ticket.status()) {
             case "ISSUED", "EXECUTING", "EXCEPTION", "EXPIRED" -> {
+                // 归档要求本票借用实物全部归还（历史借用与解锁记录保留）；有挂接实物须先合法拆除并归还。
+                groundWireService.assertAllLoansReturned(ticketId);
                 jdbc.update("UPDATE switching_ticket SET status = 'ARCHIVED', updated_at = ? WHERE id = ?",
                         Timestamp.from(Instant.now(clock)), ticketId);
                 releaseLock(ticket.intervalId(), ticketId);
@@ -282,6 +296,11 @@ public class SwitchingOrderService {
     private void releaseLock(String intervalId, long ticketId) {
         jdbc.update("DELETE FROM interval_execution_lock WHERE interval_id = ? AND ticket_id = ?",
                 intervalId, ticketId);
+    }
+
+    /** 送电类步：合开关送电（与既有 GROUNDED_ENERGIZE 闭锁规则口径一致）。 */
+    private static boolean isEnergizing(String operationType) {
+        return "CLOSE_BREAKER".equals(operationType);
     }
 
     private TicketRow mustLoad(long ticketId) {

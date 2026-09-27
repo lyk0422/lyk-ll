@@ -41,6 +41,46 @@ public class IdempotencyService {
         for (String field : businessFields) {
             sb.append('|').append(field == null ? "" : field);
         }
+        return sha256(sb);
+    }
+
+    /**
+     * 结构化指纹：每个业务片段以“长度:”前缀编码；集合额外写入元素个数并逐元素长度前缀编码。
+     * 即便合法文本本身含有分隔符（如 "|"、","、":"），不同结构也不可能产生相同指纹。
+     *
+     * @param endpoint 接口标识
+     * @param requestId 幂等请求号
+     * @param parts 业务片段，元素可为 String/Number/Instant 或其 Collection/数组
+     */
+    public static String fingerprintStructured(String endpoint, String requestId, java.util.List<Object> parts) {
+        StringBuilder sb = new StringBuilder(endpoint).append('|').append(requestId);
+        for (Object part : parts) {
+            appendStructured(sb, part);
+        }
+        return sha256(sb);
+    }
+
+    private static void appendStructured(StringBuilder sb, Object part) {
+        if (part instanceof java.util.Collection<?> collection) {
+            sb.append("|#").append(collection.size());
+            for (Object element : collection) {
+                String v = String.valueOf(element);
+                sb.append("|").append(v.length()).append(":").append(v);
+            }
+        } else if (part != null && part.getClass().isArray()) {
+            Object[] array = (Object[]) part;
+            sb.append("|#").append(array.length);
+            for (Object element : array) {
+                String v = String.valueOf(element);
+                sb.append("|").append(v.length()).append(":").append(v);
+            }
+        } else {
+            String v = String.valueOf(part);
+            sb.append("|").append(v.length()).append(":").append(v);
+        }
+    }
+
+    private static String sha256(StringBuilder sb) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             return HexFormat.of().formatHex(digest.digest(sb.toString().getBytes(StandardCharsets.UTF_8)));
