@@ -26,6 +26,17 @@ public abstract class AbstractRepairTest {
 
     @BeforeEach
     void cleanBusinessData() {
+        jdbc.update("DELETE FROM gen_idempotency");
+        jdbc.update("DELETE FROM supply_evidence");
+        jdbc.update("DELETE FROM active_occupation");
+        jdbc.update("DELETE FROM dispatch_truck");
+        jdbc.update("DELETE FROM dispatch_load");
+        jdbc.update("DELETE FROM generator_dispatch");
+        jdbc.update("DELETE FROM generator_truck");
+        jdbc.update("INSERT INTO generator_truck (capacity_kw, feeder_id, available, version, created_at)"
+                + " VALUES (200,'F01',TRUE,1,CURRENT_TIMESTAMP),"
+                + " (300,'F01',TRUE,1,CURRENT_TIMESTAMP),"
+                + " (150,'F02',TRUE,1,CURRENT_TIMESTAMP)");
         jdbc.update("DELETE FROM late_report_event");
         jdbc.update("DELETE FROM generator_event");
         jdbc.update("DELETE FROM load_recovery");

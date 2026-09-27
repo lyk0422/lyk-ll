@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS work_order (
     outage_start_at TIMESTAMP NOT NULL COMMENT '停电开始时间（首次接报时间）',
     restored_at TIMESTAMP NULL COMMENT '复电完成时间，空表示未复电',
     merged_into_id BIGINT NULL COMMENT '合并目标工单ID，空表示未被合并',
+    version INT NOT NULL DEFAULT 1 COMMENT '工单版本号，从1开始，成功变更加1',
     created_at TIMESTAMP NOT NULL COMMENT '工单创建时间',
     CONSTRAINT uk_executing_team UNIQUE (executing_team_id)
 );
@@ -97,4 +98,67 @@ CREATE TABLE IF NOT EXISTS work_order_event (
     event_type VARCHAR(32) NOT NULL COMMENT '轨迹事件类型：REPORTED/ASSESSED/DISPATCHED/QUEUED/RESTORED/SEALED/MERGED/CREATED_BY_MERGE',
     detail VARCHAR(512) NULL COMMENT '事件详情，空表示无补充信息',
     created_at TIMESTAMP NOT NULL COMMENT '事件发生时间'
+);
+
+-- 发电车临时保电：合成发电车池、组合调度单、车辆占用与供电证据。
+-- 时间字段均为 Asia/Shanghai 本地时间（下发/到场请求以UTC精确时刻传入后转换存储）。
+
+CREATE TABLE IF NOT EXISTS generator_truck (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    capacity_kw INT NOT NULL COMMENT '发电车容量，单位kW，正整数',
+    feeder_id VARCHAR(64) NOT NULL COMMENT '服务馈线编号',
+    available BOOLEAN NOT NULL COMMENT '可用状态：TRUE可用/FALSE停用，停用不可派',
+    version INT NOT NULL COMMENT '车辆版本号，从1开始，成功变更加1',
+    created_at TIMESTAMP NOT NULL COMMENT '登记时间'
+);
+
+CREATE TABLE IF NOT EXISTS generator_dispatch (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    work_order_id BIGINT NOT NULL COMMENT '未复电工单ID',
+    order_version INT NOT NULL COMMENT '调度时冻结的工单版本号',
+    total_load_kw INT NOT NULL COMMENT '调度时冻结的合计负荷，单位kW',
+    status VARCHAR(16) NOT NULL COMMENT 'IN_PROGRESS待到场/SUPPLYING全部到场供电中/TIMED_OUT到达超时/REASSIGNED已改派/CANCELLED已撤销',
+    version INT NOT NULL COMMENT '调度单版本号，从1开始，成功变更加1',
+    dispatched_at TIMESTAMP NOT NULL COMMENT '下发时刻（请求以UTC精确时刻传入，存为本地时间）',
+    superseded_by_id BIGINT NULL COMMENT '整体改派生成的新调度单ID，空表示未被改派',
+    created_at TIMESTAMP NOT NULL COMMENT '调度单创建时间'
+);
+
+CREATE TABLE IF NOT EXISTS dispatch_load (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    dispatch_id BIGINT NOT NULL COMMENT '调度单ID',
+    user_name VARCHAR(64) NOT NULL COMMENT '重要用户名称（合成数据）',
+    load_kw INT NOT NULL COMMENT '冻结负荷，单位kW，正整数'
+);
+
+CREATE TABLE IF NOT EXISTS dispatch_truck (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    dispatch_id BIGINT NOT NULL COMMENT '调度单ID',
+    truck_id BIGINT NOT NULL COMMENT '发电车ID',
+    arrived_at TIMESTAMP NULL COMMENT '到场时刻，空表示未到场；逐车唯一记录，迟到到场不重复占车',
+    CONSTRAINT uk_dispatch_truck UNIQUE (dispatch_id, truck_id)
+);
+
+CREATE TABLE IF NOT EXISTS active_occupation (
+    truck_id BIGINT PRIMARY KEY COMMENT '发电车ID，主键保证一车仅一个未结束占用',
+    dispatch_id BIGINT NOT NULL COMMENT '占用该车的调度单ID',
+    occupied_at TIMESTAMP NOT NULL COMMENT '占用开始时间'
+);
+
+CREATE TABLE IF NOT EXISTS supply_evidence (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    dispatch_id BIGINT NOT NULL COMMENT '调度单ID',
+    work_order_id BIGINT NOT NULL COMMENT '工单ID',
+    total_load_kw INT NOT NULL COMMENT '供电负荷，单位kW，全部到场才入账',
+    supplied_at TIMESTAMP NOT NULL COMMENT '全部到场供电时刻；撤销调度后证据保留',
+    CONSTRAINT uk_supply_dispatch UNIQUE (dispatch_id)
+);
+
+CREATE TABLE IF NOT EXISTS gen_idempotency (
+    request_id VARCHAR(64) PRIMARY KEY COMMENT '幂等请求号',
+    fingerprint VARCHAR(128) NOT NULL COMMENT '结构化幂等指纹：长度前缀编码的SHA-256',
+    op VARCHAR(32) NOT NULL COMMENT '操作类型：TRUCK_REGISTER/TRUCK_AVAILABILITY/DISPATCH_CREATE/DISPATCH_ARRIVAL/DISPATCH_REASSIGN',
+    entity_id BIGINT NOT NULL COMMENT '主实体ID（车辆或调度单）',
+    outcome CLOB NOT NULL COMMENT '首次冻结结果JSON，同键同参重放',
+    created_at TIMESTAMP NOT NULL COMMENT '首次成功时间'
 );

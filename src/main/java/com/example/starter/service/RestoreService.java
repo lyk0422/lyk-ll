@@ -27,13 +27,15 @@ public class RestoreService {
     private final JdbcTemplate jdbc;
     private final AppClock clock;
     private final WorkOrderStore store;
+    private final GeneratorDispatchService generatorDispatches;
     private final TransactionTemplate tx;
 
     public RestoreService(JdbcTemplate jdbc, AppClock clock, WorkOrderStore store,
-            PlatformTransactionManager txManager) {
+            GeneratorDispatchService generatorDispatches, PlatformTransactionManager txManager) {
         this.jdbc = jdbc;
         this.clock = clock;
         this.store = store;
+        this.generatorDispatches = generatorDispatches;
         this.tx = new TransactionTemplate(txManager);
     }
 
@@ -97,11 +99,13 @@ public class RestoreService {
         BigDecimal loadKw = jdbc.queryForObject(
                 "SELECT load_kw FROM restore_confirmation WHERE work_order_id = ? AND confirmer_role = 'FIELD'",
                 BigDecimal.class, req.workOrderId());
-        jdbc.update("UPDATE work_order SET status = 'RESTORED', restored_at = ?, executing_team_id = NULL"
-                + " WHERE id = ?", Timestamp.valueOf(clock.now()), req.workOrderId());
+        jdbc.update("UPDATE work_order SET status = 'RESTORED', restored_at = ?, executing_team_id = NULL,"
+                + " version = version + 1 WHERE id = ?", Timestamp.valueOf(clock.now()), req.workOrderId());
         jdbc.update("INSERT INTO load_recovery (work_order_id, load_kw, recorded_at) VALUES (?,?,?)",
                 req.workOrderId(), loadKw, Timestamp.valueOf(clock.now()));
         store.addEvent(req.workOrderId(), "RESTORED", "调度与现场双确认复电, 恢复负荷" + loadKw + "kW");
+        // 正式复电：原子撤销未结束发电车调度并释放车辆，供电证据保留
+        generatorDispatches.cancelForWorkOrder(req.workOrderId(), "正式复电");
         promoteQueued(order.teamId());
         return new RestoreConfirmResponse(req.workOrderId(), true, false, "RESTORED", false);
     }
@@ -119,8 +123,8 @@ public class RestoreService {
                 (rs, rowNum) -> rs.getLong(1), teamId);
         if (!queued.isEmpty()) {
             long next = queued.get(0);
-            jdbc.update("UPDATE work_order SET status = 'EXECUTING', executing_team_id = ? WHERE id = ?",
-                    teamId, next);
+            jdbc.update("UPDATE work_order SET status = 'EXECUTING', executing_team_id = ?,"
+                    + " version = version + 1 WHERE id = ?", teamId, next);
             store.addEvent(next, "DISPATCHED", "班组" + teamId + "释放, 挂单自动提升执行");
         }
     }
