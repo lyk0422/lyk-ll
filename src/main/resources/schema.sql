@@ -132,6 +132,212 @@ create table if not exists case_event (
     payload varchar(512) null,
     created_at timestamp not null
 );
-comment on table case_event is '案件事件流；结案后迟到检验照片仅记录 LATE_PHOTO 事件，不改变案件状态';
-comment on column case_event.event_type is '事件类型：PHOTO 检验照片 / LATE_PHOTO 结案后迟到照片';
+comment on table case_event is '案件事件流；结案后迟到检验照片仅记录 LATE_PHOTO 事件，不改变案件状态；中标资格批复后撤销记 SUPPLIER_RISK 事件';
+comment on column case_event.event_type is '事件类型：PHOTO 检验照片 / LATE_PHOTO 结案后迟到照片 / SUPPLIER_RISK 中标供应商资格事后撤销';
 comment on column case_event.payload is '事件负载（如照片引用），NULL 表示无';
+
+-- ===================== 修箱密封报价与供应商资格（合成数据，仅本地演示） =====================
+-- 时间口径：所有时刻均为 UTC；报价金额单位为正整数分（cents），不允许小数。
+
+create table if not exists repair_method (
+    code varchar(16) not null primary key,
+    description varchar(128) not null
+);
+comment on table repair_method is '合成修箱工法代码表（非真实行业数据，仅本地演示）';
+comment on column repair_method.code is '工法代码，如 HM 锤平矫正 / WD 焊接修补 / RP 板件更换 / SP 打磨喷漆 / PT 贴补密封';
+comment on column repair_method.description is '工法中文说明';
+
+merge into repair_method key(code) values
+    ('HM', '锤平矫正'),
+    ('WD', '焊接修补'),
+    ('RP', '板件更换'),
+    ('SP', '打磨喷漆'),
+    ('PT', '贴补密封');
+
+create table if not exists supplier (
+    id bigint auto_increment primary key,
+    supplier_no varchar(32) not null,
+    name varchar(128) not null,
+    created_at timestamp not null
+);
+comment on table supplier is '合成修箱供应商；supplier_no 全局唯一，密封报价同价时按编号升序定标';
+comment on column supplier.supplier_no is '供应商编号（业务键），同价比价时按字典序升序';
+comment on column supplier.name is '供应商名称（合法文本，可含任意分隔符，不参与结构化指纹拼接）';
+
+create unique index if not exists uk_supplier_no on supplier(supplier_no);
+
+create table if not exists supplier_qualification (
+    id bigint auto_increment primary key,
+    supplier_id bigint not null,
+    version int not null,
+    valid_from timestamp not null,
+    valid_until timestamp not null,
+    status varchar(16) not null,
+    request_id varchar(64) not null,
+    created_at timestamp not null,
+    revoked_at timestamp null
+);
+comment on table supplier_qualification is '供应商资格版本，按供应商从 1 递增；版本行只追加，开标按开标时刻重算有效性，不沿用投标时旧资格';
+comment on column supplier_qualification.version is '资格版本号，从 1 开始，成功续期加 1';
+comment on column supplier_qualification.valid_from is '资格有效期起点（UTC，含该时刻）';
+comment on column supplier_qualification.valid_until is '资格有效期终点（UTC，含该时刻）；开标时刻晚于该值即失效排除';
+comment on column supplier_qualification.status is 'ACTIVE 有效 / REVOKED 已撤销；撤销不删除、不改写已冻结的中标证据';
+comment on column supplier_qualification.request_id is '产生本版本的幂等请求 ID';
+comment on column supplier_qualification.revoked_at is '撤销时刻（UTC），NULL 表示未撤销';
+
+create unique index if not exists uk_qual_version on supplier_qualification(supplier_id, version);
+
+create table if not exists qualification_method (
+    qualification_id bigint not null,
+    method_code varchar(16) not null,
+    primary key (qualification_id, method_code)
+);
+comment on table qualification_method is '资格版本适用工法集合；投标工法须被开标时有效资格版本覆盖';
+
+create table if not exists inquiry (
+    id bigint auto_increment primary key,
+    case_id bigint not null,
+    version int not null,
+    deadline timestamp not null,
+    status varchar(16) not null,
+    request_id varchar(64) not null,
+    created_at timestamp not null,
+    opened_at timestamp null,
+    approval_id bigint null
+);
+comment on table inquiry is '密封询价版本，按案件从 1 递增；发布即固定残损项集合与每项允许工法，零有效报价开标后可发新版本';
+comment on column inquiry.version is '询价版本号，从 1 开始，成功发布变更加 1';
+comment on column inquiry.deadline is 'UTC 报价截止时刻；now<deadline 可投标，恰在截止时刻拒绝';
+comment on column inquiry.status is 'OPEN 投标中 / OPENED 已开标冻结 / CONVERTED 已双人复核转为修理批复';
+comment on column inquiry.opened_at is '开标时刻（UTC），NULL 表示未开标；重复开标返回首次结果不重算';
+comment on column inquiry.approval_id is '转原案修理批复后写入的批复 ID，NULL 表示尚未转换';
+
+create unique index if not exists uk_inquiry_version on inquiry(case_id, version);
+
+create table if not exists inquiry_item (
+    id bigint auto_increment primary key,
+    inquiry_id bigint not null,
+    item_seq int not null,
+    case_item_id bigint not null,
+    iicl_code varchar(16) not null,
+    component varchar(64) not null
+);
+comment on table inquiry_item is '询价版本固定的残损项快照；开标与比价均以快照为准，不随后续编辑变化';
+comment on column inquiry_item.item_seq is '项序号，从 1 开始，报价必须按序号覆盖全部项';
+comment on column inquiry_item.case_item_id is '快照来源 damage_item.id';
+
+create unique index if not exists uk_inquiry_item_seq on inquiry_item(inquiry_id, item_seq);
+
+create table if not exists inquiry_item_method (
+    inquiry_item_id bigint not null,
+    method_code varchar(16) not null,
+    primary key (inquiry_item_id, method_code)
+);
+comment on table inquiry_item_method is '每个询价残损项允许的工法集合；报价工法不在集合内则整版拒绝';
+
+create table if not exists bid (
+    id bigint auto_increment primary key,
+    inquiry_id bigint not null,
+    supplier_id bigint not null,
+    revision int not null,
+    total_cents bigint not null,
+    status varchar(16) not null,
+    result varchar(24) null,
+    exclusion_reason varchar(48) null,
+    qualification_id bigint null,
+    request_id varchar(64) not null,
+    created_at timestamp not null
+);
+comment on table bid is '报价版本：一供应商一询价版本仅一个当前报价，修订全量保留历史；开标后当前行冻结';
+comment on column bid.revision is '报价修订号，从 1 开始，成功修订加 1；旧修订置 SUPERSEDED';
+comment on column bid.total_cents is '报价总价，正整数分合计';
+comment on column bid.status is 'CURRENT 当前 / SUPERSEDED 历史修订 / FROZEN 开标冻结';
+comment on column bid.result is '开标结果：WINNER 中标 / LOST 未中标 / EXCLUDED 资格失效排除；NULL 未开标';
+comment on column bid.exclusion_reason is '排除原因代码，如 QUALIFICATION_EXPIRED 资格过期、METHOD_NOT_COVERED 有效资格不覆盖工法';
+comment on column bid.qualification_id is '开标时实际采用的资格版本 ID（冻结证据），不使用投标时旧资格';
+
+create unique index if not exists uk_bid_revision on bid(inquiry_id, supplier_id, revision);
+
+create table if not exists bid_item (
+    id bigint auto_increment primary key,
+    bid_id bigint not null,
+    inquiry_item_id bigint not null,
+    method_code varchar(16) not null,
+    price_cents bigint not null
+);
+comment on table bid_item is '报价分项快照；price_cents 为正整数分，缺项、非正整数或工法越界均整版拒绝';
+
+create unique index if not exists uk_bid_item on bid_item(bid_id, inquiry_item_id);
+
+create table if not exists bid_opening (
+    id bigint auto_increment primary key,
+    inquiry_id bigint not null,
+    winner_bid_id bigint null,
+    winner_supplier_id bigint null,
+    total_cents bigint null,
+    status varchar(16) not null,
+    approval_id bigint null,
+    opened_at timestamp not null,
+    request_id varchar(64) not null
+);
+comment on table bid_opening is '开标结果（每询价版本唯一一行）：有效报价最低价中标，同价按供应商编号升序；零有效报价不开批复';
+comment on column bid_opening.status is 'SELECTED 已选定 / NO_VALID_BID 零有效报价';
+comment on column bid_opening.approval_id is '双人复核通过后转原案修理批复的 ID，NULL 表示尚未转换';
+
+create unique index if not exists uk_opening_inquiry on bid_opening(inquiry_id);
+
+create table if not exists bid_exclusion (
+    id bigint auto_increment primary key,
+    opening_id bigint not null,
+    bid_id bigint not null,
+    supplier_id bigint not null,
+    reason varchar(48) not null
+);
+comment on table bid_exclusion is '开标排除清单及原因，随首次开标结果冻结，重复开标原样返回';
+
+create table if not exists bid_review (
+    id bigint auto_increment primary key,
+    opening_id bigint not null,
+    reviewer varchar(64) not null,
+    request_id varchar(64) not null,
+    created_at timestamp not null
+);
+comment on table bid_review is '中标双人不同复核记录；须两名不同复核人，同一人重复复核拒绝，第二人复核通过即转批复';
+
+create unique index if not exists uk_review_reviewer on bid_review(opening_id, reviewer);
+
+-- 合成供应商种子数据（仅本地演示；DB_CLOSE_DELAY 共享库下用 not exists 防重复插入）
+merge into supplier(id, supplier_no, name, created_at) key(supplier_no) values
+    (1, 'SUP-100', '华东修箱合成厂', '2026-01-01 00:00:00'),
+    (2, 'SUP-200', '南方焊修合成厂', '2026-01-01 00:00:00'),
+    (3, 'SUP-300', '江北快修合成店', '2026-01-01 00:00:00');
+
+insert into supplier_qualification(supplier_id, version, valid_from, valid_until, status, request_id, created_at)
+select s.id, 1, '2026-01-01 00:00:00', '2026-12-31 23:59:59', 'ACTIVE', 'seed', '2026-01-01 00:00:00'
+from supplier s
+where s.supplier_no in ('SUP-100', 'SUP-200', 'SUP-300')
+  and not exists (select 1 from supplier_qualification q where q.supplier_id = s.id);
+
+insert into qualification_method(qualification_id, method_code)
+select q.id, m.code
+from supplier_qualification q
+join supplier s on s.id = q.supplier_id
+cross join (select 'HM' code union all select 'WD' union all select 'SP') m
+where s.supplier_no = 'SUP-100' and q.version = 1
+  and not exists (select 1 from qualification_method qm where qm.qualification_id = q.id and qm.method_code = m.code);
+
+insert into qualification_method(qualification_id, method_code)
+select q.id, m.code
+from supplier_qualification q
+join supplier s on s.id = q.supplier_id
+cross join (select 'WD' code union all select 'RP') m
+where s.supplier_no = 'SUP-200' and q.version = 1
+  and not exists (select 1 from qualification_method qm where qm.qualification_id = q.id and qm.method_code = m.code);
+
+insert into qualification_method(qualification_id, method_code)
+select q.id, m.code
+from supplier_qualification q
+join supplier s on s.id = q.supplier_id
+cross join (select 'HM' code union all select 'PT' union all select 'SP') m
+where s.supplier_no = 'SUP-300' and q.version = 1
+  and not exists (select 1 from qualification_method qm where qm.qualification_id = q.id and qm.method_code = m.code);
