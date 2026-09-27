@@ -115,6 +115,14 @@ public class TestDao {
     }
 
     /**
+     * 按主键查询快检记录（联检单引用冻结快检结果用）。
+     */
+    public Optional<TestRow> findTestById(long id) {
+        List<TestRow> rows = jdbc.query("SELECT * FROM test_record WHERE id = ?", TEST_MAPPER, id);
+        return rows.stream().findFirst();
+    }
+
+    /**
      * 判断批次+项目是否已有快检记录（重复送检判定）。
      */
     public boolean testExists(long batchId, String item) {
