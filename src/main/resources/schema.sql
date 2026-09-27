@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS wind_turbine (
 );
 
 -- 限电指令表：active_flag 仅执行中指令为 'Y'，其余为 NULL，配合唯一索引保证同风场至多一个执行中指令。
+-- plan_* 为计划绑定模式字段，全部为空表示未绑定计划的原指令（行为不变）。
 CREATE TABLE IF NOT EXISTS curtail_order (
     id                    BIGINT AUTO_INCREMENT PRIMARY KEY,
     order_no              VARCHAR(64) NOT NULL COMMENT '指令单号',
@@ -31,11 +32,51 @@ CREATE TABLE IF NOT EXISTS curtail_order (
     current_cycle_no      INT NOT NULL COMMENT '当前执行轮次，初值 1，告警重分摊递增',
     superseded_by_order_id BIGINT COMMENT '作废本指令的新指令 id，NULL 表示未被切换',
     active_flag           CHAR(1) COMMENT '执行中标记 Y；非执行中为 NULL（唯一索引允许多个 NULL）',
+    plan_id               BIGINT COMMENT '绑定的日前计划版本 id，NULL 表示未绑定计划',
+    plan_version          INT COMMENT '绑定的计划版本号（受理时冻结），NULL 表示未绑定',
+    plan_date             DATE COMMENT '绑定计划日期（UTC 日期），NULL 表示未绑定',
+    period_index          INT COMMENT '绑定时段序号 1..96，NULL 表示未绑定',
     received_at           TIMESTAMP NOT NULL COMMENT '接收时刻',
     settled_at            TIMESTAMP COMMENT '日结封存时刻，NULL 表示未封存',
     CONSTRAINT uk_order_no UNIQUE (order_no),
     CONSTRAINT uk_order_request UNIQUE (request_id),
     CONSTRAINT uk_order_active_farm UNIQUE (farm_code, active_flag)
+);
+
+-- 日前计划版本表：发布后不可变；is_current 仅当前版本为 'Y'，唯一索引保证同场同日一个当前版本。
+CREATE TABLE IF NOT EXISTS day_ahead_plan (
+    id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+    farm_code     VARCHAR(64) NOT NULL COMMENT '风场编码',
+    plan_date     DATE NOT NULL COMMENT '计划日期（UTC 日期）',
+    version       INT NOT NULL COMMENT '版本号，从 1 开始，每次成功发布加 1',
+    request_id    VARCHAR(96) NOT NULL COMMENT '发布请求幂等键',
+    fingerprint   VARCHAR(64) NOT NULL COMMENT '覆盖 requestId 与全部计划字段的结构化 SHA-256 指纹',
+    is_current    CHAR(1) COMMENT '当前版本标记 Y；历史版本为 NULL（唯一索引允许多个 NULL）',
+    published_at  TIMESTAMP NOT NULL COMMENT '发布时刻（UTC 存储）',
+    CONSTRAINT uk_plan_version UNIQUE (farm_code, plan_date, version),
+    CONSTRAINT uk_plan_current UNIQUE (farm_code, plan_date, is_current)
+);
+
+-- 日前计划明细表：每版本含完整 96 个十五分钟半开时段 × 每台机组一行，随版本不可变。
+CREATE TABLE IF NOT EXISTS day_ahead_plan_item (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    plan_id      BIGINT NOT NULL COMMENT '所属计划版本 id',
+    period_index INT NOT NULL COMMENT '时段序号 1..96，每段 15 分钟半开区间',
+    turbine_id   BIGINT NOT NULL COMMENT '机组 id',
+    planned_kw   INT NOT NULL COMMENT '该时段核定计划出力，单位 kW，非负且不超过机组装机容量',
+    CONSTRAINT uk_plan_item UNIQUE (plan_id, period_index, turbine_id)
+);
+
+-- 指令计划基数证据表：受理计划绑定指令时冻结，后续新计划发布不重算已受理指令。
+CREATE TABLE IF NOT EXISTS order_plan_base (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id     BIGINT NOT NULL COMMENT '所属指令 id',
+    plan_id      BIGINT NOT NULL COMMENT '冻结的计划版本 id',
+    turbine_id   BIGINT NOT NULL COMMENT '机组 id',
+    planned_kw   INT NOT NULL COMMENT '受理时冻结的该段核定计划出力，单位 kW',
+    available_kw INT NOT NULL COMMENT '受理时机组实时可用出力，单位 kW',
+    base_kw      INT NOT NULL COMMENT '冻结的可参与出力 = min(available_kw, planned_kw)，单位 kW',
+    CONSTRAINT uk_order_plan_base UNIQUE (order_id, turbine_id)
 );
 
 -- 下发轮次表：每轮 due_at = dispatched_at + 10 分钟，恰满即判定。
@@ -95,11 +136,11 @@ CREATE TABLE IF NOT EXISTS late_report_event (
     recorded_at  TIMESTAMP NOT NULL COMMENT '登记为迟到事件的时刻'
 );
 
--- 幂等记录表：request_id 唯一，保存首次响应体供重放。
+-- 幂等记录表：request_id 唯一，保存首次响应体供重放。biz_type：ORDER/REPORT/PLAN。
 CREATE TABLE IF NOT EXISTS idempotent_record (
     id            BIGINT AUTO_INCREMENT PRIMARY KEY,
     request_id    VARCHAR(96) NOT NULL COMMENT '请求幂等键',
-    biz_type      VARCHAR(16) NOT NULL COMMENT '业务类型：ORDER/REPORT',
+    biz_type      VARCHAR(16) NOT NULL COMMENT '业务类型：ORDER/REPORT/PLAN',
     fingerprint   VARCHAR(64) NOT NULL COMMENT '覆盖 requestId 与全部业务字段的指纹',
     ref_id        BIGINT COMMENT '首建业务实体 id',
     response_body CLOB NOT NULL COMMENT '首次响应 JSON，重放时原样返回',

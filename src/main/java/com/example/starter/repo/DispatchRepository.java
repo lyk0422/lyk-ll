@@ -20,6 +20,7 @@ import com.example.starter.domain.CurtailOrder;
 import com.example.starter.domain.DispatchCycle;
 import com.example.starter.domain.ExecutionReport;
 import com.example.starter.domain.LateReportEvent;
+import com.example.starter.domain.OrderPlanBase;
 import com.example.starter.domain.OrderStatus;
 
 /**
@@ -46,6 +47,14 @@ public class DispatchRepository {
         o.setCurrentCycleNo(rs.getInt("current_cycle_no"));
         long sup = rs.getLong("superseded_by_order_id");
         o.setSupersededByOrderId(rs.wasNull() ? null : sup);
+        long planId = rs.getLong("plan_id");
+        o.setPlanId(rs.wasNull() ? null : planId);
+        int planVersion = rs.getInt("plan_version");
+        o.setPlanVersion(rs.wasNull() ? null : planVersion);
+        java.sql.Date planDate = rs.getDate("plan_date");
+        o.setPlanDate(planDate == null ? null : planDate.toLocalDate());
+        int periodIndex = rs.getInt("period_index");
+        o.setPeriodIndex(rs.wasNull() ? null : periodIndex);
         o.setReceivedAt(rs.getTimestamp("received_at").toInstant());
         Timestamp settled = rs.getTimestamp("settled_at");
         o.setSettledAt(settled == null ? null : settled.toInstant());
@@ -113,6 +122,18 @@ public class DispatchRepository {
         return e;
     };
 
+    private static final RowMapper<OrderPlanBase> PLAN_BASE_MAPPER = (rs, n) -> {
+        OrderPlanBase b = new OrderPlanBase();
+        b.setId(rs.getLong("id"));
+        b.setOrderId(rs.getLong("order_id"));
+        b.setPlanId(rs.getLong("plan_id"));
+        b.setTurbineId(rs.getLong("turbine_id"));
+        b.setPlannedKw(rs.getInt("planned_kw"));
+        b.setAvailableKw(rs.getInt("available_kw"));
+        b.setBaseKw(rs.getInt("base_kw"));
+        return b;
+    };
+
     public long insertOrder(CurtailOrder order) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(connection -> {
@@ -120,8 +141,9 @@ public class DispatchRepository {
                     INSERT INTO curtail_order
                         (order_no, farm_code, request_id, fingerprint, target_power_kw,
                          status, current_cycle_no, superseded_by_order_id, active_flag,
+                         plan_id, plan_version, plan_date, period_index,
                          received_at, settled_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, Statement.RETURN_GENERATED_KEYS);
             ps.setString(1, order.getOrderNo());
             ps.setString(2, order.getFarmCode());
@@ -138,8 +160,24 @@ public class DispatchRepository {
             // 新指令一律先以非执行中（active_flag=NULL）插入，由服务在旧指令作废后显式置 Y，
             // 保证同一事务内不会出现两个执行中指令。
             ps.setNull(9, java.sql.Types.CHAR);
-            ps.setTimestamp(10, Timestamp.from(order.getReceivedAt()));
-            ps.setTimestamp(11, order.getSettledAt() == null ? null : Timestamp.from(order.getSettledAt()));
+            if (order.getPlanId() == null) {
+                ps.setNull(10, java.sql.Types.BIGINT);
+            } else {
+                ps.setLong(10, order.getPlanId());
+            }
+            if (order.getPlanVersion() == null) {
+                ps.setNull(11, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(11, order.getPlanVersion());
+            }
+            ps.setDate(12, order.getPlanDate() == null ? null : java.sql.Date.valueOf(order.getPlanDate()));
+            if (order.getPeriodIndex() == null) {
+                ps.setNull(13, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(13, order.getPeriodIndex());
+            }
+            ps.setTimestamp(14, Timestamp.from(order.getReceivedAt()));
+            ps.setTimestamp(15, order.getSettledAt() == null ? null : Timestamp.from(order.getSettledAt()));
             return ps;
         }, keyHolder);
         Number key = keyHolder.getKey();
@@ -401,5 +439,29 @@ public class DispatchRepository {
         return jdbc.query(
                 "SELECT * FROM late_report_event WHERE order_id = ? ORDER BY id",
                 LATE_MAPPER, orderId);
+    }
+
+    /** 批量写入指令受理时冻结的计划基数（每机组一条）。 */
+    public void insertPlanBases(List<OrderPlanBase> bases) {
+        jdbc.batchUpdate("""
+                INSERT INTO order_plan_base
+                    (order_id, plan_id, turbine_id, planned_kw, available_kw, base_kw)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                bases, bases.size(), (ps, b) -> {
+                    ps.setLong(1, b.getOrderId());
+                    ps.setLong(2, b.getPlanId());
+                    ps.setLong(3, b.getTurbineId());
+                    ps.setInt(4, b.getPlannedKw());
+                    ps.setInt(5, b.getAvailableKw());
+                    ps.setInt(6, b.getBaseKw());
+                });
+    }
+
+    /** 查询指令冻结的计划基数，按机组 id 排序（无绑定则为空列表）。 */
+    public List<OrderPlanBase> findPlanBases(long orderId) {
+        return jdbc.query(
+                "SELECT * FROM order_plan_base WHERE order_id = ? ORDER BY turbine_id",
+                PLAN_BASE_MAPPER, orderId);
     }
 }

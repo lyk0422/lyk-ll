@@ -63,8 +63,11 @@ class DispatchRestIntegrationTest {
         jdbc.update("DELETE FROM execution_report");
         jdbc.update("DELETE FROM allocation");
         jdbc.update("DELETE FROM dispatch_cycle");
+        jdbc.update("DELETE FROM order_plan_base");
         jdbc.update("DELETE FROM curtail_order");
         jdbc.update("DELETE FROM idempotent_record");
+        jdbc.update("DELETE FROM day_ahead_plan_item");
+        jdbc.update("DELETE FROM day_ahead_plan");
         jdbc.update("DELETE FROM wind_turbine");
         jdbc.update("DELETE FROM wind_farm");
         Instant now = Instant.now();
@@ -191,5 +194,112 @@ class DispatchRestIntegrationTest {
                 "requestId", "rp-x", "turbineCode", "NO-SUCH",
                 "measuredAt", iso(10, 1, 0), "powerKw", 100));
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Integer> constantPeriods(int value) {
+        java.util.List<Integer> values = new java.util.ArrayList<>(96);
+        for (int i = 0; i < 96; i++) {
+            values.add(value);
+        }
+        return values;
+    }
+
+    private Map<String, Object> planBody(String requestId, int expectedVersion,
+                                         int kw01, int kw02, int kw03) {
+        return Map.of(
+                "requestId", requestId,
+                "farmCode", FARM,
+                "planDate", "2026-09-27",
+                "expectedVersion", expectedVersion,
+                "turbines", List.of(
+                        Map.of("turbineCode", "T-01", "plannedKw", constantPeriods(kw01)),
+                        Map.of("turbineCode", "T-02", "plannedKw", constantPeriods(kw02)),
+                        Map.of("turbineCode", "T-03", "plannedKw", constantPeriods(kw03))));
+    }
+
+    @Test
+    @DisplayName("HTTP 计划流程：发布→查询当前/历史→绑定指令→基数证据；错误码 400/404/409/422")
+    void planPublishBindAndEvidenceOverHttp() {
+        // 1. 首次发布 v1。
+        Map<String, Object> v1 = post("/api/curtail/plans", planBody("p-1", 0, 1800, 1500, 2000));
+        assertThat(v1.get("version")).isEqualTo(1);
+        // 同键同参重放。
+        Map<String, Object> replay = post("/api/curtail/plans", planBody("p-1", 0, 1800, 1500, 2000));
+        assertThat(replay.get("replayed")).isEqualTo(true);
+        // 异参 409。
+        assertThat(postEntity("/api/curtail/plans", planBody("p-1", 0, 1800, 1500, 1999))
+                .getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+
+        // 2. 缺段整版拒绝 400。
+        java.util.Map<String, Object> bad = java.util.Map.of(
+                "requestId", "p-bad",
+                "farmCode", FARM,
+                "planDate", "2026-09-27",
+                "expectedVersion", 1,
+                "turbines", List.of(
+                        java.util.Map.of("turbineCode", "T-01",
+                                "plannedKw", constantPeriods(1800).subList(0, 95)),
+                        java.util.Map.of("turbineCode", "T-02", "plannedKw", constantPeriods(1500)),
+                        java.util.Map.of("turbineCode", "T-03", "plannedKw", constantPeriods(2000))));
+        assertThat(postEntity("/api/curtail/plans", bad).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
+
+        // 3. 发布 v2（expectedVersion=1）。
+        Map<String, Object> v2 = post("/api/curtail/plans", planBody("p-2", 1, 1700, 1400, 1900));
+        assertThat(v2.get("version")).isEqualTo(2);
+        // 期望版本过期：409。
+        assertThat(postEntity("/api/curtail/plans", planBody("p-3", 1, 1600, 1300, 1800))
+                .getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+
+        // 4. 查询当前为 v2，历史 v1 仍可查。
+        Map<String, Object> current = get("/api/curtail/plans/" + FARM + "/2026-09-27");
+        assertThat(current.get("version")).isEqualTo(2);
+        assertThat(current.get("current")).isEqualTo(true);
+        Map<String, Object> history = get("/api/curtail/plans/" + FARM + "/2026-09-27/versions/1");
+        assertThat(history.get("version")).isEqualTo(1);
+        assertThat(history.get("current")).isEqualTo(false);
+        // 不存在版本 404。
+        org.springframework.http.ResponseEntity<Map> missingVersion = rest.getForEntity(
+                base + "/api/curtail/plans/" + FARM + "/2026-09-27/versions/9", Map.class);
+        assertThat(missingVersion.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+
+        // 5. 绑定过期 v1 受理：422。
+        ResponseEntity<Map> expired = postEntity("/api/curtail/orders", Map.of(
+                "requestId", "o-expired", "farmCode", FARM, "targetPowerKw", 4500,
+                "planDate", "2026-09-27", "periodIndex", 9, "planVersion", 1));
+        assertThat(expired.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+
+        // 6. 绑定当前 v2 受理：可参与 1700+1400+1900=5000，目标 4500。
+        Map<String, Object> order = post("/api/curtail/orders", Map.of(
+                "requestId", "o-bound", "farmCode", FARM, "targetPowerKw", 4500,
+                "planDate", "2026-09-27", "periodIndex", 9, "planVersion", 2));
+        assertThat(order.get("farmAvailableKw")).isEqualTo(5000);
+        assertThat(order.get("curtailedKw")).isEqualTo(500);
+        String orderNo = (String) order.get("orderNo");
+
+        // 7. 基数证据查询：冻结 v2 计划/实时/可参与基数。
+        Map<String, Object> evidence = get("/api/curtail/orders/" + orderNo + "/plan-basis");
+        assertThat(evidence.get("planVersion")).isEqualTo(2);
+        assertThat(evidence.get("periodIndex")).isEqualTo(9);
+        List<Map<String, Object>> items = (List<Map<String, Object>>) evidence.get("items");
+        Map<String, Map<String, Object>> byCode = items.stream()
+                .collect(java.util.stream.Collectors.toMap(i -> (String) i.get("turbineCode"), i -> i));
+        assertThat(byCode.get("T-01").get("plannedKw")).isEqualTo(1700);
+        assertThat(byCode.get("T-01").get("availableKw")).isEqualTo(2000);
+        assertThat(byCode.get("T-01").get("baseKw")).isEqualTo(1700);
+
+        // 8. 未绑定指令查询基数证据：404。
+        Map<String, Object> plain = post("/api/curtail/orders",
+                Map.of("requestId", "o-plain", "farmCode", FARM, "targetPowerKw", 5000));
+        org.springframework.http.ResponseEntity<Map> noBasis = rest.getForEntity(
+                base + "/api/curtail/orders/" + plain.get("orderNo") + "/plan-basis", Map.class);
+        assertThat(noBasis.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+
+        // 9. 绑定字段部分提供：400。
+        ResponseEntity<Map> partial = postEntity("/api/curtail/orders", Map.of(
+                "requestId", "o-partial", "farmCode", FARM, "targetPowerKw", 4500,
+                "planDate", "2026-09-27", "planVersion", 2));
+        assertThat(partial.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 }

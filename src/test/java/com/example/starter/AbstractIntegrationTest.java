@@ -41,8 +41,11 @@ public abstract class AbstractIntegrationTest {
         jdbc.update("DELETE FROM execution_report");
         jdbc.update("DELETE FROM allocation");
         jdbc.update("DELETE FROM dispatch_cycle");
+        jdbc.update("DELETE FROM order_plan_base");
         jdbc.update("DELETE FROM curtail_order");
         jdbc.update("DELETE FROM idempotent_record");
+        jdbc.update("DELETE FROM day_ahead_plan_item");
+        jdbc.update("DELETE FROM day_ahead_plan");
         jdbc.update("DELETE FROM wind_turbine");
         jdbc.update("DELETE FROM wind_farm");
         seedFarm(defaultSeeds());

@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.RestController;
 import com.example.starter.dto.OrderDetailResponse;
 import com.example.starter.dto.OrderReceiveRequest;
 import com.example.starter.dto.OrderReceiveResponse;
+import com.example.starter.dto.PlanBaseEvidenceResponse;
 import com.example.starter.dto.ReportRequest;
 import com.example.starter.dto.ReportResponse;
 import com.example.starter.dto.SettleResponse;
@@ -52,5 +53,11 @@ public class DispatchController {
     @GetMapping("/orders/{orderNo}")
     public OrderDetailResponse detail(@PathVariable String orderNo) {
         return dispatchService.detail(orderNo);
+    }
+
+    /** 查询指令受理时冻结的计划基数证据（版本、各机组计划/实时/可参与基数）。 */
+    @GetMapping("/orders/{orderNo}/plan-basis")
+    public PlanBaseEvidenceResponse planBasis(@PathVariable String orderNo) {
+        return dispatchService.planBaseEvidence(orderNo);
     }
 }

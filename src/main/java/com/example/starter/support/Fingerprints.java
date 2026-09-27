@@ -25,4 +25,20 @@ public final class Fingerprints {
             throw new IllegalStateException("SHA-256 不可用", ex);
         }
     }
+
+    /**
+     * 结构化指纹：各字段先按“长度:内容”长度前缀编码再拼接取 SHA-256，
+     * 字段值含分隔符（如 |、:）也不会与相邻字段混淆；null 以 -1: 表示。
+     */
+    public static String struct(String... parts) {
+        StringBuilder canonical = new StringBuilder();
+        for (String part : parts) {
+            if (part == null) {
+                canonical.append("-1:");
+            } else {
+                canonical.append(part.length()).append(':').append(part);
+            }
+        }
+        return sha256(canonical.toString());
+    }
 }
