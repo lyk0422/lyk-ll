@@ -43,10 +43,31 @@ public class ValveRepository {
     }
 
     /**
+     * 按阀门 ID 查询并加行级写锁，用于串行化同一受控阀门的铅封、解封与调节竞争。
+     */
+    public Optional<Valve> lockById(long id) {
+        return jdbc.query("SELECT id, unit_id, opening_percent, updated_at FROM valve WHERE id = ? FOR UPDATE",
+                MAPPER, id).stream().findFirst();
+    }
+
+    /**
      * 更新阀门当前开度；必须与版本记录在同一事务内调用。
      */
     public void updateOpening(long valveId, BigDecimal newOpening, Instant updatedAt) {
         jdbc.update("UPDATE valve SET opening_percent = ?, updated_at = ? WHERE id = ?",
                 newOpening, Timestamp.from(updatedAt), valveId);
+    }
+
+    /**
+     * 条件更新阀门开度：仅当当前开度版本（版本链最大版本号，无版本为 0）与期望一致时写入。
+     * 用于复封与受控调节竞争下保证“已复封不可再追加调节版本”，返回更新行数。
+     */
+    public int updateOpeningIfVersion(long valveId, BigDecimal oldOpening, BigDecimal newOpening,
+                                      int expectedVersion, Instant updatedAt) {
+        return jdbc.update("UPDATE valve SET opening_percent = ?, updated_at = ?"
+                        + " WHERE id = ? AND opening_percent = ?"
+                        + " AND (SELECT COALESCE(MAX(version_no), 0)"
+                        + " FROM valve_opening_version WHERE valve_id = ?) = ?",
+                newOpening, Timestamp.from(updatedAt), valveId, oldOpening, valveId, expectedVersion);
     }
 }

@@ -48,6 +48,7 @@ public class AdjustmentService {
     private final AdjustmentTaskRepository taskRepository;
     private final AssessmentRepository assessmentRepository;
     private final BalanceService balanceService;
+    private final SealService sealService;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -58,6 +59,7 @@ public class AdjustmentService {
                              AdjustmentTaskRepository taskRepository,
                              AssessmentRepository assessmentRepository,
                              BalanceService balanceService,
+                             SealService sealService,
                              ObjectMapper objectMapper,
                              Clock clock) {
         this.stationRepository = stationRepository;
@@ -67,6 +69,7 @@ public class AdjustmentService {
         this.taskRepository = taskRepository;
         this.assessmentRepository = assessmentRepository;
         this.balanceService = balanceService;
+        this.sealService = sealService;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
@@ -126,6 +129,8 @@ public class AdjustmentService {
                         "单元无温度数据或未失衡，无法判定调节方向: unitId=" + unitId));
         Valve valve = valveRepository.findByUnitId(unitId)
                 .orElseThrow(() -> new NotFoundException("单元未配置阀门: unitId=" + unitId));
+        // 完整铅封下新的普通调节令必须拒绝；无台账阀门不受影响。
+        sealService.assertAdjustable(valve.id());
         BigDecimal oldOpening = valve.openingPercent();
         BigDecimal newOpening = classification == AdjustmentTask.ImbalanceType.UNDERFLOW
                 ? oldOpening.add(stepPercent) : oldOpening.subtract(stepPercent);

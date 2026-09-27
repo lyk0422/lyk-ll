@@ -128,6 +128,93 @@ COMMENT ON COLUMN assessment.balanced IS '评估时是否平衡：温差不超�
 COMMENT ON COLUMN assessment.detail IS '前后温度分布对比快照（JSON），可由温度记录复算';
 COMMENT ON COLUMN assessment.created_at IS '评估生成时间（UTC）';
 
+CREATE TABLE IF NOT EXISTS valve_seal (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    valve_id BIGINT NOT NULL REFERENCES valve (id),
+    seal_code VARCHAR(64) NOT NULL,
+    valve_version INT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    sealed_at TIMESTAMP NOT NULL,
+    resealed_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_valve_seal_code UNIQUE (seal_code)
+);
+COMMENT ON TABLE valve_seal IS '平衡阀铅封台账：登记唯一铅封号、封存时开度版本与封存时刻，复封保留历史封号链';
+COMMENT ON COLUMN valve_seal.id IS '主键';
+COMMENT ON COLUMN valve_seal.valve_id IS '受控阀门 ID';
+COMMENT ON COLUMN valve_seal.seal_code IS '铅封号，全局唯一（含历史封号）';
+COMMENT ON COLUMN valve_seal.valve_version IS '封存时阀门开度版本：无变更为 0，首次成功调节后为 1，逐次 +1';
+COMMENT ON COLUMN valve_seal.status IS '状态：ACTIVE 生效中 / RESEALED 已复封（历史封号，终态）';
+COMMENT ON COLUMN valve_seal.sealed_at IS '封存时刻（UTC）';
+COMMENT ON COLUMN valve_seal.resealed_at IS '复封终结时刻（UTC）；生效中为空';
+COMMENT ON COLUMN valve_seal.created_at IS '台账登记时间（UTC）';
+
+CREATE TABLE IF NOT EXISTS unseal_permit (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    seal_id BIGINT NOT NULL REFERENCES valve_seal (id),
+    valve_id BIGINT NOT NULL REFERENCES valve (id),
+    valve_version INT NOT NULL,
+    approver1 VARCHAR(64) NOT NULL,
+    approver2 VARCHAR(64) NOT NULL,
+    window_start TIMESTAMP NOT NULL,
+    window_end TIMESTAMP NOT NULL,
+    quota_total INT NOT NULL,
+    quota_used INT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    version INT NOT NULL,
+    revoked_at TIMESTAMP,
+    revoked_by VARCHAR(64),
+    closed_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL
+);
+COMMENT ON TABLE unseal_permit IS '临时解封单：引用铅封号与阀门版本，两名不同授权人确认，固定 UTC 半开窗口与最多两次调节额度';
+COMMENT ON COLUMN unseal_permit.id IS '主键';
+COMMENT ON COLUMN unseal_permit.seal_id IS '引用的铅封台账 ID';
+COMMENT ON COLUMN unseal_permit.valve_id IS '受控阀门 ID（冗余自台账，便于按阀门串行化）';
+COMMENT ON COLUMN unseal_permit.valve_version IS '最近核对的阀门开度版本：批准时为申请值，每次消费额度后同步为最新版本';
+COMMENT ON COLUMN unseal_permit.approver1 IS '第一名授权人（两名按字典序排序存储）';
+COMMENT ON COLUMN unseal_permit.approver2 IS '第二名授权人，须与第一名不同';
+COMMENT ON COLUMN unseal_permit.window_start IS '解封有效窗口起点（UTC，含）';
+COMMENT ON COLUMN unseal_permit.window_end IS '解封有效窗口终点（UTC，不含；恰到终点失效）';
+COMMENT ON COLUMN unseal_permit.quota_total IS '调节额度上限，固定 2';
+COMMENT ON COLUMN unseal_permit.quota_used IS '已消费调节额度，失败不消费';
+COMMENT ON COLUMN unseal_permit.status IS '状态：ACTIVE 生效中 / REVOKED 已撤销 / CLOSED 已随复封终结';
+COMMENT ON COLUMN unseal_permit.version IS '解封单自身版本，从 1 开始，每次成功变更 +1';
+COMMENT ON COLUMN unseal_permit.revoked_at IS '撤销时刻（UTC）；未撤销为空';
+COMMENT ON COLUMN unseal_permit.revoked_by IS '撤销操作授权人；未撤销为空';
+COMMENT ON COLUMN unseal_permit.closed_at IS '随复封终结时刻（UTC）；未终结为空';
+COMMENT ON COLUMN unseal_permit.created_at IS '批准时间（UTC）';
+
+CREATE TABLE IF NOT EXISTS unseal_quota_event (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    permit_id BIGINT NOT NULL REFERENCES unseal_permit (id),
+    task_id BIGINT NOT NULL REFERENCES adjustment_task (id),
+    valve_version INT NOT NULL,
+    quota_used_after INT NOT NULL,
+    created_at TIMESTAMP NOT NULL
+);
+COMMENT ON TABLE unseal_quota_event IS '解封额度消费轨迹：每次受控调节消费一次额度时登记，与开度写入同事务';
+COMMENT ON COLUMN unseal_quota_event.id IS '主键';
+COMMENT ON COLUMN unseal_quota_event.permit_id IS '解封单 ID';
+COMMENT ON COLUMN unseal_quota_event.task_id IS '消费额度产生的调节任务 ID';
+COMMENT ON COLUMN unseal_quota_event.valve_version IS '消费后阀门开度版本';
+COMMENT ON COLUMN unseal_quota_event.quota_used_after IS '消费后已用额度';
+COMMENT ON COLUMN unseal_quota_event.created_at IS '消费时刻（UTC）';
+
+CREATE TABLE IF NOT EXISTS idempotency_record (
+    request_id VARCHAR(64) PRIMARY KEY,
+    fingerprint VARCHAR(128) NOT NULL,
+    operation VARCHAR(32) NOT NULL,
+    result_snapshot VARCHAR(4096) NOT NULL,
+    created_at TIMESTAMP NOT NULL
+);
+COMMENT ON TABLE idempotency_record IS '新增写操作幂等台账：同键同参重放首次冻结结果，异参 409，失败不占键';
+COMMENT ON COLUMN idempotency_record.request_id IS '客户端幂等键，全局唯一（主键）';
+COMMENT ON COLUMN idempotency_record.fingerprint IS '结构化幂等指纹：操作类型与全部业务参数（含版本、集合、精确时刻）长度前缀编码的 SHA-256';
+COMMENT ON COLUMN idempotency_record.operation IS '操作类型：SEAL_REGISTER / UNSEAL_APPROVE / UNSEAL_REVOKE / RESEAL / CONTROLLED_ADJUST';
+COMMENT ON COLUMN idempotency_record.result_snapshot IS '首次成功结果的冻结快照（JSON），同键同参重放时原样返回';
+COMMENT ON COLUMN idempotency_record.created_at IS '首次受理时间（UTC）';
+
 CREATE TABLE IF NOT EXISTS late_temperature_event (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     unit_id BIGINT NOT NULL REFERENCES heating_unit (id),
