@@ -70,13 +70,15 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
     private final IdempotencyStore idempotencyStore;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final AssemblyService assemblyService;
 
     public WeightBalanceServiceImpl(WeightBalanceRepository repo, IdempotencyStore idempotencyStore,
-                                    ObjectMapper objectMapper, Clock clock) {
+                                    ObjectMapper objectMapper, Clock clock, AssemblyService assemblyService) {
         this.repo = repo;
         this.idempotencyStore = idempotencyStore;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.assemblyService = assemblyService;
     }
 
     // ------------------------------------------------------------------ 预配
@@ -279,8 +281,12 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
             if (!ManifestStatus.REVIEWED.name().equals(row.status())) {
                 throw new ConflictException("双岗复核通过后方可放行关闭，当前状态 " + row.status());
             }
+            // 启用装配控制的舱单：关闭前再校验图与舱单版本匹配、实物装配重心合法。
+            Long planId = assemblyService.validateForClose(flightId);
             LocalDateTime now = LocalDateTime.now(clock);
             repo.updateStatus(row.id(), ManifestStatus.CLOSED.name(), now);
+            // 同事务原子释放实物占用；未启用装配控制（planId=null）走既有兼容路径。
+            assemblyService.releaseOnClose(flightId, planId, now);
             return toResponse(repo.findManifestById(row.id()).orElseThrow());
         });
     }

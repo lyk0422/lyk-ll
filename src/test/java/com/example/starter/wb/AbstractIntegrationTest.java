@@ -21,6 +21,8 @@ public abstract class AbstractIntegrationTest {
         jdbc.execute("DELETE FROM review_confirmation");
         jdbc.execute("DELETE FROM lmc_log");
         jdbc.execute("DELETE FROM late_event");
+        jdbc.execute("DELETE FROM uld_occupancy");
+        jdbc.execute("DELETE FROM assembly_plan");
         jdbc.execute("DELETE FROM manifest_version");
         jdbc.execute("DELETE FROM idempotent_request");
     }

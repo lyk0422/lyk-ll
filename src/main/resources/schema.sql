@@ -146,3 +146,63 @@ CREATE TABLE IF NOT EXISTS idempotent_request (
     result_json  CLOB        NOT NULL COMMENT '首次响应体快照',
     created_at   TIMESTAMP   NOT NULL COMMENT '首次请求时间'
 );
+
+-- 集装器舱位主数据（合成）：整数毫米力臂、最大整数公斤载荷（含皮重，恰达合法）、允许集装器类型
+CREATE TABLE IF NOT EXISTS uld_position (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    aircraft_id       BIGINT       NOT NULL COMMENT '所属飞机 ID',
+    position_code     VARCHAR(20)  NOT NULL COMMENT '集装器舱位代码，如 ULD_FWD_1',
+    arm_mm            INT          NOT NULL COMMENT '舱位力臂，整数毫米（合成）',
+    max_payload_kg    INT          NOT NULL COMMENT '舱位允许集装器最大总重（皮重+净重），整数 kg；恰达合法',
+    allowed_uld_types VARCHAR(200) NOT NULL COMMENT '允许集装器类型代码，逗号分隔，如 AKE,AKH',
+    CONSTRAINT fk_uld_position_aircraft FOREIGN KEY (aircraft_id) REFERENCES aircraft (id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_uld_position_code ON uld_position (aircraft_id, position_code);
+
+-- 受控舱单装配图：每个航班一张当前有效图（active_flag=flight_id），重提产生新版本链，历史只读
+CREATE TABLE IF NOT EXISTS assembly_plan (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    flight_id         BIGINT        NOT NULL COMMENT '航班 ID',
+    manifest_id       BIGINT        NOT NULL COMMENT '提交时所匹配的舱单版本 ID',
+    plan_version      INT           NOT NULL COMMENT '装配图版本号，自 1 起，每次成功提交 +1',
+    expected_version  INT           NOT NULL COMMENT '提交时客户端所见装配图版本（首版为 0）',
+    manifest_version  INT           NOT NULL COMMENT '提交时匹配的舱单版本号',
+    request_id        VARCHAR(64)   NOT NULL COMMENT '幂等请求 ID',
+    fingerprint       CHAR(64)      NOT NULL COMMENT 'SHA-256 指纹，覆盖 requestId、版本、集合与精确时刻',
+    cargo_payload_kg  DECIMAL(12,2) NOT NULL COMMENT '装配图总货重=Σ净重，kg，须等于所挂舱单版本货运业载',
+    fuel_kg           DECIMAL(10,2) NOT NULL COMMENT '提交时舱单加油量快照，kg；加油变更后须重新提交装配并复核',
+    cargo_moment_kgmm BIGINT        NOT NULL COMMENT '货运力矩=Σ总重(皮+净)kg×整数毫米力臂，kg·mm，精确求和',
+    cg_zfw_pct        DECIMAL(8,4)  NOT NULL COMMENT '以实物装配（总重力臂）交既有重心规则复算的无油重心，%MAC',
+    cg_tow_pct        DECIMAL(8,4)  NOT NULL COMMENT '以实物装配复算的起飞重心，%MAC；提交时须在包线内，否则整版拒绝',
+    active_flag       BIGINT        NULL COMMENT '有效图哨兵：有效=flight_id，作废=NULL',
+    created_by        VARCHAR(64)   NOT NULL COMMENT '装配提交人岗位账号',
+    occurred_at       TIMESTAMP     NOT NULL COMMENT '业务发生精确时刻（请求给定，Asia/Shanghai）',
+    created_at        TIMESTAMP     NOT NULL COMMENT '落库时间',
+    released_at       TIMESTAMP     NULL COMMENT '关闭放行实物占用释放时间；NULL 为未释放',
+    CONSTRAINT uk_assembly_request UNIQUE (request_id),
+    CONSTRAINT uk_assembly_active UNIQUE (flight_id, active_flag)
+);
+CREATE INDEX IF NOT EXISTS idx_assembly_manifest ON assembly_plan (manifest_id);
+
+-- 集装器实物占用：编号在所有未关闭航班内全局唯一；一器一行一舱位，关闭放行原子释放
+CREATE TABLE IF NOT EXISTS uld_occupancy (
+    id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+    uld_no        VARCHAR(40)  NOT NULL COMMENT '集装器唯一编号（实物标识），未关闭航班内全局唯一',
+    uld_type      VARCHAR(20)  NOT NULL COMMENT '集装器类型代码，如 AKE',
+    flight_id     BIGINT       NOT NULL COMMENT '占用航班 ID',
+    manifest_id   BIGINT       NOT NULL COMMENT '占用时舱单版本 ID',
+    plan_id       BIGINT       NOT NULL COMMENT '所属装配图 ID',
+    position_code VARCHAR(20)  NOT NULL COMMENT '舱位代码（同航班同舱位最多一器）',
+    arm_mm        INT          NOT NULL COMMENT '装载时舱位力臂快照，整数毫米',
+    tare_kg       INT          NOT NULL COMMENT '皮重，非负整数 kg',
+    net_kg        INT          NOT NULL COMMENT '净重，正整数 kg',
+    gross_kg      INT          NOT NULL COMMENT '总重=皮重+净重，kg',
+    occupied_at   TIMESTAMP    NOT NULL COMMENT '占用开始时间',
+    open_flag     BIGINT       NULL COMMENT '占用中哨兵：占用中=0，释放=NULL；NULL 不参与唯一约束',
+    released_at   TIMESTAMP    NULL COMMENT '占用释放时间；NULL 为占用中',
+    CONSTRAINT fk_occupancy_plan FOREIGN KEY (plan_id) REFERENCES assembly_plan (id)
+);
+-- 同一集装器编号在所有未关闭航班（open_flag=0）内最多一条占用：两航班抢同器仅一方成功
+CREATE UNIQUE INDEX IF NOT EXISTS uk_uld_no_open ON uld_occupancy (uld_no, open_flag);
+-- 同一航班同一舱位最多一个在装集装器
+CREATE UNIQUE INDEX IF NOT EXISTS uk_uld_flight_position_open ON uld_occupancy (flight_id, position_code, open_flag);

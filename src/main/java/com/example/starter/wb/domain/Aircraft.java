@@ -20,6 +20,7 @@ public record Aircraft(
         BigDecimal macLength,
         BigDecimal fuelArm,
         List<EnvelopePoint> envelope,
-        List<LoadStation> stations
+        List<LoadStation> stations,
+        List<UldPosition> uldPositions
 ) {
 }

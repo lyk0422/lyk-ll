@@ -29,7 +29,8 @@ class WeightBalanceCalculatorTest {
                     new LoadStation("PAX_F", new BigDecimal("600.00"), "前舱旅客区"),
                     new LoadStation("PAX_E", new BigDecimal("760.00"), "后舱旅客区"),
                     new LoadStation("CARGO_F", new BigDecimal("500.00"), "前货舱货物"),
-                    new LoadStation("MAIL_A", new BigDecimal("800.00"), "后货舱邮件")));
+                    new LoadStation("MAIL_A", new BigDecimal("800.00"), "后货舱邮件")),
+            List.of());
 
     /** 100 人 @80kg@600in = 8000kg；7000kg 货 @500in；业载恰为 15000 = MZFW-OEW。 */
     private List<CalcLoadItem> exactPayloadItems(int cargoKg) {
