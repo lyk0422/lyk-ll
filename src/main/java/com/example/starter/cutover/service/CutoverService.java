@@ -31,7 +31,9 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -62,6 +64,7 @@ public class CutoverService {
             Set.of(RequestStatus.APPROVED.name(), RequestStatus.EXECUTING.name());
 
     private final CutoverRepository repo;
+    private final BatchService batchService;
 
     /** 窗口最大分钟数，默认 240（4 小时，恰达合法）。 */
     @Value("${cutover.max-window-minutes:240}")
@@ -71,8 +74,9 @@ public class CutoverService {
     @Value("${cutover.verification-timeout-minutes:10}")
     private long verificationTimeoutMinutes;
 
-    public CutoverService(CutoverRepository repo) {
+    public CutoverService(CutoverRepository repo, BatchService batchService) {
         this.repo = repo;
+        this.batchService = batchService;
     }
 
     // ---------------- 申请 ----------------
@@ -179,6 +183,7 @@ public class CutoverService {
         List<String> systems = repo.findSystemsByDevice(po.getDeviceCode());
         po.setImpactSystems(String.join(",", systems));
         po.setStatus(RequestStatus.IMPACT_ANALYZED.name());
+        po.setVersionNo(po.getVersionNo() + 1);
         po.setUpdatedAt(LocalDateTime.now());
         repo.updateMutable(po);
         return new ActionResult(false,
@@ -239,6 +244,7 @@ public class CutoverService {
             message = "审批拒绝，状态 REJECTED";
         }
         po.setUpdatedAt(LocalDateTime.now());
+        po.setVersionNo(po.getVersionNo() + 1);
         repo.updateMutable(po);
         insertEvent(req.requestUid(), req.requestId(), EventType.APPROVE, null, fp,
                 message, false);
@@ -249,10 +255,23 @@ public class CutoverService {
 
     @Transactional
     public ActionResult startExecution(StartExecutionRequest req) {
+        // 与批次发布共用全局互斥点，保证发布/启动并发只形成一致顺序。
+        repo.lockGlobal();
         String fp = FingerprintUtil.sha256("EXECUTE", req.requestId(), req.startTime());
         CutoverEventPO existed = repo.findEvent(req.requestUid());
         if (existed != null) {
             return resolveIdempotent(existed, fp, req.requestId());
+        }
+
+        // 批次成员：先锁批次行，再锁同批全部成员行（按编号排序），与失败传播串行化。
+        String batchId = batchService.peekOpenBatchId(req.requestId());
+        Map<String, CutoverRequestPO> lockedMembers = null;
+        if (batchId != null) {
+            batchService.lockBatchOrThrow(batchId);
+            lockedMembers = new TreeMap<>();
+            for (CutoverRequestPO m : repo.lockMemberRequests(batchId)) {
+                lockedMembers.put(m.getRequestId(), m);
+            }
         }
 
         CutoverRequestPO po = mustLock(req.requestId());
@@ -263,6 +282,10 @@ public class CutoverService {
         if (RequestStatus.EXECUTING.name().equals(po.getStatus())) {
             return new ActionResult(true, "割接已在执行中，幂等返回", toView(po));
         }
+        if (RequestStatus.DEPENDENCY_BLOCKED.name().equals(po.getStatus())) {
+            throw new BusinessRuleException("申请已被失败前置依赖阻断（阻断来源 "
+                    + po.getBlockedSources() + "），不能启动执行");
+        }
         if (!RequestStatus.APPROVED.name().equals(po.getStatus())) {
             throw new BusinessRuleException("只有 APPROVED 状态可开始执行，当前状态 "
                     + po.getStatus());
@@ -271,8 +294,21 @@ public class CutoverService {
                 || req.startTime().isAfter(po.getWindowEnd())) {
             throw new BusinessRuleException("执行开始时间必须落在窗口 [start,end] 内");
         }
+
+        // 批内执行门禁：所有直接前置必须已验证通过并封板；未满足返回等待，不写步骤、不占键。
+        if (batchId != null) {
+            List<String> waitingOn = batchService.waitingPrerequisites(
+                    batchId, req.requestId(), lockedMembers);
+            if (!waitingOn.isEmpty()) {
+                return new ActionResult(false,
+                        "执行门禁未满足：直接前置 " + waitingOn + " 尚未全部验证封板，等待重试",
+                        toView(po), true, waitingOn);
+            }
+        }
+
         po.setStatus(RequestStatus.EXECUTING.name());
         po.setExecStartedAt(req.startTime());
+        po.setVersionNo(po.getVersionNo() + 1);
         po.setUpdatedAt(LocalDateTime.now());
         repo.updateMutable(po);
         String message = "进入窗口执行，执行开始时间 " + req.startTime();
@@ -285,6 +321,8 @@ public class CutoverService {
 
     @Transactional
     public ActionResult report(StepReportRequest req) {
+        // 与批次发布/失败传播共用全局互斥点。
+        repo.lockGlobal();
         String fp = FingerprintUtil.sha256("REPORT", req.requestId(), req.seqNo(),
                 req.success(), req.reportedAt(), req.remark());
         CutoverEventPO existed = repo.findEvent(req.requestUid());
@@ -293,6 +331,12 @@ public class CutoverService {
         }
 
         // 同一事务内锁定申请行与全部步骤行，回退/验证/封板竞态在此串行化。
+        // 批次成员先锁批次行再锁成员行，与启动门禁/失败传播保持一致的加锁顺序。
+        String batchId = batchService.peekOpenBatchId(req.requestId());
+        if (batchId != null) {
+            batchService.lockBatchOrThrow(batchId);
+            repo.lockMemberRequests(batchId);
+        }
         CutoverRequestPO po = mustLock(req.requestId());
         List<CutoverStepPO> steps = repo.lockSteps(req.requestId());
         CutoverEventPO afterLock = repo.findEvent(req.requestUid());
@@ -412,6 +456,7 @@ public class CutoverService {
         String message;
         if (allSuccess) {
             po.setStatus(RequestStatus.VERIFIED.name());
+            po.setVersionNo(po.getVersionNo() + 1);
             po.setUpdatedAt(now);
             repo.updateMutable(po);
             message = "步骤 seqNo=" + req.seqNo() + " 成功，全部步骤完成，验证通过 VERIFIED";
@@ -427,12 +472,19 @@ public class CutoverService {
 
     @Transactional
     public ActionResult expireCheck(ExpireCheckRequest req) {
+        // 与批次发布/失败传播共用全局互斥点。
+        repo.lockGlobal();
         String fp = FingerprintUtil.sha256("EXPIRE", req.requestId(), req.atTime());
         CutoverEventPO existed = repo.findEvent(req.requestUid());
         if (existed != null) {
             return resolveIdempotent(existed, fp, req.requestId());
         }
 
+        String batchId = batchService.peekOpenBatchId(req.requestId());
+        if (batchId != null) {
+            batchService.lockBatchOrThrow(batchId);
+            repo.lockMemberRequests(batchId);
+        }
         CutoverRequestPO po = mustLock(req.requestId());
         List<CutoverStepPO> steps = repo.lockSteps(req.requestId());
         CutoverEventPO afterLock = repo.findEvent(req.requestUid());
@@ -509,12 +561,20 @@ public class CutoverService {
 
     @Transactional
     public ActionResult seal(SealRequest req) {
+        // 与批次发布/收口共用全局互斥点。
+        repo.lockGlobal();
         String fp = FingerprintUtil.sha256("SEAL", req.requestId());
         CutoverEventPO existed = repo.findEvent(req.requestUid());
         if (existed != null) {
             return resolveIdempotent(existed, fp, req.requestId());
         }
 
+        // 批次成员先锁批次行再锁成员行，收口时尝试关闭批次。
+        String batchId = batchService.peekOpenBatchId(req.requestId());
+        if (batchId != null) {
+            batchService.lockBatchOrThrow(batchId);
+            repo.lockMemberRequests(batchId);
+        }
         CutoverRequestPO po = mustLock(req.requestId());
         CutoverEventPO afterLock = repo.findEvent(req.requestUid());
         if (afterLock != null) {
@@ -536,10 +596,13 @@ public class CutoverService {
                     + po.getStatus());
         }
         po.setStatus(RequestStatus.SEALED.name());
+        po.setVersionNo(po.getVersionNo() + 1);
         po.setUpdatedAt(LocalDateTime.now());
         repo.updateMutable(po);
         insertEvent(req.requestUid(), req.requestId(), EventType.SEAL, null, fp,
                 "验证封板完成，状态 SEALED", false);
+        // 批内成员封板：若全部成员到达终态则关闭批次并释放成员占用。
+        batchService.tryCloseBatch(po.getOpenBatchId());
         return new ActionResult(false, "验证封板完成，状态 SEALED", toView(po));
     }
 
@@ -593,6 +656,7 @@ public class CutoverService {
         po.setRollbackCause(cause);
         po.setStatus("WINDOW_EXPIRED".equals(cause)
                 ? RequestStatus.WINDOW_EXPIRED.name() : RequestStatus.ROLLED_BACK.name());
+        po.setVersionNo(po.getVersionNo() + 1);
         po.setUpdatedAt(now);
         repo.updateMutable(po);
 
@@ -604,6 +668,9 @@ public class CutoverService {
                     FingerprintUtil.sha256("ROLLBACK", po.getRequestId(), cause, triggerSeq),
                     "命中回退判据: " + cause, false);
         }
+
+        // 批次成员回退/超期：同事务向尚未开始的可达后继传播依赖阻断，并尝试关闭批次。
+        batchService.propagateFailureAndMaybeClose(po);
     }
 
     private void persistStep(CutoverStepPO step) {
@@ -697,10 +764,15 @@ public class CutoverService {
                 ? List.of()
                 : Arrays.stream(po.getImpactSystems().split(","))
                     .filter(s -> !s.isEmpty()).toList();
+        List<String> blockedSources = po.getBlockedSources() == null || po.getBlockedSources().isBlank()
+                ? List.of()
+                : Arrays.stream(po.getBlockedSources().split(","))
+                    .filter(s -> !s.isEmpty()).sorted().toList();
         return new RequestView(po.getRequestId(), po.getTitle(), po.getDeviceCode(),
                 po.getPriority(), po.getWindowStart(), po.getWindowEnd(), po.getStatus(),
                 po.getImpactSystems() == null ? null : impacts,
-                po.getRejectReason(), po.getRollbackCause(), stepViews);
+                po.getRejectReason(), po.getRollbackCause(), stepViews,
+                po.getVersionNo(), po.getOpenBatchId(), blockedSources);
     }
 
     private String writeSnapshot(String message) {

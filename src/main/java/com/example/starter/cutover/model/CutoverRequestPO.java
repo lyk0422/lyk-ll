@@ -19,6 +19,12 @@ public class CutoverRequestPO {
     private String rejectReason;
     private LocalDateTime execStartedAt;
     private String rollbackCause;
+    private long versionNo = 1L;
+    /** 当前绑定的未结束批次 ID；null 表示不属于任何未结束批次。 */
+    private String openBatchId;
+    private boolean blockedFlag;
+    /** 首个阻断来源集合，逗号分隔按申请编号排序；null 表示未阻断。 */
+    private String blockedSources;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
@@ -48,6 +54,14 @@ public class CutoverRequestPO {
     public void setExecStartedAt(LocalDateTime execStartedAt) { this.execStartedAt = execStartedAt; }
     public String getRollbackCause() { return rollbackCause; }
     public void setRollbackCause(String rollbackCause) { this.rollbackCause = rollbackCause; }
+    public long getVersionNo() { return versionNo; }
+    public void setVersionNo(long versionNo) { this.versionNo = versionNo; }
+    public String getOpenBatchId() { return openBatchId; }
+    public void setOpenBatchId(String openBatchId) { this.openBatchId = openBatchId; }
+    public boolean isBlockedFlag() { return blockedFlag; }
+    public void setBlockedFlag(boolean blockedFlag) { this.blockedFlag = blockedFlag; }
+    public String getBlockedSources() { return blockedSources; }
+    public void setBlockedSources(String blockedSources) { this.blockedSources = blockedSources; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }

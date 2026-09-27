@@ -19,5 +19,9 @@ public enum EventType {
     /** 窗口超期收口判定 */
     EXPIRE_CHECK,
     /** 回退完成 */
-    ROLLBACK_COMPLETE
+    ROLLBACK_COMPLETE,
+    /** 批次发布（成员/依赖/窗口快照冻结） */
+    BATCH_PUBLISH,
+    /** 前置失败向后继传播的依赖阻断 */
+    DEPENDENCY_BLOCKED
 }

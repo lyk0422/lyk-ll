@@ -34,12 +34,16 @@ CREATE TABLE IF NOT EXISTS cutover_request (
     priority         VARCHAR(16)  NOT NULL COMMENT '优先级：HIGH/MEDIUM/LOW',
     window_start     TIMESTAMP    NOT NULL COMMENT '窗口开始时间(含),Asia/Shanghai',
     window_end       TIMESTAMP    NOT NULL COMMENT '窗口结束时间(不含),Asia/Shanghai',
-    status           VARCHAR(24)  NOT NULL COMMENT '状态:SUBMITTED/IMPACT_ANALYZED/APPROVED/EXECUTING/VERIFIED/SEALED/REJECTED/ROLLING_BACK/ROLLED_BACK/WINDOW_EXPIRED',
+    status           VARCHAR(24)  NOT NULL COMMENT '状态:SUBMITTED/IMPACT_ANALYZED/APPROVED/EXECUTING/VERIFIED/SEALED/REJECTED/ROLLING_BACK/ROLLED_BACK/WINDOW_EXPIRED/DEPENDENCY_BLOCKED',
     impact_systems   VARCHAR(1000) COMMENT '影响分析命中的业务系统编码,逗号分隔;NULL表示尚未分析',
     fingerprint      VARCHAR(128) NOT NULL COMMENT 'requestId+全部业务字段的SHA-256指纹',
     reject_reason    VARCHAR(500) COMMENT '拒绝原因;NULL表示未拒绝',
     exec_started_at  TIMESTAMP    COMMENT '窗口执行开始时间;NULL表示尚未进入执行',
     rollback_cause   VARCHAR(32)  COMMENT '回退判据:HARDCHECK_FAILED硬性检查失败/CRITICAL_TIMEOUT验证点超时/CRITICAL_FAILED验证点失败/STEP_FAILED普通步骤失败/WINDOW_EXPIRED窗口超期;NULL表示未回退',
+    version_no       BIGINT       NOT NULL DEFAULT 1 COMMENT '业务版本号:从1开始,每次成功变更+1,发布批次时按expectedVersion校验',
+    open_batch_id    VARCHAR(64)  COMMENT '当前绑定的未结束批次ID;NULL表示不属于任何未结束批次,批次关闭后置空以便重新组批',
+    blocked_flag     BOOLEAN      NOT NULL DEFAULT FALSE COMMENT '依赖阻断标记:TRUE表示已被失败前置阻断(状态DEPENDENCY_BLOCKED)',
+    blocked_sources  VARCHAR(1000) COMMENT '首个阻断来源集合:直接失败前置申请编号,逗号分隔按编号排序;NULL表示未阻断',
     created_at       TIMESTAMP    NOT NULL COMMENT '创建时间',
     updated_at       TIMESTAMP    NOT NULL COMMENT '最近更新时间',
     UNIQUE (request_id)
@@ -76,3 +80,68 @@ CREATE TABLE IF NOT EXISTS cutover_event (
 
 CREATE INDEX IF NOT EXISTS idx_step_request ON cutover_step(request_id);
 CREATE INDEX IF NOT EXISTS idx_event_request ON cutover_event(request_id);
+
+-- 批次相关写操作的全局互斥行：批次发布与成员启动/回报/巡检/封板均先锁此行，
+-- 再按 批次行 -> 成员申请行(按编号排序) -> 步骤行 的顺序加锁，保证并发只形成一致顺序。
+CREATE TABLE IF NOT EXISTS cutover_mutex (
+    id   INT PRIMARY KEY,
+    name VARCHAR(32) NOT NULL COMMENT '互斥锁名称,固定 global'
+);
+MERGE INTO cutover_mutex (id, name) KEY(id) VALUES (1, 'global');
+
+-- 割接批次主表：发布时原子冻结成员、依赖与窗口快照
+CREATE TABLE IF NOT EXISTS cutover_batch (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id         VARCHAR(64)  NOT NULL COMMENT '批次ID(发布请求幂等键)',
+    frozen_at        TIMESTAMP    NOT NULL COMMENT '批次发布冻结时刻(Asia/Shanghai)',
+    members_json     VARCHAR(4000) NOT NULL COMMENT '冻结的成员快照:JSON数组,元素{requestId,expectedVersion,windowStart,windowEnd},按requestId排序',
+    edges_json       VARCHAR(4000) NOT NULL COMMENT '冻结的有向依赖快照:JSON数组,元素{from,to},按(from,to)排序',
+    status           VARCHAR(16)  NOT NULL COMMENT '批次状态:OPEN未结束(仍有成员未到终态)/CLOSED已结束(全部成员终态)',
+    fingerprint      VARCHAR(128) NOT NULL COMMENT 'requestId+版本+成员集合+依赖集合+发布时刻的结构化SHA-256指纹',
+    result_snapshot  VARCHAR(2000) COMMENT '首次发布结果快照(JSON),供同键同参重放',
+    created_at       TIMESTAMP    NOT NULL COMMENT '创建时间',
+    updated_at       TIMESTAMP    NOT NULL COMMENT '最近更新时间',
+    UNIQUE (batch_id)
+);
+
+-- 批次成员冻结表：一项申请最多属于一个未结束批次，由 request_id 上的部分唯一索引兜底
+CREATE TABLE IF NOT EXISTS cutover_batch_member (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id         VARCHAR(64)  NOT NULL COMMENT '所属批次ID',
+    request_id       VARCHAR(64)  NOT NULL COMMENT '成员申请ID',
+    expected_version BIGINT       NOT NULL COMMENT '发布时冻结的申请版本',
+    window_start     TIMESTAMP    NOT NULL COMMENT '冻结的窗口开始时间(含),Asia/Shanghai',
+    window_end       TIMESTAMP    NOT NULL COMMENT '冻结的窗口结束时间(不含),Asia/Shanghai',
+    ord              INT          NOT NULL COMMENT '成员在批次内按requestId排序的序号',
+    created_at       TIMESTAMP    NOT NULL COMMENT '创建时间',
+    UNIQUE (batch_id, request_id)
+);
+
+-- 批次有向依赖边冻结表：边两端必须都是批内成员
+CREATE TABLE IF NOT EXISTS cutover_batch_edge (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id         VARCHAR(64)  NOT NULL COMMENT '所属批次ID',
+    from_request     VARCHAR(64)  NOT NULL COMMENT '前置申请编号(边的起点)',
+    to_request       VARCHAR(64)  NOT NULL COMMENT '后继申请编号(边的终点)',
+    ord              INT          NOT NULL COMMENT '边在批次内按(from,to)排序的序号',
+    created_at       TIMESTAMP    NOT NULL COMMENT '创建时间',
+    UNIQUE (batch_id, from_request, to_request)
+);
+
+-- 依赖阻断明细表：仅记录“首个阻断来源集合”（失败前置的直接后继），传播不重复记源
+CREATE TABLE IF NOT EXISTS cutover_block (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id         VARCHAR(64)  NOT NULL COMMENT '所属批次ID',
+    request_id       VARCHAR(64)  NOT NULL COMMENT '被阻断的申请ID',
+    source_request   VARCHAR(64)  NOT NULL COMMENT '阻断来源申请ID(进入回退/超期的失败前置)',
+    created_at       TIMESTAMP    NOT NULL COMMENT '阻断生成时间(与失败前置状态提交同事务)',
+    UNIQUE (batch_id, request_id, source_request)
+);
+
+CREATE INDEX IF NOT EXISTS idx_member_request ON cutover_batch_member(request_id);
+CREATE INDEX IF NOT EXISTS idx_edge_batch ON cutover_batch_edge(batch_id);
+CREATE INDEX IF NOT EXISTS idx_block_batch ON cutover_block(batch_id);
+CREATE INDEX IF NOT EXISTS idx_block_request ON cutover_block(request_id);
+
+-- “一项申请最多属于一个未结束批次”由 cutover_request.open_batch_id 在
+-- 发布事务内对申请行 FOR UPDATE 后判定并写回；批次关闭时置空 open_batch_id。
