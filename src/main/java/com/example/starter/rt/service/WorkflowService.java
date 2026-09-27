@@ -28,6 +28,7 @@ import com.example.starter.rt.repository.PlanRepository;
 import com.example.starter.rt.repository.PlanRepository.ActivePlanRow;
 import com.example.starter.rt.repository.PlanRepository.OarDoseRow;
 import com.example.starter.rt.repository.PlanRepository.PlanVersionRow;
+import com.example.starter.rt.repository.SchedulingRepository;
 import com.example.starter.rt.repository.WorkflowRepository;
 import com.example.starter.rt.repository.WorkflowRepository.AuditItemRow;
 import com.example.starter.rt.repository.WorkflowRepository.AuditRow;
@@ -51,16 +52,18 @@ public class WorkflowService {
     private final PlanRepository planRepository;
     private final DirectoryRepository directoryRepository;
     private final WorkflowRepository workflowRepository;
+    private final SchedulingRepository schedulingRepository;
     private final DoseEvaluation doseEvaluation;
     private final IdempotencyTemplate idempotency;
     private final Clock clock;
 
     public WorkflowService(PlanRepository planRepository, DirectoryRepository directoryRepository,
-                           WorkflowRepository workflowRepository, DoseEvaluation doseEvaluation,
-                           IdempotencyTemplate idempotency, Clock clock) {
+                           WorkflowRepository workflowRepository, SchedulingRepository schedulingRepository,
+                           DoseEvaluation doseEvaluation, IdempotencyTemplate idempotency, Clock clock) {
         this.planRepository = planRepository;
         this.directoryRepository = directoryRepository;
         this.workflowRepository = workflowRepository;
+        this.schedulingRepository = schedulingRepository;
         this.doseEvaluation = doseEvaluation;
         this.idempotency = idempotency;
         this.clock = clock;
@@ -169,6 +172,9 @@ public class WorkflowService {
                 return reject(409, "PLAN_REVISION_RACE",
                         "换版批准并发冲突：旧版本失效或守卫切换未成功");
             }
+            // 计划改版：未开始排程同事务取消并释放设备占用；已执行分次剂量与实绩不变。
+            schedulingRepository.cancelScheduledItemsForPlan(patientId, planCode, "REVISION");
+            schedulingRepository.cancelEmptyActiveBatches(patientId, planCode, now);
         }
 
         planRepository.markApproved(version.id(), now);

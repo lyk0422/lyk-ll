@@ -16,3 +16,7 @@ MERGE INTO constraint_item
     (template_code, organ_code, organ_name, metric_type, metric_ref, limit_value)
 KEY (template_code, organ_code, metric_type, metric_ref)
 VALUES ('TPL_PELVIS', 'BLADDER', '膀胱', 'V_DOSE_PCT', 4000, 40.00);
+
+MERGE INTO device (device_id, device_name, max_complexity_level, version, created_at, updated_at)
+KEY (device_id)
+VALUES ('DV1001', '合成直线加速器-甲', 3, 1, TIMESTAMP '2026-09-26 09:10:00', TIMESTAMP '2026-09-26 09:10:00');

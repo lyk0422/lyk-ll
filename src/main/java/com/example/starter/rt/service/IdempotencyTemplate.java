@@ -48,6 +48,21 @@ public class IdempotencyTemplate {
      */
     public RecordedResponse execute(OperationType operation, String requestId, Map<String, ?> params,
                                     Supplier<RecordedResponse> action) {
+        return doExecute(operation, requestId, params, action, true);
+    }
+
+    /**
+     * 按 requestId 幂等执行业务动作，但仅冻结成功（2xx）结果：
+     * 业务拒绝（422/409 等）不占键、不留痕，同键可在修正后重新发起；
+     * 同键同参重放首次冻结结果，同键异参抛 409。
+     */
+    public RecordedResponse executeSuccessOnly(OperationType operation, String requestId,
+                                               Map<String, ?> params, Supplier<RecordedResponse> action) {
+        return doExecute(operation, requestId, params, action, false);
+    }
+
+    private RecordedResponse doExecute(OperationType operation, String requestId, Map<String, ?> params,
+                                       Supplier<RecordedResponse> action, boolean recordFailure) {
         String fingerprint = Fingerprint.of(operation, requestId, params);
         Optional<IdempotentRow> existing = workflow.findIdempotent(requestId);
         if (existing.isPresent()) {
@@ -55,6 +70,10 @@ public class IdempotencyTemplate {
         }
 
         RecordedResponse result = action.get();
+        if (!recordFailure && (result.httpStatus() < 200 || result.httpStatus() >= 300)) {
+            // 失败不占键：业务拒绝随事务提交但不写幂等记录，同键可再次发起。
+            return result;
+        }
         try {
             workflow.insertIdempotent(requestId, operation.name(), fingerprint,
                     result.httpStatus(), writeJson(result.body()), LocalDateTime.now(clock));
