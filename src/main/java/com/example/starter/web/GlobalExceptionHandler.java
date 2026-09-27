@@ -30,6 +30,11 @@ public class GlobalExceptionHandler {
         return build(ex.status(), ex.getMessage());
     }
 
+    @ExceptionHandler(ApiUnprocessableException.class)
+    public ResponseEntity<Map<String, Object>> handleUnprocessable(ApiUnprocessableException ex) {
+        return build(ex.status(), ex.getMessage());
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<Map<String, Object>> handleValidation(MethodArgumentNotValidException ex) {
         String message = ex.getBindingResult().getFieldErrors().stream()

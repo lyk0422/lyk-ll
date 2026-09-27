@@ -46,6 +46,14 @@ public class DispatchRepository {
         o.setCurrentCycleNo(rs.getInt("current_cycle_no"));
         long sup = rs.getLong("superseded_by_order_id");
         o.setSupersededByOrderId(rs.wasNull() ? null : sup);
+        long planId = rs.getLong("plan_id");
+        o.setPlanId(rs.wasNull() ? null : planId);
+        int planVersion = rs.getInt("plan_version");
+        o.setPlanVersion(rs.wasNull() ? null : planVersion);
+        java.sql.Date planDate = rs.getDate("plan_date");
+        o.setPlanDate(planDate == null ? null : planDate.toLocalDate());
+        int slotIndex = rs.getInt("slot_index");
+        o.setSlotIndex(rs.wasNull() ? null : slotIndex);
         o.setReceivedAt(rs.getTimestamp("received_at").toInstant());
         Timestamp settled = rs.getTimestamp("settled_at");
         o.setSettledAt(settled == null ? null : settled.toInstant());
@@ -120,8 +128,9 @@ public class DispatchRepository {
                     INSERT INTO curtail_order
                         (order_no, farm_code, request_id, fingerprint, target_power_kw,
                          status, current_cycle_no, superseded_by_order_id, active_flag,
+                         plan_id, plan_version, plan_date, slot_index,
                          received_at, settled_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, Statement.RETURN_GENERATED_KEYS);
             ps.setString(1, order.getOrderNo());
             ps.setString(2, order.getFarmCode());
@@ -138,8 +147,29 @@ public class DispatchRepository {
             // 新指令一律先以非执行中（active_flag=NULL）插入，由服务在旧指令作废后显式置 Y，
             // 保证同一事务内不会出现两个执行中指令。
             ps.setNull(9, java.sql.Types.CHAR);
-            ps.setTimestamp(10, Timestamp.from(order.getReceivedAt()));
-            ps.setTimestamp(11, order.getSettledAt() == null ? null : Timestamp.from(order.getSettledAt()));
+            // 计划绑定信息：受理绑定模式指令时冻结；未绑定指令四列均为 NULL。
+            if (order.getPlanId() == null) {
+                ps.setNull(10, java.sql.Types.BIGINT);
+            } else {
+                ps.setLong(10, order.getPlanId());
+            }
+            if (order.getPlanVersion() == null) {
+                ps.setNull(11, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(11, order.getPlanVersion());
+            }
+            if (order.getPlanDate() == null) {
+                ps.setNull(12, java.sql.Types.DATE);
+            } else {
+                ps.setDate(12, java.sql.Date.valueOf(order.getPlanDate()));
+            }
+            if (order.getSlotIndex() == null) {
+                ps.setNull(13, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(13, order.getSlotIndex());
+            }
+            ps.setTimestamp(14, Timestamp.from(order.getReceivedAt()));
+            ps.setTimestamp(15, order.getSettledAt() == null ? null : Timestamp.from(order.getSettledAt()));
             return ps;
         }, keyHolder);
         Number key = keyHolder.getKey();

@@ -19,6 +19,10 @@ public class CurtailOrder {
     private OrderStatus status;
     private int currentCycleNo;
     private Long supersededByOrderId;
+    private Long planId;
+    private Integer planVersion;
+    private java.time.LocalDate planDate;
+    private Integer slotIndex;
     private Instant receivedAt;
     private Instant settledAt;
 
@@ -92,6 +96,38 @@ public class CurtailOrder {
 
     public void setSupersededByOrderId(Long supersededByOrderId) {
         this.supersededByOrderId = supersededByOrderId;
+    }
+
+    public Long getPlanId() {
+        return planId;
+    }
+
+    public void setPlanId(Long planId) {
+        this.planId = planId;
+    }
+
+    public Integer getPlanVersion() {
+        return planVersion;
+    }
+
+    public void setPlanVersion(Integer planVersion) {
+        this.planVersion = planVersion;
+    }
+
+    public java.time.LocalDate getPlanDate() {
+        return planDate;
+    }
+
+    public void setPlanDate(java.time.LocalDate planDate) {
+        this.planDate = planDate;
+    }
+
+    public Integer getSlotIndex() {
+        return slotIndex;
+    }
+
+    public void setSlotIndex(Integer slotIndex) {
+        this.slotIndex = slotIndex;
     }
 
     public Instant getReceivedAt() {

@@ -16,28 +16,35 @@ import com.example.starter.domain.AlertEvent;
 import com.example.starter.domain.AlertType;
 import com.example.starter.domain.Allocation;
 import com.example.starter.domain.CurtailOrder;
+import com.example.starter.domain.DayAheadPlan;
 import com.example.starter.domain.DispatchCycle;
 import com.example.starter.domain.ExecutionReport;
 import com.example.starter.domain.IdempotentRecord;
 import com.example.starter.domain.LateReportEvent;
+import com.example.starter.domain.OrderPlanBase;
 import com.example.starter.domain.OrderStatus;
+import com.example.starter.domain.PlanSlot;
 import com.example.starter.domain.Turbine;
 import com.example.starter.dto.AllocationItem;
 import com.example.starter.dto.AlertView;
 import com.example.starter.dto.OrderDetailResponse;
 import com.example.starter.dto.OrderReceiveRequest;
 import com.example.starter.dto.OrderReceiveResponse;
+import com.example.starter.dto.PlanBindingEvidenceResponse;
+import com.example.starter.dto.PlanOrderReceiveRequest;
 import com.example.starter.dto.ReportRequest;
 import com.example.starter.dto.ReportResponse;
 import com.example.starter.dto.SettleResponse;
 import com.example.starter.repo.DispatchRepository;
 import com.example.starter.repo.IdempotentRepository;
+import com.example.starter.repo.PlanRepository;
 import com.example.starter.repo.TurbineRepository;
 import com.example.starter.support.Fingerprints;
 import com.example.starter.support.ServiceClock;
 import com.example.starter.web.ApiBadRequestException;
 import com.example.starter.web.ApiConflictException;
 import com.example.starter.web.ApiNotFoundException;
+import com.example.starter.web.ApiUnprocessableException;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -55,17 +62,20 @@ public class DispatchService {
     private final TurbineRepository turbineRepository;
     private final DispatchRepository dispatchRepository;
     private final IdempotentRepository idempotentRepository;
+    private final PlanRepository planRepository;
     private final ObjectMapper objectMapper;
 
     public DispatchService(ServiceClock clock,
                            TurbineRepository turbineRepository,
                            DispatchRepository dispatchRepository,
                            IdempotentRepository idempotentRepository,
+                           PlanRepository planRepository,
                            ObjectMapper objectMapper) {
         this.clock = clock;
         this.turbineRepository = turbineRepository;
         this.dispatchRepository = dispatchRepository;
         this.idempotentRepository = idempotentRepository;
+        this.planRepository = planRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -159,6 +169,190 @@ public class DispatchService {
         CurtailOrder order = dispatchRepository.findOrderById(existing.getRefId());
         throw new ApiConflictException("首次请求仍在处理中");
     }
+
+    /**
+     * 接收计划绑定模式限电指令：须指定日期、时段与已发布版本。
+     * 可参与出力为各机组实时可用出力与该段核定计划的较小者，套用既有最低保留与分摊规则；
+     * 受理时在风场行锁内冻结机组基数及版本（与并发发布串行，校验的版本和基数一致），
+     * 目标不可实现整单拒绝（422），过期版本不允许绑定（422）。
+     */
+    @Transactional
+    public OrderReceiveResponse receivePlanBound(PlanOrderReceiveRequest request) {
+        Instant now = clock.now();
+        String fingerprint = Fingerprints.structured("PLAN_ORDER", List.of(
+                request.requestId(),
+                request.farmCode(),
+                String.valueOf(request.targetPowerKw()),
+                request.planDate().toString(),
+                String.valueOf(request.slotIndex()),
+                String.valueOf(request.planVersion())));
+
+        IdempotentRecord existing = idempotentRepository.findByRequestId(request.requestId());
+        if (existing != null) {
+            return resolveOrderIdempotent(existing, fingerprint);
+        }
+
+        if (!turbineRepository.lockFarmRow(request.farmCode())) {
+            throw new ApiNotFoundException("风场不存在：" + request.farmCode());
+        }
+
+        existing = idempotentRepository.findByRequestId(request.requestId());
+        if (existing != null) {
+            return resolveOrderIdempotent(existing, fingerprint);
+        }
+
+        // 版本校验在风场行锁内：与并发计划发布串行，校验通过的版本与读取的基数必属同一版本。
+        DayAheadPlan plan = planRepository.findByVersion(
+                request.farmCode(), request.planDate(), request.planVersion());
+        if (plan == null) {
+            throw new ApiNotFoundException("计划版本不存在：" + request.farmCode()
+                    + " " + request.planDate() + " v" + request.planVersion());
+        }
+        if (!plan.isCurrent()) {
+            throw new ApiUnprocessableException(
+                    "计划版本已过期，不允许被新指令绑定：" + request.farmCode()
+                            + " " + request.planDate() + " v" + request.planVersion());
+        }
+
+        List<Turbine> turbines = turbineRepository.findByFarm(request.farmCode());
+        Map<Long, Integer> plannedByTurbine = new LinkedHashMap<>();
+        for (PlanSlot slot : planRepository.findSlotsOfIndex(plan.getId(), request.slotIndex())) {
+            plannedByTurbine.put(slot.getTurbineId(), slot.getPlannedKw());
+        }
+
+        // 可参与出力 = min(实时可用出力, 该段核定计划)；目标不可实现整单拒绝。
+        int effectiveSum = turbines.stream()
+                .mapToInt(t -> Math.min(t.getAvailablePowerKw(),
+                        plannedByTurbine.getOrDefault(t.getId(), 0)))
+                .sum();
+        int floorSum = turbines.stream()
+                .mapToInt(t -> Math.min(Math.min(t.getAvailablePowerKw(),
+                        plannedByTurbine.getOrDefault(t.getId(), 0)), t.getTechnicalMinKw()))
+                .sum();
+        if (request.targetPowerKw() > effectiveSum) {
+            throw new ApiUnprocessableException(
+                    "目标出力 " + request.targetPowerKw() + " kW 高于全场可参与出力 "
+                            + effectiveSum + " kW，目标不可实现");
+        }
+        if (request.targetPowerKw() < floorSum) {
+            throw new ApiUnprocessableException(
+                    "目标出力 " + request.targetPowerKw() + " kW 低于全场可实现下限 "
+                            + floorSum + " kW，目标不可实现");
+        }
+
+        CurtailOrder active = dispatchRepository.findActiveOrder(request.farmCode());
+        if (active != null && !active.getReceivedAt().isBefore(now)) {
+            throw new ApiConflictException(
+                    "风场同一时刻已有执行中限电指令：" + active.getOrderNo());
+        }
+
+        // 先落幂等占位（唯一约束兜底并发受理），业务写入与占位同事务，失败整体回滚不占键。
+        IdempotentRecord record = new IdempotentRecord();
+        record.setRequestId(request.requestId());
+        record.setBizType("PLAN_ORDER");
+        record.setFingerprint(fingerprint);
+        record.setCreatedAt(now);
+        record.setResponseBody("");
+        if (!idempotentRepository.tryInsert(record)) {
+            return resolveOrderIdempotent(
+                    idempotentRepository.findByRequestId(request.requestId()), fingerprint);
+        }
+
+        // 以有效可参与出力分摊（复用既有最低保留与比例分摊规则）。
+        List<Turbine> effectiveTurbines = turbines.stream()
+                .map(t -> withAvailable(t, Math.min(t.getAvailablePowerKw(),
+                        plannedByTurbine.getOrDefault(t.getId(), 0))))
+                .toList();
+        List<Allocation> allocations =
+                AllocationEngine.allocate(effectiveTurbines, request.targetPowerKw(), 0L, 1);
+
+        CurtailOrder order = new CurtailOrder();
+        order.setOrderNo(generateOrderNo(now));
+        order.setFarmCode(request.farmCode());
+        order.setRequestId(request.requestId());
+        order.setFingerprint(fingerprint);
+        order.setTargetPowerKw(request.targetPowerKw());
+        order.setStatus(OrderStatus.DISPATCHED);
+        order.setCurrentCycleNo(1);
+        order.setPlanId(plan.getId());
+        order.setPlanVersion(plan.getVersion());
+        order.setPlanDate(plan.getPlanDate());
+        order.setSlotIndex(request.slotIndex());
+        order.setReceivedAt(now);
+        long newId = dispatchRepository.insertOrder(order);
+        allocations.forEach(a -> a.setOrderId(newId));
+
+        // 受理即冻结机组基数及版本：后续新计划发布不重算已受理指令。
+        List<OrderPlanBase> bases = turbines.stream().map(t -> {
+            OrderPlanBase base = new OrderPlanBase();
+            base.setOrderId(newId);
+            base.setTurbineId(t.getId());
+            base.setPlannedKw(plannedByTurbine.getOrDefault(t.getId(), 0));
+            base.setAvailableKw(t.getAvailablePowerKw());
+            return base;
+        }).toList();
+        planRepository.insertBases(newId, bases);
+
+        if (active != null) {
+            dispatchRepository.markSuperseded(active.getId(), newId);
+        }
+        dispatchRepository.insertCycle(buildCycle(newId, 1, now));
+        dispatchRepository.insertAllocations(newId, 1, allocations);
+        dispatchRepository.activateOrder(newId);
+
+        OrderReceiveResponse response = buildReceiveResponse(
+                order, turbines, allocations, effectiveSum, false);
+        idempotentRepository.updateRefAndResponse(request.requestId(), newId, toJson(response));
+        return response;
+    }
+
+    /**
+     * 指令基数证据：绑定模式指令受理时冻结的计划版本、时段与各机组基数。
+     * 未绑定计划的指令返回 bound=false；指令不存在返回 404。
+     */
+    public PlanBindingEvidenceResponse planBindingEvidence(String orderNo) {
+        CurtailOrder order = dispatchRepository.findOrderByNo(orderNo);
+        if (order == null) {
+            throw new ApiNotFoundException("指令不存在：" + orderNo);
+        }
+        if (order.getPlanId() == null) {
+            return new PlanBindingEvidenceResponse(orderNo, false,
+                    null, null, null, null, null, null, List.of());
+        }
+        Map<Long, Turbine> turbineById = turbineRepository.findByFarm(order.getFarmCode())
+                .stream().collect(Collectors.toMap(Turbine::getId, t -> t));
+        List<PlanBindingEvidenceResponse.TurbineBaseView> bases =
+                planRepository.findBases(order.getId()).stream()
+                        .map(b -> {
+                            Turbine t = turbineById.get(b.getTurbineId());
+                            return new PlanBindingEvidenceResponse.TurbineBaseView(
+                                    t == null ? String.valueOf(b.getTurbineId()) : t.getTurbineCode(),
+                                    b.getPlannedKw(), b.getAvailableKw(),
+                                    Math.min(b.getPlannedKw(), b.getAvailableKw()));
+                        })
+                        .toList();
+        Instant slotStart = order.getPlanDate().atStartOfDay()
+                .toInstant(java.time.ZoneOffset.UTC)
+                .plus(PlanService.SLOT_MINUTES * order.getSlotIndex(), ChronoUnit.MINUTES);
+        return new PlanBindingEvidenceResponse(orderNo, true,
+                order.getPlanId(), order.getPlanVersion(), order.getPlanDate(),
+                order.getSlotIndex(), slotStart,
+                slotStart.plus(PlanService.SLOT_MINUTES, ChronoUnit.MINUTES), bases);
+    }
+
+    /** 复制机组并替换可用出力（绑定模式以有效可参与出力分摊，不改写机组实时值）。 */
+    private Turbine withAvailable(Turbine t, int availableKw) {
+        Turbine copy = new Turbine();
+        copy.setId(t.getId());
+        copy.setFarmCode(t.getFarmCode());
+        copy.setTurbineCode(t.getTurbineCode());
+        copy.setRatedPowerKw(t.getRatedPowerKw());
+        copy.setTechnicalMinKw(t.getTechnicalMinKw());
+        copy.setAvailablePowerKw(availableKw);
+        copy.setUpdatedAt(t.getUpdatedAt());
+        return copy;
+    }
+
 
     /**
      * 机组执行回报：按机组＋时刻去重；满 10 分钟未达标则告警并按最新可用出力重分摊。
@@ -321,8 +515,21 @@ public class DispatchService {
         dispatchRepository.insertAlert(alert);
 
         int newCycleNo = cycleNo + 1;
+        // 绑定计划的指令：重分摊仍引用受理时冻结的核定计划，仅以最新实时可用值刷新
+        // 有效可参与出力 = min(最新实时可用, 冻结计划)；未绑定指令行为不变。
+        List<Turbine> allocInput = turbines;
+        if (order.getPlanId() != null) {
+            Map<Long, Integer> plannedByTurbine = new LinkedHashMap<>();
+            for (OrderPlanBase base : planRepository.findBases(order.getId())) {
+                plannedByTurbine.put(base.getTurbineId(), base.getPlannedKw());
+            }
+            allocInput = turbines.stream()
+                    .map(t -> withAvailable(t, Math.min(t.getAvailablePowerKw(),
+                            plannedByTurbine.getOrDefault(t.getId(), 0))))
+                    .toList();
+        }
         List<Allocation> reallocations =
-                AllocationEngine.allocate(turbines, order.getTargetPowerKw(), order.getId(), newCycleNo);
+                AllocationEngine.allocate(allocInput, order.getTargetPowerKw(), order.getId(), newCycleNo);
         dispatchRepository.insertCycle(buildCycle(order.getId(), newCycleNo, now));
         dispatchRepository.insertAllocations(order.getId(), newCycleNo, reallocations);
         dispatchRepository.updateAlertReallocated(order.getId(), cycleNo, newCycleNo);

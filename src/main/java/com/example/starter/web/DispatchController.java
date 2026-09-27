@@ -10,6 +10,8 @@ import org.springframework.web.bind.annotation.RestController;
 import com.example.starter.dto.OrderDetailResponse;
 import com.example.starter.dto.OrderReceiveRequest;
 import com.example.starter.dto.OrderReceiveResponse;
+import com.example.starter.dto.PlanBindingEvidenceResponse;
+import com.example.starter.dto.PlanOrderReceiveRequest;
 import com.example.starter.dto.ReportRequest;
 import com.example.starter.dto.ReportResponse;
 import com.example.starter.dto.SettleResponse;
@@ -34,6 +36,18 @@ public class DispatchController {
     @PostMapping("/orders")
     public OrderReceiveResponse receive(@Valid @RequestBody OrderReceiveRequest request) {
         return dispatchService.receive(request);
+    }
+
+    /** 接收计划绑定模式限电指令：须指定日期、时段与已发布版本，受理即冻结基数。 */
+    @PostMapping("/plan-orders")
+    public OrderReceiveResponse receivePlanBound(@Valid @RequestBody PlanOrderReceiveRequest request) {
+        return dispatchService.receivePlanBound(request);
+    }
+
+    /** 指令基数证据：绑定模式指令冻结的计划版本与各机组基数。 */
+    @GetMapping("/orders/{orderNo}/plan-binding")
+    public PlanBindingEvidenceResponse planBinding(@PathVariable String orderNo) {
+        return dispatchService.planBindingEvidence(orderNo);
     }
 
     /** 机组执行回报：按机组＋时刻去重，满 10 分钟未达标触发告警重分摊。 */
