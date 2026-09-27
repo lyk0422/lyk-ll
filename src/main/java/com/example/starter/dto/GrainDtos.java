@@ -1,8 +1,11 @@
 package com.example.starter.dto;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.util.List;
 
+import com.example.starter.model.FumigationStatus;
 import com.example.starter.model.JobStatus;
 import com.example.starter.model.RecheckDecision;
 import com.example.starter.model.SiloStatus;
@@ -138,5 +141,100 @@ public final class GrainDtos {
             String eventType,
             String payload,
             LocalDateTime recordedAt) {
+    }
+
+    /**
+     * 熏蒸申请请求；作业窗为 UTC 半开区间 [windowStart, windowEnd)，端点相接可共存。
+     * syntheticAgent 仅为合成方案标识，不计算真实药剂剂量；safetyThreshold 为合成安全浓度，单位 ppm。
+     */
+    public record ApplyFumigationRequest(
+            @NotBlank String requestId,
+            @NotNull Instant windowStart,
+            @NotNull Instant windowEnd,
+            @NotBlank String syntheticAgent,
+            @NotNull BigDecimal safetyThreshold) {
+    }
+
+    /** 熏蒸审批请求：expectedVersion 为客户端期望版本；两名审批人须不同，各批准一次。 */
+    public record ApproveFumigationRequest(
+            @NotBlank String requestId,
+            @NotNull Integer expectedVersion,
+            @NotBlank String approver) {
+    }
+
+    /** 熏蒸实际开始请求：startedAt 为 UTC 精确时刻，开始时再查无执行中普通通风。 */
+    public record StartFumigationRequest(
+            @NotBlank String requestId,
+            @NotNull Integer expectedVersion,
+            @NotNull Instant startedAt) {
+    }
+
+    /** 结束熏蒸转散气请求：绑定一台空闲风机，aerationStartedAt 为 UTC 精确时刻。 */
+    public record BeginAerationRequest(
+            @NotBlank String requestId,
+            @NotNull Integer expectedVersion,
+            @NotNull Long fanId,
+            @NotNull Instant aerationStartedAt) {
+    }
+
+    /** 散气合成气体采样请求：seqNo 单号内唯一且时刻严格递增；concentration 单位 ppm，有限非负小数。 */
+    public record GasReadingRequest(
+            @NotBlank String requestId,
+            @NotNull Integer expectedVersion,
+            @NotNull Integer seqNo,
+            @NotNull BigDecimal concentration,
+            @NotNull Instant measuredAt) {
+    }
+
+    /** 解除锁仓请求：两名不同复核人共同确认，须携带期望版本，确认时重查最新读数与版本。 */
+    public record ReleaseFumigationRequest(
+            @NotBlank String requestId,
+            @NotNull Integer expectedVersion,
+            @NotNull @jakarta.validation.constraints.Size(min = 2, max = 2)
+            List<@NotBlank String> reviewers) {
+    }
+
+    /** 熏蒸单视图；时间均为 UTC。 */
+    public record FumigationView(
+            long id,
+            long siloId,
+            String orderNo,
+            Instant windowStart,
+            Instant windowEnd,
+            String syntheticAgent,
+            int planVersion,
+            Integer frozenPlanVersion,
+            BigDecimal safetyThreshold,
+            FumigationStatus status,
+            Long fanId,
+            Instant startedAt,
+            Instant aerationStartedAt,
+            Instant releasedAt,
+            int version,
+            List<String> approvers,
+            boolean replayed) {
+    }
+
+    /** 气体读数视图；late=TRUE 表示解除后的迟到读数，不参与安全判定。 */
+    public record GasReadingView(
+            long id,
+            long fumigationId,
+            int seqNo,
+            BigDecimal concentration,
+            Instant measuredAt,
+            boolean late,
+            boolean replayed) {
+    }
+
+    /** 解除双复核视图。 */
+    public record ReleaseView(
+            long id,
+            long fumigationId,
+            int checkedVersion,
+            int lastSeqNo,
+            int firstSeqNo,
+            List<String> reviewers,
+            Instant releasedAt,
+            boolean replayed) {
     }
 }

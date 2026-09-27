@@ -85,6 +85,9 @@ public class VentilationService {
         if (status == SiloStatus.VENTILATING) {
             throw ApiException.conflict("JOB_ALREADY_EXECUTING", "同一仓同时刻只允许一个执行中通风作业");
         }
+        if (status == SiloStatus.FUMIGATING || status == SiloStatus.AERATING) {
+            throw ApiException.conflict("SILO_LOCKED_BY_FUMIGATION", "粮仓熏蒸锁仓中，禁止普通通风");
+        }
         if (status != SiloStatus.ALARMING) {
             throw ApiException.conflict("NO_ACTIVE_ALARM", "粮仓当前状态不允许通风: " + status);
         }
@@ -104,6 +107,25 @@ public class VentilationService {
                 Integer.class, siloId, request.windowEnd(), request.windowStart());
         if (conflicts != null && conflicts > 0) {
             throw ApiException.conflict("WINDOW_CONFLICT", "作业窗与既有作业重叠（半开区间端点相接不冲突）");
+        }
+
+        // 与同仓未终结熏蒸窗半开互斥：熏蒸窗按裸 UTC 墙钟存储，读为 UTC 瞬时再转 Asia/Shanghai 墙钟比较
+        List<java.time.Instant[]> fumigationWindows = jdbc.query(
+                "SELECT window_start, window_end FROM fumigation_order WHERE silo_id = ? AND status <> 'RELEASED'",
+                (rs, rowNum) -> new java.time.Instant[] {
+                        rs.getTimestamp("window_start").toLocalDateTime()
+                                .toInstant(java.time.ZoneOffset.UTC),
+                        rs.getTimestamp("window_end").toLocalDateTime()
+                                .toInstant(java.time.ZoneOffset.UTC)},
+                siloId);
+        java.time.ZoneId zone = java.time.ZoneId.of("Asia/Shanghai");
+        for (java.time.Instant[] window : fumigationWindows) {
+            java.time.LocalDateTime otherStart = java.time.LocalDateTime.ofInstant(window[0], zone);
+            java.time.LocalDateTime otherEnd = java.time.LocalDateTime.ofInstant(window[1], zone);
+            if (otherStart.isBefore(request.windowEnd()) && request.windowStart().isBefore(otherEnd)) {
+                throw ApiException.conflict("WINDOW_CONFLICT",
+                        "作业窗与既有熏蒸作业窗重叠（半开区间端点相接不冲突）");
+            }
         }
 
         // 风机存在性校验
