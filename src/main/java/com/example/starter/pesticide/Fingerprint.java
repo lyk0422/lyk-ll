@@ -21,9 +21,25 @@ public final class Fingerprint {
         for (String part : parts) {
             joined.append(part == null ? "" : part).append('|');
         }
+        return sha256(joined.toString());
+    }
+
+    /**
+     * 计算结构化指纹：每段以「长度:内容」长度前缀编码，合法文本含分隔符也可无歧义区分。
+     */
+    public static String structured(String... parts) {
+        StringBuilder joined = new StringBuilder();
+        for (String part : parts) {
+            String value = part == null ? "" : part;
+            joined.append(value.length()).append(':').append(value);
+        }
+        return sha256(joined.toString());
+    }
+
+    private static String sha256(String text) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(digest.digest(joined.toString().getBytes(StandardCharsets.UTF_8)));
+            return HexFormat.of().formatHex(digest.digest(text.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 不可用", e);
         }

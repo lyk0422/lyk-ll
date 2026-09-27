@@ -31,14 +31,16 @@ public class TestService {
     private final TestDao testDao;
     private final LedgerDao ledgerDao;
     private final AlertService alertService;
+    private final JointDao jointDao;
     private final Clock clock;
 
     public TestService(BatchDao batchDao, TestDao testDao, LedgerDao ledgerDao,
-                       AlertService alertService, Clock clock) {
+                       AlertService alertService, JointDao jointDao, Clock clock) {
         this.batchDao = batchDao;
         this.testDao = testDao;
         this.ledgerDao = ledgerDao;
         this.alertService = alertService;
+        this.jointDao = jointDao;
         this.clock = clock;
     }
 
@@ -133,6 +135,9 @@ public class TestService {
         }
         if (status != BatchStatus.FROZEN) {
             throw ApiException.conflict("批次非疑似冻结状态，无需复检: " + batch.status());
+        }
+        if (jointDao.findOrderByBatchId(batch.id()).isPresent()) {
+            throw ApiException.unprocessable("批次已启用联合检测，须完成综合判定，不得沿用单项目复检放行");
         }
         long recheckId;
         try {
