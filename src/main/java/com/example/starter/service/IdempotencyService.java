@@ -78,7 +78,9 @@ public class IdempotencyService {
     private String fingerprint(String operation, String requestId, Object request) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            String material = operation + '\n' + requestId + '\n' + writeJson(request);
+            // 结构化指纹材料：JSON 数组包装，字段边界由 JSON 字符串转义保证，
+            // 合法文本含分隔符（如换行）也不会与结构混淆
+            String material = writeJson(java.util.List.of(operation, requestId, writeJson(request)));
             return HexFormat.of().formatHex(digest.digest(material.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 不可用", e);

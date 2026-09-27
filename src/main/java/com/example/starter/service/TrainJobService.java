@@ -57,18 +57,21 @@ public class TrainJobService {
     private final ConsistCheckRepository consistCheckRepository;
     private final PressureReadingRepository pressureReadingRepository;
     private final IdempotencyService idempotencyService;
+    private final TailBindingService tailBindingService;
 
     public TrainJobService(TrainJobRepository jobRepository, TrainCarRepository carRepository,
                            BrakeTestRepository brakeTestRepository,
                            ConsistCheckRepository consistCheckRepository,
                            PressureReadingRepository pressureReadingRepository,
-                           IdempotencyService idempotencyService) {
+                           IdempotencyService idempotencyService,
+                           TailBindingService tailBindingService) {
         this.jobRepository = jobRepository;
         this.carRepository = carRepository;
         this.brakeTestRepository = brakeTestRepository;
         this.consistCheckRepository = consistCheckRepository;
         this.pressureReadingRepository = pressureReadingRepository;
         this.idempotencyService = idempotencyService;
+        this.tailBindingService = tailBindingService;
     }
 
     /**
@@ -136,7 +139,7 @@ public class TrainJobService {
         long jobId;
         try {
             jobId = jobRepository.insert(request.trainNo(), request.track(),
-                    cars.size(), totalLength, totalWeight);
+                    cars.size(), totalLength, totalWeight, request.tailControl());
         } catch (DuplicateKeyException e) {
             throw new ConflictException("同一股道同时刻仅允许一列作业中列车：" + request.track());
         }
@@ -179,6 +182,8 @@ public class TrainJobService {
                 .map(c -> new CarDto(c.carNo(), c.weightTons(), c.length(), c.valveClosed()))
                 .toList());
         int voidedTests = brakeTestRepository.voidAllByJobId(jobId);
+        // 摘挂改变尾车或编组版本：列尾绑定保留，但一致性确认立即失效，须重新双人确认
+        tailBindingService.invalidateConfirmations(jobId);
         BigDecimal totalLength = active.stream().map(CarRow::length).reduce(BigDecimal.ZERO, BigDecimal::add);
         BigDecimal totalWeight = active.stream().map(CarRow::weightTons).reduce(BigDecimal.ZERO, BigDecimal::add);
         int newVersion = job.consistVersion() + 1;
@@ -262,6 +267,10 @@ public class TrainJobService {
         if (!withinClosedCarLimit(closed, active.size())) {
             throw new BusinessException("关门车比例超过 6%，拒绝发车");
         }
+        // 受控作业发车联锁：同事务检查列尾装置自检未过期且一致性确认匹配最新编组
+        if (job.tailControlEnabled()) {
+            tailBindingService.requireDepartureReady(job);
+        }
         jobRepository.updateStatus(jobId, JobStatus.DEPARTURE_CONFIRMED);
         return new DepartureResponse(jobId, true, "准许发车");
     }
@@ -274,6 +283,8 @@ public class TrainJobService {
         if (job.status() != JobStatus.DEPARTURE_CONFIRMED) {
             throw new BusinessException("未发车确认，不得销记：" + job.status());
         }
+        // 销记原子解除列尾装置占用并保留全部绑定历史（同事务）
+        tailBindingService.releaseOnClosure(jobId);
         jobRepository.close(jobId);
         return new ClosureResponse(jobId, true, false, "销记完成，作业终态");
     }

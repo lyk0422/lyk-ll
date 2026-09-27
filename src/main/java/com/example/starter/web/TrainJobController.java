@@ -1,5 +1,6 @@
 package com.example.starter.web;
 
+import com.example.starter.service.TailBindingService;
 import com.example.starter.service.TrainJobService;
 import com.example.starter.web.dto.AcceptJobRequest;
 import com.example.starter.web.dto.BrakeTestRequest;
@@ -16,6 +17,12 @@ import com.example.starter.web.dto.JobResponse;
 import com.example.starter.web.dto.PressureReadingRequest;
 import com.example.starter.web.dto.PressureReadingResponse;
 import com.example.starter.web.dto.RequestIdOnly;
+import com.example.starter.web.dto.TailBindRequest;
+import com.example.starter.web.dto.TailBindingHistoryResponse;
+import com.example.starter.web.dto.TailBindingResponse;
+import com.example.starter.web.dto.TailConfirmRequest;
+import com.example.starter.web.dto.TailConfirmationResponse;
+import com.example.starter.web.dto.TailUnbindRequest;
 import com.example.starter.web.dto.TestCurveResponse;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -35,9 +42,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class TrainJobController {
 
     private final TrainJobService service;
+    private final TailBindingService tailBindingService;
 
-    public TrainJobController(TrainJobService service) {
+    public TrainJobController(TrainJobService service, TailBindingService tailBindingService) {
         this.service = service;
+        this.tailBindingService = tailBindingService;
     }
 
     /**
@@ -133,5 +142,42 @@ public class TrainJobController {
     @GetMapping("/{jobId}/consist")
     public ConsistResponse getConsist(@PathVariable long jobId) {
         return service.getConsist(jobId);
+    }
+
+    /**
+     * 绑定列尾装置与当前编组尾车（冻结编组版本）。
+     */
+    @PostMapping("/{jobId}/tail-bindings")
+    @ResponseStatus(HttpStatus.CREATED)
+    public TailBindingResponse bindTail(@PathVariable long jobId,
+                                        @Valid @RequestBody TailBindRequest request) {
+        return tailBindingService.bind(jobId, request);
+    }
+
+    /**
+     * 列尾一致性确认（须两名不同人员分别确认当前尾车与编组版本）。
+     */
+    @PostMapping("/{jobId}/tail-consistency-confirmations")
+    @ResponseStatus(HttpStatus.CREATED)
+    public TailConfirmationResponse confirmTail(@PathVariable long jobId,
+                                                @Valid @RequestBody TailConfirmRequest request) {
+        return tailBindingService.confirm(jobId, request);
+    }
+
+    /**
+     * 提前解绑列尾装置（仅发车前允许，同时撤销一致性确认）。
+     */
+    @PostMapping("/{jobId}/tail-unbind")
+    public TailBindingResponse unbindTail(@PathVariable long jobId,
+                                          @Valid @RequestBody TailUnbindRequest request) {
+        return tailBindingService.unbind(jobId, request);
+    }
+
+    /**
+     * 列尾绑定证据查询（全部绑定历史及一致性确认记录）。
+     */
+    @GetMapping("/{jobId}/tail-bindings")
+    public TailBindingHistoryResponse getTailBindings(@PathVariable long jobId) {
+        return tailBindingService.getHistory(jobId);
     }
 }

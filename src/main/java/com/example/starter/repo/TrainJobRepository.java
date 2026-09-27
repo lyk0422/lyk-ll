@@ -27,6 +27,7 @@ public class TrainJobRepository {
             rs.getBigDecimal("total_length"),
             rs.getBigDecimal("total_weight"),
             rs.getBoolean("consist_checked"),
+            rs.getBoolean("tail_control_enabled"),
             rs.getTimestamp("created_at").toLocalDateTime());
 
     private final JdbcTemplate jdbc;
@@ -39,13 +40,15 @@ public class TrainJobRepository {
      * 插入新作业，占用股道（active_track 唯一约束保证同股道同时刻仅一列作业中列车）。
      */
     public long insert(String trainNo, String track, int carCount,
-                       BigDecimal totalLength, BigDecimal totalWeight) {
+                       BigDecimal totalLength, BigDecimal totalWeight, boolean tailControlEnabled) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(con -> {
             PreparedStatement ps = con.prepareStatement(
                     "INSERT INTO train_job (train_no, track, active_track, status, consist_version,"
-                            + " car_count, total_length, total_weight, consist_checked, created_at, updated_at)"
-                            + " VALUES (?, ?, ?, 'ACCEPTED', 1, ?, ?, ?, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                            + " car_count, total_length, total_weight, consist_checked, tail_control_enabled,"
+                            + " created_at, updated_at)"
+                            + " VALUES (?, ?, ?, 'ACCEPTED', 1, ?, ?, ?, FALSE, ?,"
+                            + " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
                     new String[]{"id"});
             ps.setString(1, trainNo);
             ps.setString(2, track);
@@ -53,6 +56,7 @@ public class TrainJobRepository {
             ps.setInt(4, carCount);
             ps.setBigDecimal(5, totalLength);
             ps.setBigDecimal(6, totalWeight);
+            ps.setBoolean(7, tailControlEnabled);
             return ps;
         }, keyHolder);
         return keyHolder.getKey().longValue();

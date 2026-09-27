@@ -17,6 +17,7 @@ import java.time.LocalDateTime;
  * @param totalLength    总换长
  * @param totalWeight    总重，单位吨
  * @param consistChecked 当前编组版本是否已通过运统1核对
+ * @param tailControlEnabled 是否启用列尾装置联锁（受控作业）
  * @param createdAt      创建时间（JVM 时区）
  */
 public record JobRow(
@@ -29,5 +30,6 @@ public record JobRow(
         BigDecimal totalLength,
         BigDecimal totalWeight,
         boolean consistChecked,
+        boolean tailControlEnabled,
         LocalDateTime createdAt) {
 }

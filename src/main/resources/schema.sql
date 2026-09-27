@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS train_job (
     total_length DECIMAL(12,3) NOT NULL COMMENT '当前总换长',
     total_weight DECIMAL(12,3) NOT NULL COMMENT '当前总重，单位吨',
     consist_checked BOOLEAN NOT NULL DEFAULT FALSE COMMENT '当前编组版本是否已通过运统1核对：TRUE已通过',
+    tail_control_enabled BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否启用列尾装置联锁：TRUE受控作业，发车须列尾绑定与一致性确认；FALSE历史作业不增加新门禁',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间（JVM 时区）',
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '更新时间（JVM 时区）',
     CONSTRAINT uk_train_job_active_track UNIQUE (active_track)
@@ -91,3 +92,44 @@ CREATE TABLE IF NOT EXISTS idempotency_record (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间（JVM 时区）'
 );
 COMMENT ON TABLE idempotency_record IS '幂等记录表';
+
+CREATE TABLE IF NOT EXISTS tail_device (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '装置主键',
+    device_no VARCHAR(32) NOT NULL COMMENT '列尾装置编号（合成数据）',
+    self_test_valid_until TIMESTAMP NOT NULL COMMENT '自检合格有效截止时刻（UTC）；恰达截止即失效，仅 now<截止 可绑定与发车',
+    current_job_id BIGINT DEFAULT NULL COMMENT '当前绑定作业ID；NULL空闲，唯一约束保证一台装置同时仅绑定一个作业',
+    version INT NOT NULL COMMENT '装置版本，自1起；建档为1，自检更新/绑定/解绑等成功变更加1',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间（JVM 时区）',
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '更新时间（JVM 时区）',
+    CONSTRAINT uk_tail_device_no UNIQUE (device_no),
+    CONSTRAINT uk_tail_device_current_job UNIQUE (current_job_id)
+);
+COMMENT ON TABLE tail_device IS '列尾装置档案表';
+
+CREATE TABLE IF NOT EXISTS tail_binding (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '绑定主键',
+    job_id BIGINT NOT NULL COMMENT '所属作业ID',
+    device_id BIGINT NOT NULL COMMENT '装置主键',
+    device_no VARCHAR(32) NOT NULL COMMENT '装置编号（冗余便于证据查询）',
+    tail_car_no VARCHAR(32) NOT NULL COMMENT '绑定冻结的编组尾车车辆号',
+    consist_version INT NOT NULL COMMENT '绑定冻结的编组版本',
+    status VARCHAR(16) NOT NULL COMMENT '绑定状态：ACTIVE生效中/RELEASED已解除',
+    release_reason VARCHAR(16) DEFAULT NULL COMMENT '解除原因：CLOSURE销记/EARLY_UNBIND提前解绑；NULL生效中',
+    request_id VARCHAR(64) NOT NULL COMMENT '幂等请求键',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '绑定时间（JVM 时区）',
+    released_at TIMESTAMP DEFAULT NULL COMMENT '解除时间（JVM 时区）；NULL生效中'
+);
+COMMENT ON TABLE tail_binding IS '列尾装置绑定历史表（销记或提前解绑后保留全部历史）';
+
+CREATE TABLE IF NOT EXISTS tail_consistency_confirmation (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '确认主键',
+    binding_id BIGINT NOT NULL COMMENT '所属绑定主键',
+    job_id BIGINT NOT NULL COMMENT '所属作业ID',
+    consist_version INT NOT NULL COMMENT '确认的编组版本，须与作业当前版本一致',
+    tail_car_no VARCHAR(32) NOT NULL COMMENT '确认的尾车车辆号，须与当前编组尾车一致',
+    confirmer VARCHAR(64) NOT NULL COMMENT '确认人（合成数据）；同一版本须两名不同人员共同确认',
+    valid BOOLEAN NOT NULL DEFAULT TRUE COMMENT '是否有效：摘挂变更或解绑后立即失效，须重新确认',
+    request_id VARCHAR(64) NOT NULL COMMENT '幂等请求键',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '确认时间（JVM 时区）'
+);
+COMMENT ON TABLE tail_consistency_confirmation IS '列尾一致性双人确认表';
