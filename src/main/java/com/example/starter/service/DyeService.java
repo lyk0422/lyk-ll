@@ -28,8 +28,10 @@ import com.example.starter.api.dto.JudgeRequest;
 import com.example.starter.api.dto.LateColorRequest;
 import com.example.starter.api.dto.MergeLotsRequest;
 import com.example.starter.api.dto.RecipeItemInput;
+import com.example.starter.api.dto.ScheduleControlledRequest;
 import com.example.starter.api.dto.ScheduleLotRequest;
 import com.example.starter.api.dto.WeighingInput;
+import com.example.starter.domain.CompensationStatus;
 import com.example.starter.domain.LotStatus;
 import com.example.starter.domain.RecipeStatus;
 import com.example.starter.domain.Verdict;
@@ -185,6 +187,44 @@ public class DyeService {
         });
     }
 
+    /**
+     * 受控排缸：与普通排缸同样冻结已发布配方版本并唯一占用染缸，但缸次标记 controlled=TRUE，
+     * 投料前必须取得效价补偿批准。
+     */
+    @Transactional
+    public ServiceResult scheduleControlledLot(ScheduleControlledRequest req) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("lotNo", req.lotNo());
+        payload.put("vatNo", req.vatNo());
+        payload.put("recipeCode", req.recipeCode());
+        payload.put("recipeVersion", req.recipeVersion());
+        payload.put("fabricWeightKg", req.fabricWeightKg());
+        payload.put("controlled", true);
+        return idempotency.execute(req.requestId(), "SCHEDULE_CONTROLLED", payload, () -> {
+            Map<String, Object> recipe = requirePublishedRecipe(req.recipeCode(), req.recipeVersion());
+            Timestamp now = nowTs();
+            Long lotId;
+            try {
+                jdbc.update("INSERT INTO lot (lot_no, vat_no, recipe_code, recipe_version, liquor_ratio, "
+                        + "fabric_weight_kg, controlled, status, repair_count, created_at, updated_at) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, 0, ?, ?)",
+                        req.lotNo(), req.vatNo(), req.recipeCode(), req.recipeVersion(),
+                        recipe.get("liquor_ratio"), req.fabricWeightKg(), LotStatus.CREATED.name(), now, now);
+                lotId = jdbc.queryForObject("SELECT id FROM lot WHERE lot_no = ?", Long.class, req.lotNo());
+            } catch (DuplicateKeyException dupLot) {
+                throw new ApiException(HttpStatus.CONFLICT, "缸次号 " + req.lotNo() + " 已存在");
+            }
+            try {
+                jdbc.update("INSERT INTO vat_active (vat_no, lot_id, since) VALUES (?, ?, ?)",
+                        req.vatNo(), lotId, now);
+            } catch (DuplicateKeyException dupVat) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "染缸 " + req.vatNo() + " 已有执行中缸次，并发排缸唯一受理");
+            }
+            return ServiceResult.created(lotView(req.lotNo()));
+        });
+    }
+
     // ---------------------------------------------------------------------
     // 并缸：须同配方（同编码同冻结版本）同浴比
     // ---------------------------------------------------------------------
@@ -194,6 +234,7 @@ public class DyeService {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("lotNo", req.lotNo());
         payload.put("targetLotNo", req.targetLotNo());
+        payload.put("expectedVersion", req.expectedVersion());
         return idempotency.execute(req.requestId(), "MERGE", payload, () -> {
             if (req.lotNo().equals(req.targetLotNo())) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "缸次不能与自身并缸");
@@ -212,6 +253,39 @@ public class DyeService {
             if (((BigDecimal) source.get("liquor_ratio")).compareTo((BigDecimal) target.get("liquor_ratio")) != 0) {
                 throw new ApiException(HttpStatus.CONFLICT, "浴比不同拒绝并缸");
             }
+
+            boolean sourceControlled = Boolean.TRUE.equals(source.get("controlled"));
+            boolean targetControlled = Boolean.TRUE.equals(target.get("controlled"));
+            if (sourceControlled != targetControlled) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "受控缸次与旧非受控缸次不得并缸：" + req.lotNo() + " controlled=" + sourceControlled
+                                + "，" + req.targetLotNo() + " controlled=" + targetControlled);
+            }
+
+            Map<String, Object> sourceComp = null;
+            Map<String, Object> targetComp = null;
+            if (sourceControlled) {
+                // 受控并缸：补偿批次与补偿目标必须完全相同；按缸次主键升序加锁避免反向并缸互锁。
+                Map<String, Object> firstLot = ((Number) source.get("id")).longValue()
+                        < ((Number) target.get("id")).longValue() ? source : target;
+                Map<String, Object> secondLot = firstLot == source ? target : source;
+                requireFrozenCompensation(firstLot, String.valueOf(firstLot.get("lot_no")));
+                requireFrozenCompensation(secondLot, String.valueOf(secondLot.get("lot_no")));
+                sourceComp = requireFrozenCompensation(source, req.lotNo());
+                targetComp = requireFrozenCompensation(target, req.targetLotNo());
+                if (req.expectedVersion() == null) {
+                    throw new ApiException(HttpStatus.BAD_REQUEST,
+                            "受控并缸须携带目标缸次补偿批准 expectedVersion");
+                }
+                int targetCompVersion = ((Number) targetComp.get("version")).intValue();
+                if (req.expectedVersion() != targetCompVersion) {
+                    throw new ApiException(HttpStatus.CONFLICT,
+                            "补偿批准版本冲突：expectedVersion=" + req.expectedVersion()
+                                    + "，目标缸当前版本=" + targetCompVersion);
+                }
+                assertSameCompensation(sourceComp, targetComp, req.lotNo(), req.targetLotNo());
+            }
+
             Timestamp now = nowTs();
             BigDecimal combinedWeight = ((BigDecimal) source.get("fabric_weight_kg"))
                     .add((BigDecimal) target.get("fabric_weight_kg"));
@@ -223,14 +297,150 @@ public class DyeService {
             jdbc.update("DELETE FROM vat_active WHERE vat_no = ? AND lot_id = ?",
                     source.get("vat_no"), source.get("id"));
 
+            int targetCompVersionAfter = -1;
+            if (sourceControlled) {
+                // 源缸补偿批准随并缸失效（未投料）；目标缸按合并布重用同批次同系数重冻补偿，版本加 1。
+                int sourceCompVersion = ((Number) sourceComp.get("version")).intValue();
+                jdbc.update("UPDATE compensation SET status = ?, invalid_reason = ?, version = version + 1, "
+                        + "updated_at = ? WHERE id = ? AND status = ? AND version = ?",
+                        CompensationStatus.INVALID.name(),
+                        "缸次已并入 " + req.targetLotNo() + "，未投料补偿随并缸失效",
+                        now, sourceComp.get("id"), CompensationStatus.FROZEN.name(), sourceCompVersion);
+                targetCompVersionAfter = refreezeCompensationForMergedWeight(
+                        target, targetComp, combinedWeight, now);
+            }
+
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("requestId", req.requestId());
             body.put("mergedLotNo", req.lotNo());
             body.put("targetLotNo", req.targetLotNo());
             body.put("combinedFabricWeightKg", combinedWeight);
+            body.put("controlled", sourceControlled);
+            if (sourceControlled) {
+                body.put("compensationVersion", targetCompVersionAfter);
+            }
             body.put("status", LotStatus.MERGED.name());
             return ServiceResult.ok(body);
         });
+    }
+
+    /** 读取缸次的补偿批准并锁定，要求仍处于 FROZEN（已失效/已投料/未批准均拒绝受控投料前操作）。 */
+    private Map<String, Object> requireFrozenCompensation(Map<String, Object> lot, String lotNo) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT id, status, version FROM compensation WHERE lot_id = ? FOR UPDATE", lot.get("id"));
+        if (rows.isEmpty()) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    "受控缸次 " + lotNo + " 尚未取得效价补偿批准，拒绝操作");
+        }
+        Map<String, Object> comp = rows.get(0);
+        if (!CompensationStatus.FROZEN.name().equals(comp.get("status"))) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    "受控缸次 " + lotNo + " 补偿批准状态为 " + comp.get("status") + "，须重新审批后再操作");
+        }
+        return comp;
+    }
+
+    /** 逐染料比较两份冻结补偿：染料集合、批次号、系数版本与补偿目标克重必须完全一致。 */
+    private void assertSameCompensation(Map<String, Object> sourceComp, Map<String, Object> targetComp,
+                                        String sourceLotNo, String targetLotNo) {
+        List<Map<String, Object>> sourceItems = jdbc.queryForList(
+                "SELECT dye_code, batch_no, factor_version, compensated_target_g FROM compensation_item "
+                        + "WHERE compensation_id = ? ORDER BY dye_code", sourceComp.get("id"));
+        List<Map<String, Object>> targetItems = jdbc.queryForList(
+                "SELECT dye_code, batch_no, factor_version, compensated_target_g FROM compensation_item "
+                        + "WHERE compensation_id = ? ORDER BY dye_code", targetComp.get("id"));
+        if (sourceItems.size() != targetItems.size()) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    "受控并缸拒绝：两缸补偿染料集合不同");
+        }
+        for (int i = 0; i < sourceItems.size(); i++) {
+            Map<String, Object> a = sourceItems.get(i);
+            Map<String, Object> b = targetItems.get(i);
+            boolean same = a.get("dye_code").equals(b.get("dye_code"))
+                    && a.get("batch_no").equals(b.get("batch_no"))
+                    && ((Number) a.get("factor_version")).intValue()
+                        == ((Number) b.get("factor_version")).intValue()
+                    && ((BigDecimal) a.get("compensated_target_g"))
+                            .compareTo((BigDecimal) b.get("compensated_target_g")) == 0;
+            if (!same) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "受控并缸拒绝：染料 " + a.get("dye_code") + " 补偿不一致——"
+                                + sourceLotNo + " 批次 " + a.get("batch_no") + " v" + a.get("factor_version")
+                                + " 目标 " + a.get("compensated_target_g") + "g；"
+                                + targetLotNo + " 批次 " + b.get("batch_no") + " v" + b.get("factor_version")
+                                + " 目标 " + b.get("compensated_target_g") + "g");
+            }
+        }
+    }
+
+    /**
+     * 并缸后按合并布重、沿用同批次同系数重冻目标缸补偿目标，返回复查后新版本号。
+     * 先锁定并校验各批次（版本仍有效、未到截止、余量足以支撑合并目标），全部通过后才改写冻结项，
+     * 任一批次不满足则整单回滚，源缸与目标缸都保持原状态。
+     */
+    private int refreezeCompensationForMergedWeight(Map<String, Object> targetLot,
+                                                    Map<String, Object> targetComp,
+                                                    BigDecimal combinedWeight, Timestamp now) {
+        BigDecimal ratio = (BigDecimal) targetLot.get("liquor_ratio");
+        List<Map<String, Object>> items = jdbc.queryForList(
+                "SELECT dye_code, batch_no, factor_version, potency_factor FROM compensation_item "
+                        + "WHERE compensation_id = ? ORDER BY dye_code", targetComp.get("id"));
+
+        List<Map<String, Object>> reFrozen = new ArrayList<>();
+        for (Map<String, Object> item : items) {
+            String batchNo = (String) item.get("batch_no");
+            int factorVersion = ((Number) item.get("factor_version")).intValue();
+            List<Map<String, Object>> batchRows = jdbc.queryForList(
+                    "SELECT dye_code, available_g, expire_at, active FROM dye_batch "
+                            + "WHERE batch_no = ? AND factor_version = ? FOR UPDATE",
+                    batchNo, factorVersion);
+            if (batchRows.isEmpty() || !Boolean.TRUE.equals(batchRows.get(0).get("active"))) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "受控并缸拒绝：批次 " + batchNo + " 系数版本 v" + factorVersion + " 已失效，请重新审批");
+            }
+            Map<String, Object> batch = batchRows.get(0);
+            Timestamp expireAt = (Timestamp) batch.get("expire_at");
+            if (!now.before(expireAt)) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "受控并缸拒绝：批次 " + batchNo + " 已到/超过有效截止（恰在截止即失效）");
+            }
+            BigDecimal dosage = jdbc.queryForObject(
+                    "SELECT ri.dosage_gpl FROM recipe_item ri JOIN recipe r ON r.id = ri.recipe_id "
+                            + "WHERE r.recipe_code = ? AND r.version = ? AND ri.dye_code = ?",
+                    BigDecimal.class, targetLot.get("recipe_code"),
+                    targetLot.get("recipe_version"), item.get("dye_code"));
+            BigDecimal factor = (BigDecimal) item.get("potency_factor");
+            BigDecimal baseTarget = dosage.multiply(ratio).multiply(combinedWeight)
+                    .setScale(4, RoundingMode.HALF_UP);
+            BigDecimal compensated = baseTarget.divide(factor, 3, RoundingMode.HALF_UP);
+            BigDecimal available = (BigDecimal) batch.get("available_g");
+            if (available.compareTo(compensated) < 0) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "受控并缸拒绝：批次 " + batchNo + " 余量 " + available + "g 不足合并后补偿目标 "
+                                + compensated + "g，整单回滚");
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("dyeCode", item.get("dye_code"));
+            row.put("batchNo", batchNo);
+            row.put("factorVersion", factorVersion);
+            row.put("potencyFactor", factor);
+            row.put("baseTargetG", baseTarget);
+            row.put("compensatedTargetG", compensated);
+            reFrozen.add(row);
+        }
+
+        jdbc.update("DELETE FROM compensation_item WHERE compensation_id = ?", targetComp.get("id"));
+        for (Map<String, Object> row : reFrozen) {
+            jdbc.update("INSERT INTO compensation_item (compensation_id, dye_code, batch_no, factor_version, "
+                    + "potency_factor, base_target_g, compensated_target_g) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    targetComp.get("id"), row.get("dyeCode"), row.get("batchNo"), row.get("factorVersion"),
+                    row.get("potencyFactor"), row.get("baseTargetG"), row.get("compensatedTargetG"));
+        }
+        int currentVersion = ((Number) targetComp.get("version")).intValue();
+        int nextVersion = currentVersion + 1;
+        jdbc.update("UPDATE compensation SET version = ?, updated_at = ? WHERE id = ? AND version = ?",
+                nextVersion, now, targetComp.get("id"), currentVersion);
+        return nextVersion;
     }
 
     // ---------------------------------------------------------------------
@@ -241,6 +451,7 @@ public class DyeService {
     public ServiceResult feed(FeedRequest req) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("lotNo", req.lotNo());
+        payload.put("expectedVersion", req.expectedVersion());
         List<Map<String, Object>> weighingPayload = new ArrayList<>();
         for (WeighingInput w : req.weighings()) {
             Map<String, Object> entry = new LinkedHashMap<>();
@@ -254,98 +465,290 @@ public class DyeService {
         return idempotency.execute(req.requestId(), "FEED", payload, () -> {
             Map<String, Object> lot = requireLot(req.lotNo());
             requireStatus(lot, LotStatus.CREATED);
-
-            Long versionRecipeId = recipeId((String) lot.get("recipe_code"),
-                    ((Number) lot.get("recipe_version")).intValue());
-            List<Map<String, Object>> items = recipeItems(versionRecipeId);
-            BigDecimal ratio = (BigDecimal) lot.get("liquor_ratio");
-            BigDecimal fabricKg = (BigDecimal) lot.get("fabric_weight_kg");
-
-            Map<String, BigDecimal> actualByDye = new LinkedHashMap<>();
-            for (WeighingInput w : req.weighings()) {
-                if (actualByDye.put(w.dyeCode(), w.actualG()) != null) {
-                    throw new ApiException(HttpStatus.BAD_REQUEST,
-                            "染化料 " + w.dyeCode() + " 称量记录重复");
-                }
+            if (Boolean.TRUE.equals(lot.get("controlled"))) {
+                return feedControlled(req, lot);
             }
-            Set<String> required = new LinkedHashSet<>();
-            List<Map<String, Object>> computed = new ArrayList<>();
-            for (Map<String, Object> item : items) {
-                String dyeCode = (String) item.get("dye_code");
-                BigDecimal dosage = (BigDecimal) item.get("dosage_gpl");
-                required.add(dyeCode);
-                BigDecimal target = dosage.multiply(ratio).multiply(fabricKg).setScale(4, RoundingMode.HALF_UP);
-                BigDecimal actual = actualByDye.get(dyeCode);
-                if (actual == null) {
-                    throw new ApiException(HttpStatus.BAD_REQUEST,
-                            "缺少染化料 " + dyeCode + " 的实际称量，拒绝投料");
-                }
-                BigDecimal deviation = actual.subtract(target)
-                        .multiply(BigDecimal.valueOf(100))
-                        .divide(target, DEVIATION_SCALE, RoundingMode.HALF_UP);
-                if (deviation.abs().compareTo(WEIGH_LIMIT_PCT) > 0) {
-                    throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
-                            "染化料 " + dyeCode + " 称量偏差 " + deviation + "% 超过 ±0.5%（恰 0.5% 合法），整单拒绝投料且不扣库存");
-                }
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("dyeCode", dyeCode);
-                row.put("targetG", target);
-                row.put("actualG", actual);
-                row.put("deviationPct", deviation);
-                computed.add(row);
-            }
-            if (!actualByDye.keySet().equals(required)) {
-                Set<String> extra = new LinkedHashSet<>(actualByDye.keySet());
-                extra.removeAll(required);
+            if (req.expectedVersion() != null) {
                 throw new ApiException(HttpStatus.BAD_REQUEST,
-                        "存在配方外染化料称量：" + extra + "，拒绝投料");
+                        "旧非受控缸次投料不接受 expectedVersion，请使用原投料语义");
             }
-
-            // 库存预检：任一染化料不足整单回滚，杜绝部分扣减。
-            for (Map<String, Object> row : computed) {
-                BigDecimal stock = jdbc.queryForObject("SELECT stock_g FROM dye WHERE code = ?",
-                        BigDecimal.class, row.get("dyeCode"));
-                if (stock == null) {
-                    throw new ApiException(HttpStatus.BAD_REQUEST,
-                            "染化料 " + row.get("dyeCode") + " 不存在，拒绝投料");
-                }
-                if (stock.compareTo((BigDecimal) row.get("actualG")) < 0) {
-                    throw new ApiException(HttpStatus.CONFLICT,
-                            "染化料 " + row.get("dyeCode") + " 库存不足，拒绝投料且不扣库存");
-                }
-            }
-
-            Timestamp now = nowTs();
-            jdbc.update("INSERT INTO feeding (request_id, lot_id, fed_at) VALUES (?, ?, ?)",
-                    req.requestId(), lot.get("id"), now);
-            Long feedingId = jdbc.queryForObject(
-                    "SELECT id FROM feeding WHERE request_id = ?", Long.class, req.requestId());
-            for (Map<String, Object> row : computed) {
-                jdbc.update("INSERT INTO weighing (feeding_id, dye_code, target_g, actual_g, deviation_pct) "
-                        + "VALUES (?, ?, ?, ?, ?)",
-                        feedingId, row.get("dyeCode"), row.get("targetG"), row.get("actualG"),
-                        row.get("deviationPct"));
-                int deducted = jdbc.update("UPDATE dye SET stock_g = stock_g - ? WHERE code = ? AND stock_g >= ?",
-                        row.get("actualG"), row.get("dyeCode"), row.get("actualG"));
-                if (deducted != 1) {
-                    // 并发扣减防护：与预检构成双保险，失败随事务整体回滚。
-                    throw new ApiException(HttpStatus.CONFLICT,
-                            "染化料 " + row.get("dyeCode") + " 并发扣减失败，整单回滚");
-                }
-            }
-            jdbc.update("UPDATE lot SET status = ?, updated_at = ? WHERE id = ?",
-                    LotStatus.FED.name(), now, lot.get("id"));
-
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("requestId", req.requestId());
-            body.put("lotNo", req.lotNo());
-            body.put("liquorRatio", ratio);
-            body.put("fabricWeightKg", fabricKg);
-            body.put("weighings", computed);
-            body.put("status", LotStatus.FED.name());
-            body.put("fedAt", now.toInstant().toString());
-            return ServiceResult.ok(body);
+            return feedLegacy(req, lot);
         });
+    }
+
+    /**
+     * 受控投料：同时验证补偿版本（FROZEN + expectedVersion）、称量偏差（按补偿目标）与批次有效期，
+     * 原子扣减各染料批次余量并写称量链；第二种不足时第一种也不扣。两缸争同批余量由条件更新防超耗。
+     */
+    private ServiceResult feedControlled(FeedRequest req, Map<String, Object> lot) {
+        if (req.expectedVersion() == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "受控缸次投料须携带补偿批准 expectedVersion");
+        }
+        Timestamp now = nowTs();
+
+        // 锁定补偿批准：FROZEN 且版本匹配；修订/失效/已投料在此拦截。
+        List<Map<String, Object>> compRows = jdbc.queryForList(
+                "SELECT id, status, version FROM compensation WHERE lot_id = ? FOR UPDATE", lot.get("id"));
+        if (compRows.isEmpty()) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    "受控缸次 " + req.lotNo() + " 尚未取得效价补偿批准，拒绝投料");
+        }
+        Map<String, Object> comp = compRows.get(0);
+        int compVersion = ((Number) comp.get("version")).intValue();
+        if (!CompensationStatus.FROZEN.name().equals(comp.get("status"))) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    "受控缸次 " + req.lotNo() + " 补偿批准状态为 " + comp.get("status")
+                            + "（系数修订或已失效），须重新审批后投料");
+        }
+        if (req.expectedVersion() != compVersion) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "补偿批准版本冲突：expectedVersion=" + req.expectedVersion() + "，当前版本=" + compVersion);
+        }
+
+        List<Map<String, Object>> frozenItems = jdbc.queryForList(
+                "SELECT dye_code, batch_no, factor_version, potency_factor, base_target_g, compensated_target_g "
+                        + "FROM compensation_item WHERE compensation_id = ? ORDER BY dye_code",
+                comp.get("id"));
+
+        Map<String, BigDecimal> actualByDye = new LinkedHashMap<>();
+        for (WeighingInput w : req.weighings()) {
+            if (actualByDye.put(w.dyeCode(), w.actualG()) != null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "染料 " + w.dyeCode() + " 称量记录重复");
+            }
+        }
+        Set<String> required = new LinkedHashSet<>();
+        List<Map<String, Object>> computed = new ArrayList<>();
+        for (Map<String, Object> fi : frozenItems) {
+            String dyeCode = (String) fi.get("dye_code");
+            required.add(dyeCode);
+            BigDecimal actual = actualByDye.get(dyeCode);
+            if (actual == null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "缺少染料 " + dyeCode + " 的实际称量，拒绝投料");
+            }
+            // 锁定具体批次系数版本：修订后 active=FALSE 或缺失即拒绝。
+            List<Map<String, Object>> batchRows = jdbc.queryForList(
+                    "SELECT dye_code, potency_factor, available_g, expire_at, active "
+                            + "FROM dye_batch WHERE batch_no = ? AND factor_version = ? FOR UPDATE",
+                    fi.get("batch_no"), fi.get("factor_version"));
+            if (batchRows.isEmpty()) {
+                throw new ApiException(HttpStatus.NOT_FOUND,
+                        "批次 " + fi.get("batch_no") + " 系数版本 v" + fi.get("factor_version") + " 不存在");
+            }
+            Map<String, Object> batch = batchRows.get(0);
+            if (!dyeCode.equals(batch.get("dye_code"))) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "染料代码错配：批次 " + fi.get("batch_no") + " 属于 " + batch.get("dye_code")
+                                + "，不能用于 " + dyeCode + "，整单拒绝");
+            }
+            if (!Boolean.TRUE.equals(batch.get("active"))) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "批次 " + fi.get("batch_no") + " 系数版本 v" + fi.get("factor_version")
+                                + " 已被修订失效，未投料批准不得投料（须重新审批）");
+            }
+            Timestamp expireAt = (Timestamp) batch.get("expire_at");
+            if (!now.before(expireAt)) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "批次 " + fi.get("batch_no") + " 已到/超过有效截止 " + expireAt.toInstant()
+                                + "（恰在截止即失效），整单拒绝投料");
+            }
+            BigDecimal factor = (BigDecimal) fi.get("potency_factor");
+            if (factor.signum() <= 0) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "批次 " + fi.get("batch_no") + " 冻结系数非正，整单拒绝投料");
+            }
+            BigDecimal target = (BigDecimal) fi.get("compensated_target_g");
+            BigDecimal deviation = actual.subtract(target)
+                    .multiply(BigDecimal.valueOf(100))
+                    .divide(target, DEVIATION_SCALE, RoundingMode.HALF_UP);
+            if (deviation.abs().compareTo(WEIGH_LIMIT_PCT) > 0) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "染料 " + dyeCode + " 按补偿目标 " + target + "g 的称量偏差 " + deviation
+                                + "% 超过 ±0.5%（恰 0.5% 合法），整单拒绝投料且不扣批次余量");
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("dyeCode", dyeCode);
+            row.put("batchNo", fi.get("batch_no"));
+            row.put("factorVersion", fi.get("factor_version"));
+            row.put("potencyFactor", factor);
+            row.put("baseTargetG", fi.get("base_target_g"));
+            row.put("targetG", target);
+            row.put("actualG", actual);
+            row.put("deviationPct", deviation);
+            row.put("availableG", batch.get("available_g"));
+            computed.add(row);
+        }
+        if (!actualByDye.keySet().equals(required)) {
+            Set<String> extra = new LinkedHashSet<>(actualByDye.keySet());
+            extra.removeAll(required);
+            throw new ApiException(HttpStatus.BAD_REQUEST, "存在补偿清单外染料称量：" + extra + "，拒绝投料");
+        }
+
+        // 余量预检：任一批次不足整单回滚，杜绝部分扣减。
+        for (Map<String, Object> row : computed) {
+            BigDecimal available = (BigDecimal) row.get("availableG");
+            BigDecimal actual = (BigDecimal) row.get("actualG");
+            if (available.compareTo(actual) < 0) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "批次 " + row.get("batchNo") + " 余量 " + available + "g 不足实际称量 " + actual
+                                + "g，整单拒绝投料且不扣任何批次余量");
+            }
+        }
+
+        jdbc.update("INSERT INTO feeding (request_id, lot_id, fed_at) VALUES (?, ?, ?)",
+                req.requestId(), lot.get("id"), now);
+        Long feedingId = jdbc.queryForObject(
+                "SELECT id FROM feeding WHERE request_id = ?", Long.class, req.requestId());
+        for (Map<String, Object> row : computed) {
+            jdbc.update("INSERT INTO weighing (feeding_id, dye_code, target_g, actual_g, deviation_pct, "
+                    + "batch_no, factor_version, potency_factor, base_target_g) "
+                    + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    feedingId, row.get("dyeCode"), row.get("targetG"), row.get("actualG"),
+                    row.get("deviationPct"), row.get("batchNo"), row.get("factorVersion"),
+                    row.get("potencyFactor"), row.get("baseTargetG"));
+            int deducted = jdbc.update(
+                    "UPDATE dye_batch SET available_g = available_g - ? WHERE batch_no = ? AND factor_version = ? "
+                            + "AND available_g >= ?",
+                    row.get("actualG"), row.get("batchNo"), row.get("factorVersion"), row.get("actualG"));
+            if (deducted != 1) {
+                // 并发扣减防护：两缸争同批余量时败方整单回滚，不超耗。
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "批次 " + row.get("batchNo") + " 并发余量扣减失败，整单回滚不超耗");
+            }
+        }
+        int fedCompVersion = compVersion + 1;
+        int casComp = jdbc.update(
+                "UPDATE compensation SET status = ?, invalid_reason = NULL, version = ?, updated_at = ? "
+                        + "WHERE id = ? AND status = ? AND version = ?",
+                CompensationStatus.FED.name(), fedCompVersion, now,
+                comp.get("id"), CompensationStatus.FROZEN.name(), compVersion);
+        if (casComp != 1) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "补偿批准 " + req.lotNo() + " 状态在投料并发中变化，整单回滚");
+        }
+        jdbc.update("UPDATE lot SET status = ?, updated_at = ? WHERE id = ?",
+                LotStatus.FED.name(), now, lot.get("id"));
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("requestId", req.requestId());
+        body.put("lotNo", req.lotNo());
+        body.put("controlled", true);
+        body.put("liquorRatio", lot.get("liquor_ratio"));
+        body.put("fabricWeightKg", lot.get("fabric_weight_kg"));
+        List<Map<String, Object>> weighingView = new ArrayList<>();
+        for (Map<String, Object> row : computed) {
+            Map<String, Object> w = new LinkedHashMap<>();
+            w.put("dyeCode", row.get("dyeCode"));
+            w.put("batchNo", row.get("batchNo"));
+            w.put("factorVersion", row.get("factorVersion"));
+            w.put("potencyFactor", row.get("potencyFactor"));
+            w.put("baseTargetG", row.get("baseTargetG"));
+            w.put("targetG", row.get("targetG"));
+            w.put("actualG", row.get("actualG"));
+            w.put("deviationPct", row.get("deviationPct"));
+            weighingView.add(w);
+        }
+        body.put("weighings", weighingView);
+        body.put("compensationVersion", fedCompVersion);
+        body.put("status", LotStatus.FED.name());
+        body.put("fedAt", now.toInstant().toString());
+        return ServiceResult.ok(body);
+    }
+
+    /** 旧非受控缸次投料语义：按放大配方目标校验偏差并扣染化料总库存，不涉及批次/补偿。 */
+    private ServiceResult feedLegacy(FeedRequest req, Map<String, Object> lot) {
+        Long versionRecipeId = recipeId((String) lot.get("recipe_code"),
+                ((Number) lot.get("recipe_version")).intValue());
+        List<Map<String, Object>> items = recipeItems(versionRecipeId);
+        BigDecimal ratio = (BigDecimal) lot.get("liquor_ratio");
+        BigDecimal fabricKg = (BigDecimal) lot.get("fabric_weight_kg");
+
+        Map<String, BigDecimal> actualByDye = new LinkedHashMap<>();
+        for (WeighingInput w : req.weighings()) {
+            if (actualByDye.put(w.dyeCode(), w.actualG()) != null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "染化料 " + w.dyeCode() + " 称量记录重复");
+            }
+        }
+        Set<String> required = new LinkedHashSet<>();
+        List<Map<String, Object>> computed = new ArrayList<>();
+        for (Map<String, Object> item : items) {
+            String dyeCode = (String) item.get("dye_code");
+            BigDecimal dosage = (BigDecimal) item.get("dosage_gpl");
+            required.add(dyeCode);
+            BigDecimal target = dosage.multiply(ratio).multiply(fabricKg).setScale(4, RoundingMode.HALF_UP);
+            BigDecimal actual = actualByDye.get(dyeCode);
+            if (actual == null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "缺少染化料 " + dyeCode + " 的实际称量，拒绝投料");
+            }
+            BigDecimal deviation = actual.subtract(target)
+                    .multiply(BigDecimal.valueOf(100))
+                    .divide(target, DEVIATION_SCALE, RoundingMode.HALF_UP);
+            if (deviation.abs().compareTo(WEIGH_LIMIT_PCT) > 0) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "染化料 " + dyeCode + " 称量偏差 " + deviation + "% 超过 ±0.5%（恰 0.5% 合法），整单拒绝投料且不扣库存");
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("dyeCode", dyeCode);
+            row.put("targetG", target);
+            row.put("actualG", actual);
+            row.put("deviationPct", deviation);
+            computed.add(row);
+        }
+        if (!actualByDye.keySet().equals(required)) {
+            Set<String> extra = new LinkedHashSet<>(actualByDye.keySet());
+            extra.removeAll(required);
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "存在配方外染化料称量：" + extra + "，拒绝投料");
+        }
+
+        // 库存预检：任一染化料不足整单回滚，杜绝部分扣减。
+        for (Map<String, Object> row : computed) {
+            BigDecimal stock = jdbc.queryForObject("SELECT stock_g FROM dye WHERE code = ?",
+                    BigDecimal.class, row.get("dyeCode"));
+            if (stock == null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "染化料 " + row.get("dyeCode") + " 不存在，拒绝投料");
+            }
+            if (stock.compareTo((BigDecimal) row.get("actualG")) < 0) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "染化料 " + row.get("dyeCode") + " 库存不足，拒绝投料且不扣库存");
+            }
+        }
+
+        Timestamp now = nowTs();
+        jdbc.update("INSERT INTO feeding (request_id, lot_id, fed_at) VALUES (?, ?, ?)",
+                req.requestId(), lot.get("id"), now);
+        Long feedingId = jdbc.queryForObject(
+                "SELECT id FROM feeding WHERE request_id = ?", Long.class, req.requestId());
+        for (Map<String, Object> row : computed) {
+            jdbc.update("INSERT INTO weighing (feeding_id, dye_code, target_g, actual_g, deviation_pct) "
+                    + "VALUES (?, ?, ?, ?, ?)",
+                    feedingId, row.get("dyeCode"), row.get("targetG"), row.get("actualG"),
+                    row.get("deviationPct"));
+            int deducted = jdbc.update("UPDATE dye SET stock_g = stock_g - ? WHERE code = ? AND stock_g >= ?",
+                    row.get("actualG"), row.get("dyeCode"), row.get("actualG"));
+            if (deducted != 1) {
+                // 并发扣减防护：与预检构成双保险，失败随事务整体回滚。
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "染化料 " + row.get("dyeCode") + " 并发扣减失败，整单回滚");
+            }
+        }
+        jdbc.update("UPDATE lot SET status = ?, updated_at = ? WHERE id = ?",
+                LotStatus.FED.name(), now, lot.get("id"));
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("requestId", req.requestId());
+        body.put("lotNo", req.lotNo());
+        body.put("controlled", false);
+        body.put("liquorRatio", ratio);
+        body.put("fabricWeightKg", fabricKg);
+        body.put("weighings", computed);
+        body.put("status", LotStatus.FED.name());
+        body.put("fedAt", now.toInstant().toString());
+        return ServiceResult.ok(body);
     }
 
     // ---------------------------------------------------------------------
@@ -525,16 +928,27 @@ public class DyeService {
         for (Map<String, Object> lot : lotRows) {
             BigDecimal ratio = (BigDecimal) lot.get("liquor_ratio");
             BigDecimal fabric = (BigDecimal) lot.get("fabric_weight_kg");
+            boolean controlledLot = Boolean.TRUE.equals(lot.get("controlled"));
             List<Map<String, Object>> stored = jdbc.queryForList(
                     "SELECT dye_code, target_g, actual_g, deviation_pct FROM weighing w "
                             + "JOIN feeding f ON f.id = w.feeding_id WHERE f.lot_id = ? ORDER BY w.id",
                     lot.get("id"));
             for (Map<String, Object> w : stored) {
-                BigDecimal dosage = jdbc.queryForObject(
-                        "SELECT dosage_gpl FROM recipe_item ri JOIN recipe r ON r.id = ri.recipe_id "
-                                + "WHERE r.recipe_code = ? AND r.version = ? AND ri.dye_code = ?",
-                        BigDecimal.class, recipeCode, lot.get("recipe_version"), w.get("dye_code"));
-                BigDecimal target = dosage.multiply(ratio).multiply(fabric).setScale(4, RoundingMode.HALF_UP);
+                BigDecimal target;
+                if (controlledLot) {
+                    // 受控缸称量目标冻结于补偿批准（原目标/系数，三位小数），已投料历史不随批次修订改变。
+                    target = jdbc.queryForObject(
+                            "SELECT ci.compensated_target_g FROM compensation_item ci "
+                                    + "JOIN compensation c ON c.id = ci.compensation_id "
+                                    + "WHERE c.lot_id = ? AND ci.dye_code = ?",
+                            BigDecimal.class, lot.get("id"), w.get("dye_code"));
+                } else {
+                    BigDecimal dosage = jdbc.queryForObject(
+                            "SELECT dosage_gpl FROM recipe_item ri JOIN recipe r ON r.id = ri.recipe_id "
+                                    + "WHERE r.recipe_code = ? AND r.version = ? AND ri.dye_code = ?",
+                            BigDecimal.class, recipeCode, lot.get("recipe_version"), w.get("dye_code"));
+                    target = dosage.multiply(ratio).multiply(fabric).setScale(4, RoundingMode.HALF_UP);
+                }
                 BigDecimal deviation = ((BigDecimal) w.get("actual_g")).subtract(target)
                         .multiply(BigDecimal.valueOf(100))
                         .divide(target, DEVIATION_SCALE, RoundingMode.HALF_UP);
@@ -544,6 +958,7 @@ public class DyeService {
                     Map<String, Object> mismatch = new LinkedHashMap<>();
                     mismatch.put("lotNo", lot.get("lot_no"));
                     mismatch.put("dyeCode", w.get("dye_code"));
+                    mismatch.put("controlled", controlledLot);
                     mismatch.put("storedTargetG", w.get("target_g"));
                     mismatch.put("recomputedTargetG", target);
                     mismatch.put("storedDeviationPct", w.get("deviation_pct"));
@@ -723,6 +1138,7 @@ public class DyeService {
         view.put("liquorRatio", lot.get("liquor_ratio"));
         view.put("fabricWeightKg", lot.get("fabric_weight_kg"));
         view.put("mergedIntoLotId", lot.get("merged_into_lot_id"));
+        view.put("controlled", lot.get("controlled"));
         view.put("status", lot.get("status"));
         view.put("repairCount", lot.get("repair_count"));
         view.put("createdAt", ((Timestamp) lot.get("created_at")).toInstant().toString());
@@ -732,16 +1148,48 @@ public class DyeService {
                 rs -> rs.next() ? rs.getLong(1) : null, lot.get("id"));
         if (feedingId != null) {
             List<Map<String, Object>> weighings = new ArrayList<>();
-            jdbc.query("SELECT dye_code, target_g, actual_g, deviation_pct FROM weighing "
+            jdbc.query("SELECT dye_code, target_g, actual_g, deviation_pct, batch_no, factor_version, "
+                    + "potency_factor, base_target_g FROM weighing "
                     + "WHERE feeding_id = ? ORDER BY id", rs -> {
                 Map<String, Object> w = new LinkedHashMap<>();
                 w.put("dyeCode", rs.getString("dye_code"));
                 w.put("targetG", rs.getBigDecimal("target_g"));
                 w.put("actualG", rs.getBigDecimal("actual_g"));
                 w.put("deviationPct", rs.getBigDecimal("deviation_pct"));
+                String batchNo = rs.getString("batch_no");
+                if (batchNo != null) {
+                    w.put("batchNo", batchNo);
+                    w.put("factorVersion", rs.getInt("factor_version"));
+                    w.put("potencyFactor", rs.getBigDecimal("potency_factor"));
+                    w.put("baseTargetG", rs.getBigDecimal("base_target_g"));
+                }
                 weighings.add(w);
             }, feedingId);
             view.put("weighings", weighings);
+        }
+        Map<String, Object> compRow = jdbc.queryForList(
+                "SELECT id, request_id, status, invalid_reason, version FROM compensation WHERE lot_id = ?",
+                lot.get("id")).stream().findFirst().orElse(null);
+        if (compRow != null) {
+            Map<String, Object> compView = new LinkedHashMap<>();
+            compView.put("requestId", compRow.get("request_id"));
+            compView.put("status", compRow.get("status"));
+            compView.put("invalidReason", compRow.get("invalid_reason"));
+            compView.put("version", compRow.get("version"));
+            List<Map<String, Object>> compItems = new ArrayList<>();
+            jdbc.query("SELECT dye_code, batch_no, factor_version, potency_factor, base_target_g, "
+                    + "compensated_target_g FROM compensation_item WHERE compensation_id = ? ORDER BY dye_code", rs -> {
+                Map<String, Object> ci = new LinkedHashMap<>();
+                ci.put("dyeCode", rs.getString("dye_code"));
+                ci.put("batchNo", rs.getString("batch_no"));
+                ci.put("factorVersion", rs.getInt("factor_version"));
+                ci.put("potencyFactor", rs.getBigDecimal("potency_factor"));
+                ci.put("baseTargetG", rs.getBigDecimal("base_target_g"));
+                ci.put("compensatedTargetG", rs.getBigDecimal("compensated_target_g"));
+                compItems.add(ci);
+            }, compRow.get("id"));
+            compView.put("items", compItems);
+            view.put("compensation", compView);
         }
         List<Map<String, Object>> judgments = new ArrayList<>();
         jdbc.query("SELECT round, delta_e, reference_lot_id, reference_delta_e, diff, verdict, judged_at "
