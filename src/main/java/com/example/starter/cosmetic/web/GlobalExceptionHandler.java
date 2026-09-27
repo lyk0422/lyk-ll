@@ -1,5 +1,6 @@
 package com.example.starter.cosmetic.web;
 
+import com.example.starter.cosmetic.child.service.ChildBusinessRejectionException;
 import com.example.starter.cosmetic.service.ConflictException;
 import com.example.starter.cosmetic.service.NotFoundException;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -28,6 +29,12 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ConflictException.class)
     public ResponseEntity<Map<String, Object>> handleConflict(ConflictException e) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(body(e.code(), e.getMessage()));
+    }
+
+    /** 422 儿童备案业务拒绝（参数合法、对象存在，但当前状态/规则不允许）。 */
+    @ExceptionHandler(ChildBusinessRejectionException.class)
+    public ResponseEntity<Map<String, Object>> handleChildBusinessRejection(ChildBusinessRejectionException e) {
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(body(e.code(), e.getMessage()));
     }
 
     /** 400 参数校验。 */

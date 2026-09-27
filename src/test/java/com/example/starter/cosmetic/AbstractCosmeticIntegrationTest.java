@@ -35,6 +35,14 @@ public abstract class AbstractCosmeticIntegrationTest {
         jdbc.update("DELETE FROM filing_sequence");
         jdbc.update("INSERT INTO filing_sequence (id, seq) VALUES (1, 0)");
         jdbc.update("DELETE FROM test_report");
+        // 儿童分龄表：清理业务数据，保留 data.sql 合成规则（分档/限值/儿童功效目录）
+        jdbc.update("DELETE FROM child_idempotency_record");
+        jdbc.update("DELETE FROM child_review_detail");
+        jdbc.update("DELETE FROM child_product_active");
+        jdbc.update("DELETE FROM child_filing");
+        jdbc.update("DELETE FROM child_filing_sequence");
+        jdbc.update("INSERT INTO child_filing_sequence (id, seq) VALUES (1, 0)");
+        jdbc.update("DELETE FROM child_safety_report");
         clock.setInstant(INITIAL_NOW);
     }
 }
