@@ -24,6 +24,11 @@ public class TestTableCleaner {
         jdbc.update("DELETE FROM late_event");
         jdbc.update("DELETE FROM daily_close");
         jdbc.update("DELETE FROM idempotent_record");
+        jdbc.update("DELETE FROM tank_ledger");
+        jdbc.update("DELETE FROM refill_order");
+        jdbc.update("DELETE FROM refill_event");
+        jdbc.update("DELETE FROM injection_plan");
+        jdbc.update("DELETE FROM odorant_tank");
         jdbc.update("DELETE FROM valve_state");
         jdbc.update("""
                 INSERT INTO valve_state

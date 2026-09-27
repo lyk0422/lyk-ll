@@ -17,6 +17,9 @@ import java.math.BigDecimal;
  * @param injectionDoseMg         本次按比例加注量 mg
  * @param late                    TRUE 表示日结封存后迟到，仅记事件不联动
  * @param idempotentReplay        是否为同键同参重放
+ * @param injectionPlanId         绑定储罐时本次预占的加注计划ID，未绑定或未下发为 null
+ * @param injectionWithheld       TRUE 表示触及安全储备未下发加注（不伪报加注成功）
+ * @param refillEventId           安全储备不足生成的待补液事件ID，否则为 null
  */
 public record PressureDetectResponse(
         String grade,
@@ -28,11 +31,15 @@ public record PressureDetectResponse(
         BigDecimal injectionRateAfterMgM3,
         BigDecimal injectionDoseMg,
         boolean late,
-        boolean idempotentReplay) implements Replayable<PressureDetectResponse> {
+        boolean idempotentReplay,
+        Long injectionPlanId,
+        boolean injectionWithheld,
+        Long refillEventId) implements Replayable<PressureDetectResponse> {
 
     @Override
     public PressureDetectResponse withReplay(boolean replay) {
         return new PressureDetectResponse(grade, accepted, taskId, pressureBeforeMpa, pressureAfterMpa,
-                injectionRateBeforeMgM3, injectionRateAfterMgM3, injectionDoseMg, late, replay);
+                injectionRateBeforeMgM3, injectionRateAfterMgM3, injectionDoseMg, late, replay,
+                injectionPlanId, injectionWithheld, refillEventId);
     }
 }
