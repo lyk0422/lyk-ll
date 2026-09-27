@@ -58,9 +58,27 @@ public class JdbcIdempotencyExecutor implements IdempotencyExecutor {
         }
     }
 
+    @Override
+    public Outcome executeSuccessOnly(String requestId, String operation, Object businessFields,
+                                      Supplier<Outcome> action) {
+        String fingerprint = fingerprint(requestId, operation, businessFields);
+        try {
+            return transactionTemplate.execute(status -> doInTransaction(requestId, operation, fingerprint, action));
+        } catch (LostIdempotencyRaceException lostRace) {
+            // 并发同键落败：本事务已回滚，转读获胜方首次冻结结果。
+            return resolveExisting(requireEntry(requestId), fingerprint);
+        } catch (ApiException businessFailure) {
+            // 失败不占键：业务事务已回滚且不登记台账；仅当并发获胜方已冻结结果时转重放。
+            LedgerEntry winner = findEntry(requestId);
+            if (winner != null) {
+                return resolveExisting(winner, fingerprint);
+            }
+            throw businessFailure;
+        }
+    }
+
     private Outcome doInTransaction(String requestId, String operation, String fingerprint,
-                                    Supplier<Outcome> action) {
-        LedgerEntry existing = findEntry(requestId);
+                                    Supplier<Outcome> action) {        LedgerEntry existing = findEntry(requestId);
         if (existing != null) {
             return resolveExisting(existing, fingerprint);
         }
