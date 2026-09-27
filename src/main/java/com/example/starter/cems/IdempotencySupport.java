@@ -31,6 +31,31 @@ public class IdempotencySupport {
             sorted.putAll(businessFields);
         }
         String canonical = "requestId=" + nullToEmpty(requestId) + "|" + sorted;
+        return sha256(canonical);
+    }
+
+    /**
+     * B 题新增：结构化指纹。先把 requestId、请求类型、业务字段组成确定层级并按 key 排序，
+     * 再以 JSON 序列化（字符串经 JSON 转义），最后求 SHA-256。
+     * 合法文本即使包含 |、逗号、花括号、引号等分隔符也不会与其他字段组合碰撞。
+     */
+    public String fingerprintStructured(String requestId, String requestType, Map<String, ?> businessFields) {
+        Map<String, Object> sortedFields = new TreeMap<>();
+        if (businessFields != null) {
+            sortedFields.putAll(businessFields);
+        }
+        Map<String, Object> root = new TreeMap<>();
+        root.put("requestId", nullToEmpty(requestId));
+        root.put("requestType", requestType);
+        root.put("fields", sortedFields);
+        try {
+            return sha256(objectMapper.writeValueAsString(root));
+        } catch (Exception e) {
+            throw new IllegalStateException("结构化指纹序列化失败", e);
+        }
+    }
+
+    private String sha256(String canonical) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] hash = digest.digest(canonical.getBytes(StandardCharsets.UTF_8));

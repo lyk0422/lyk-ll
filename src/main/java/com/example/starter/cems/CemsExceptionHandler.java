@@ -6,10 +6,15 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 /**
- * 业务异常到 HTTP 状态码的映射：409 冲突、404 不存在、400 参数非法。
+ * 业务异常到 HTTP 状态码的映射：409 冲突、404 不存在、400 参数非法、422 业务拒绝。
  */
 @RestControllerAdvice
 public class CemsExceptionHandler {
+
+    @ExceptionHandler(BusinessRejectException.class)
+    public ResponseEntity<String> handleBusinessReject(Exception ex) {
+        return ResponseEntity.status(422).body(ex.getMessage());
+    }
 
     @ExceptionHandler(ConflictException.class)
     public ResponseEntity<String> handleConflict(Exception ex) {
