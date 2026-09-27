@@ -35,4 +35,8 @@ public class MetroException extends RuntimeException {
     public static MetroException badRequest(String code, String message) {
         return new MetroException(HttpStatus.BAD_REQUEST, code, message);
     }
+
+    public static MetroException unprocessable(String code, String message) {
+        return new MetroException(HttpStatus.UNPROCESSABLE_ENTITY, code, message);
+    }
 }

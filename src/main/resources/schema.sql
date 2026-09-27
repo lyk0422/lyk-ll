@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS idempotency_record (
     PRIMARY KEY (scope, request_id)
 );
 COMMENT ON TABLE idempotency_record IS '幂等记录：同键同参返回首次结果，同键异参返回 409';
-COMMENT ON COLUMN idempotency_record.scope IS '操作类型：ENTRY/EXIT/ESTIMATE/SEAL';
+COMMENT ON COLUMN idempotency_record.scope IS '操作类型：ENTRY/EXIT/ESTIMATE/SEAL/REFUND_APPLY/REFUND_CONFIRM/ADJ_INCLUDE/ADJ_SEAL/CARD_CLOSE';
 COMMENT ON COLUMN idempotency_record.request_id IS '请求幂等键';
 COMMENT ON COLUMN idempotency_record.fingerprint IS '请求指纹，覆盖 requestId 与全部业务字段';
 COMMENT ON COLUMN idempotency_record.response_body IS '首次成功响应快照（JSON）';
@@ -121,3 +121,116 @@ COMMENT ON COLUMN clearing_discrepancy.biz_date IS '交易原应入账的业务�
 COMMENT ON COLUMN clearing_discrepancy.txn_no IS '交易流水号';
 COMMENT ON COLUMN clearing_discrepancy.amount_cents IS '差异金额（分）';
 COMMENT ON COLUMN clearing_discrepancy.reason IS '差异原因';
+
+-- 已封账行程退款冲正：退款单、调账单、负向调整明细、调账批次与票卡关闭登记
+-- 全部金额单位为“分”；调账明细金额恒为负，原流水与原封账合计永不改写。
+
+CREATE TABLE IF NOT EXISTS refund_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    refund_no VARCHAR(64) NOT NULL,
+    txn_no VARCHAR(64) NOT NULL,
+    amount_cents BIGINT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    confirmer_one VARCHAR(64) NULL,
+    confirmer_one_time DATETIME NULL,
+    confirmer_two VARCHAR(64) NULL,
+    confirmer_two_time DATETIME NULL,
+    adjustment_no VARCHAR(64) NULL,
+    version INT NOT NULL DEFAULT 1,
+    apply_request_id VARCHAR(64) NOT NULL,
+    fingerprint VARCHAR(128) NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    confirmed_at DATETIME NULL,
+    CONSTRAINT uk_refund_no UNIQUE (refund_no)
+);
+CREATE INDEX IF NOT EXISTS idx_refund_txn ON refund_order (txn_no);
+COMMENT ON TABLE refund_order IS '退款单：仅引用已封账且按实结算行程，两名不同复核人确认后生效';
+COMMENT ON COLUMN refund_order.refund_no IS '退款单号，全局唯一';
+COMMENT ON COLUMN refund_order.txn_no IS '原交易流水号';
+COMMENT ON COLUMN refund_order.amount_cents IS '本次退款金额（分），恒为正，累计退款不得超过原实收';
+COMMENT ON COLUMN refund_order.status IS '状态：PENDING 待双人确认 / CONFIRMED 已确认生效';
+COMMENT ON COLUMN refund_order.confirmer_one IS '第一复核人工号，单人确认不生效';
+COMMENT ON COLUMN refund_order.confirmer_one_time IS '第一复核人确认时刻（Asia/Shanghai）';
+COMMENT ON COLUMN refund_order.confirmer_two IS '第二复核人工号，必须与第一复核人不同';
+COMMENT ON COLUMN refund_order.confirmer_two_time IS '第二复核人确认时刻（Asia/Shanghai）';
+COMMENT ON COLUMN refund_order.adjustment_no IS '确认生效后登记的调账单号，NULL 表示尚未生效';
+COMMENT ON COLUMN refund_order.version IS '乐观版本：从 1 开始，每次成功变更加 1';
+COMMENT ON COLUMN refund_order.apply_request_id IS '退款申请幂等键';
+COMMENT ON COLUMN refund_order.fingerprint IS '申请请求结构化指纹（含全部业务字段）';
+COMMENT ON COLUMN refund_order.confirmed_at IS '退款最终确认时刻（Asia/Shanghai），NULL 表示未生效';
+
+CREATE TABLE IF NOT EXISTS adjustment_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    adjustment_no VARCHAR(64) NOT NULL,
+    refund_no VARCHAR(64) NOT NULL,
+    txn_no VARCHAR(64) NOT NULL,
+    amount_cents BIGINT NOT NULL,
+    batch_id BIGINT NULL,
+    status VARCHAR(16) NOT NULL,
+    version INT NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL,
+    included_at DATETIME NULL,
+    CONSTRAINT uk_adjustment_no UNIQUE (adjustment_no),
+    CONSTRAINT uk_adjustment_refund UNIQUE (refund_no)
+);
+CREATE INDEX IF NOT EXISTS idx_adjustment_batch ON adjustment_order (batch_id);
+COMMENT ON TABLE adjustment_order IS '调账单：退款确认时登记，只能纳入一个调账批次';
+COMMENT ON COLUMN adjustment_order.adjustment_no IS '调账单号，全局唯一';
+COMMENT ON COLUMN adjustment_order.refund_no IS '来源退款单号，一退款单一调账单';
+COMMENT ON COLUMN adjustment_order.txn_no IS '原交易流水号';
+COMMENT ON COLUMN adjustment_order.amount_cents IS '退款本金（分，正数）；负向金额见 adjustment_detail';
+COMMENT ON COLUMN adjustment_order.batch_id IS '已纳入的调账批次 ID，NULL 表示尚未纳入；封存后不可改投';
+COMMENT ON COLUMN adjustment_order.status IS '状态：REGISTERED 已登记 / INCLUDED 已纳入批次';
+COMMENT ON COLUMN adjustment_order.version IS '乐观版本：从 1 开始，纳入批次成功后加 1';
+
+CREATE TABLE IF NOT EXISTS adjustment_detail (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    adjustment_no VARCHAR(64) NOT NULL,
+    txn_no VARCHAR(64) NOT NULL,
+    original_detail_id BIGINT NOT NULL,
+    line_code VARCHAR(16) NOT NULL,
+    amount_cents BIGINT NOT NULL,
+    created_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_adjustment_detail_txn ON adjustment_detail (txn_no, line_code);
+COMMENT ON TABLE adjustment_detail IS '负向调整明细：按原线路实收份额分摊，独立于原清分明细，金额恒为负';
+COMMENT ON COLUMN adjustment_detail.adjustment_no IS '所属调账单号';
+COMMENT ON COLUMN adjustment_detail.txn_no IS '原交易流水号';
+COMMENT ON COLUMN adjustment_detail.original_detail_id IS '对应原清分明细 ID（NORMAL/SETTLE 行），保留证据链';
+COMMENT ON COLUMN adjustment_detail.line_code IS '原承运线路编码';
+COMMENT ON COLUMN adjustment_detail.amount_cents IS '该线路冲正金额（分），恒为负，各线路累计不超过原份额';
+
+CREATE TABLE IF NOT EXISTS adjustment_batch (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_no VARCHAR(64) NOT NULL,
+    open_slot VARCHAR(16) NULL,
+    status VARCHAR(16) NOT NULL,
+    total_cents BIGINT NOT NULL DEFAULT 0,
+    adjustment_count INT NOT NULL DEFAULT 0,
+    version INT NOT NULL DEFAULT 1,
+    seal_request_id VARCHAR(64) NULL,
+    created_at DATETIME NOT NULL,
+    sealed_at DATETIME NULL,
+    CONSTRAINT uk_adjustment_batch_no UNIQUE (batch_no),
+    CONSTRAINT uk_adjustment_open_slot UNIQUE (open_slot)
+);
+COMMENT ON TABLE adjustment_batch IS '调账批次：任一时刻至多一个 OPEN；封存后只读，合计快照不再变化';
+COMMENT ON COLUMN adjustment_batch.batch_no IS '调账批次号，全局唯一';
+COMMENT ON COLUMN adjustment_batch.open_slot IS '开放占位：OPEN 批次恒为 ''OPEN''，封存后置 NULL，唯一约束保证至多一个开放批次';
+COMMENT ON COLUMN adjustment_batch.status IS '状态：OPEN 开放可纳入 / SEALED 已封存只读';
+COMMENT ON COLUMN adjustment_batch.total_cents IS '封存时快照的调账合计（分，负数），封存后不再变化';
+COMMENT ON COLUMN adjustment_batch.adjustment_count IS '已纳入调账单笔数';
+COMMENT ON COLUMN adjustment_batch.version IS '乐观版本：从 1 开始，封存成功后加 1';
+COMMENT ON COLUMN adjustment_batch.seal_request_id IS '封存请求幂等键';
+
+CREATE TABLE IF NOT EXISTS metro_card_close (
+    card_id VARCHAR(64) NOT NULL,
+    request_id VARCHAR(64) NOT NULL,
+    closed_at DATETIME NOT NULL,
+    PRIMARY KEY (card_id)
+);
+COMMENT ON TABLE metro_card_close IS '票卡关闭登记：关闭不影响已成功退款结果的历史重放';
+COMMENT ON COLUMN metro_card_close.card_id IS '票卡编号';
+COMMENT ON COLUMN metro_card_close.request_id IS '关闭请求幂等键';
+COMMENT ON COLUMN metro_card_close.closed_at IS '票卡关闭时刻（Asia/Shanghai）';
