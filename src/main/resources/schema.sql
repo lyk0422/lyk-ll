@@ -122,3 +122,75 @@ COMMENT ON COLUMN idempotency_record.request_id IS '幂等请求标识';
 COMMENT ON COLUMN idempotency_record.fingerprint IS '请求指纹：requestId与全部业务字段的SHA-256';
 COMMENT ON COLUMN idempotency_record.response_body IS '首次成功响应报文（JSON），用于同键同参重放';
 COMMENT ON COLUMN idempotency_record.created_at IS '记录创建时间（UTC）';
+
+CREATE TABLE IF NOT EXISTS flight_calendar (
+    runway_id VARCHAR(32) PRIMARY KEY,
+    version INT NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+COMMENT ON TABLE flight_calendar IS '航班日历（合成）：按跑道维护日历版本，日历变更使尚未开始的例行计划待重审';
+COMMENT ON COLUMN flight_calendar.runway_id IS '跑道编号（合成数据）';
+COMMENT ON COLUMN flight_calendar.version IS '日历版本：从1开始，每次成功变更加1';
+COMMENT ON COLUMN flight_calendar.updated_at IS '最近变更时间（UTC）';
+
+CREATE TABLE IF NOT EXISTS inspection_plan (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    runway_id VARCHAR(32) NOT NULL,
+    window_start TIMESTAMP NOT NULL,
+    window_end TIMESTAMP NOT NULL,
+    inspection_minutes INT NOT NULL,
+    flight_windows CLOB NOT NULL,
+    calendar_version INT NOT NULL,
+    conflict_evidence CLOB NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    version INT NOT NULL,
+    active_flag TINYINT,
+    request_id VARCHAR(64) NOT NULL,
+    started_at TIMESTAMP,
+    completed_items CLOB,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+-- 同一跑道同一窗口只允许一个非终态计划：active_flag=1 表示获准/待重审/进行中，终态置 NULL（唯一索引允许多个 NULL）
+CREATE UNIQUE INDEX IF NOT EXISTS uk_inspection_plan_active ON inspection_plan (runway_id, window_start, window_end, active_flag);
+
+COMMENT ON TABLE inspection_plan IS '例行跑道巡检计划：申请发布→开始→检查回报→完成；紧急关闭抢占时取消或中止';
+COMMENT ON COLUMN inspection_plan.id IS '计划主键';
+COMMENT ON COLUMN inspection_plan.runway_id IS '跑道编号（合成数据）';
+COMMENT ON COLUMN inspection_plan.window_start IS '例行窗口起点（UTC，半开窗口，含起点）';
+COMMENT ON COLUMN inspection_plan.window_end IS '例行窗口终点（UTC，半开窗口，不含终点）';
+COMMENT ON COLUMN inspection_plan.inspection_minutes IS '预计巡检时长（分钟）：自窗口起点起须完整落在窗口内';
+COMMENT ON COLUMN inspection_plan.flight_windows IS '合成航班占用窗（JSON数组，元素含start/end，UTC半开区间）';
+COMMENT ON COLUMN inspection_plan.calendar_version IS '发布或重审时冻结的航班日历版本';
+COMMENT ON COLUMN inspection_plan.conflict_evidence IS '发布时冻结的冲突校验证据（JSON）：巡检占用区间、航班占用窗与校验结论';
+COMMENT ON COLUMN inspection_plan.status IS '状态：APPROVED获准/PENDING_REVIEW待重审/IN_PROGRESS进行中/COMPLETED已完成/CANCELLED已取消(未开始被抢占)/ABORTED已中止(已开始被抢占)';
+COMMENT ON COLUMN inspection_plan.version IS '乐观锁版本：从1开始，每次成功变更加1';
+COMMENT ON COLUMN inspection_plan.active_flag IS '非终态标记：1=获准/待重审/进行中，NULL=完成/取消/中止（配合唯一索引保证同跑道同窗唯一）';
+COMMENT ON COLUMN inspection_plan.request_id IS '发布幂等请求标识';
+COMMENT ON COLUMN inspection_plan.started_at IS '实际开始时间（UTC），未开始为NULL';
+COMMENT ON COLUMN inspection_plan.completed_items IS '已完成检查项（JSON数组），中止时保留不丢失，未开始为NULL';
+COMMENT ON COLUMN inspection_plan.created_at IS '记录创建时间（UTC）';
+COMMENT ON COLUMN inspection_plan.updated_at IS '记录最近更新时间（UTC）';
+
+CREATE TABLE IF NOT EXISTS plan_check_report (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    plan_id BIGINT NOT NULL,
+    reported_at TIMESTAMP NOT NULL,
+    completed_items CLOB NOT NULL,
+    complete BOOLEAN NOT NULL,
+    late BOOLEAN NOT NULL DEFAULT FALSE,
+    request_id VARCHAR(64) NOT NULL,
+    created_at TIMESTAMP NOT NULL
+);
+
+COMMENT ON TABLE plan_check_report IS '例行巡检检查回报：每次生效回报或被抢占后迟到登记各一行';
+COMMENT ON COLUMN plan_check_report.id IS '检查回报主键';
+COMMENT ON COLUMN plan_check_report.plan_id IS '所属例行计划ID';
+COMMENT ON COLUMN plan_check_report.reported_at IS '回报时间（UTC）';
+COMMENT ON COLUMN plan_check_report.completed_items IS '本次回报已完成检查项（JSON数组）';
+COMMENT ON COLUMN plan_check_report.complete IS '是否完结回报：真=巡检正常完成，计划关闭（不触发跑道开放）';
+COMMENT ON COLUMN plan_check_report.late IS '是否迟到登记：真=计划已被抢占（取消/中止），仅登记不开放跑道';
+COMMENT ON COLUMN plan_check_report.request_id IS '回报幂等请求标识';
+COMMENT ON COLUMN plan_check_report.created_at IS '记录创建时间（UTC）';

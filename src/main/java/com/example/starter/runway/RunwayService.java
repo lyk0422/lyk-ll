@@ -33,6 +33,7 @@ public class RunwayService {
     private final WeatherRepository weatherRepository;
     private final RunwayProperties properties;
     private final IdempotencyExecutor idempotencyExecutor;
+    private final InspectionPlanService inspectionPlanService;
     private final Clock clock;
 
     public RunwayService(RunwayEventRepository eventRepository,
@@ -42,6 +43,7 @@ public class RunwayService {
                          WeatherRepository weatherRepository,
                          RunwayProperties properties,
                          IdempotencyExecutor idempotencyExecutor,
+                         InspectionPlanService inspectionPlanService,
                          Clock clock) {
         this.eventRepository = eventRepository;
         this.inspectionRepository = inspectionRepository;
@@ -50,6 +52,7 @@ public class RunwayService {
         this.weatherRepository = weatherRepository;
         this.properties = properties;
         this.idempotencyExecutor = idempotencyExecutor;
+        this.inspectionPlanService = inspectionPlanService;
         this.clock = clock;
     }
 
@@ -85,6 +88,8 @@ public class RunwayService {
         String notamNo = "NTM-C-" + event.id();
         notamRepository.insert(new NotamRecord(0L, event.id(), event.runwayId(), NotamAction.CLOSE,
                 notamNo, closedAt));
+        // 紧急关闭抢占：同事务取消未开始例行计划、中止已开始计划（保留已完成检查项）
+        inspectionPlanService.preemptForEmergency(event.runwayId(), now);
         return new ReportResponse(event.id(), event.runwayId(), event.status().name(), closedAt, deadline, notamNo);
     }
 

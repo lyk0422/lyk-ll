@@ -92,4 +92,14 @@ public class RunwayEventRepository {
     public List<RunwayEvent> findAll() {
         return jdbc.query("SELECT * FROM runway_event ORDER BY id", MAPPER);
     }
+
+    /**
+     * 跑道是否存在进行中（active_flag=1）的紧急关闭事件。
+     */
+    public boolean existsActiveByRunwayId(String runwayId) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM runway_event WHERE runway_id = ? AND active_flag = 1",
+                Integer.class, runwayId);
+        return count != null && count > 0;
+    }
 }
