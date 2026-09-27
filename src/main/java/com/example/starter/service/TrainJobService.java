@@ -57,18 +57,21 @@ public class TrainJobService {
     private final ConsistCheckRepository consistCheckRepository;
     private final PressureReadingRepository pressureReadingRepository;
     private final IdempotencyService idempotencyService;
+    private final TailDeviceService tailDeviceService;
 
     public TrainJobService(TrainJobRepository jobRepository, TrainCarRepository carRepository,
                            BrakeTestRepository brakeTestRepository,
                            ConsistCheckRepository consistCheckRepository,
                            PressureReadingRepository pressureReadingRepository,
-                           IdempotencyService idempotencyService) {
+                           IdempotencyService idempotencyService,
+                           TailDeviceService tailDeviceService) {
         this.jobRepository = jobRepository;
         this.carRepository = carRepository;
         this.brakeTestRepository = brakeTestRepository;
         this.consistCheckRepository = consistCheckRepository;
         this.pressureReadingRepository = pressureReadingRepository;
         this.idempotencyService = idempotencyService;
+        this.tailDeviceService = tailDeviceService;
     }
 
     /**
@@ -147,7 +150,8 @@ public class TrainJobService {
     }
 
     private ConsistChangeResponse doChangeConsist(long jobId, ConsistChangeRequest request) {
-        JobRow job = requireJob(jobId);
+        JobRow job = jobRepository.lockById(jobId)
+                .orElseThrow(() -> new NotFoundException("作业不存在：" + jobId));
         if (job.status() != JobStatus.ACCEPTED && job.status() != JobStatus.CHECKED) {
             throw new BusinessException("当前状态不允许摘挂变更：" + job.status());
         }
@@ -179,6 +183,8 @@ public class TrainJobService {
                 .map(c -> new CarDto(c.carNo(), c.weightTons(), c.length(), c.valveClosed()))
                 .toList());
         int voidedTests = brakeTestRepository.voidAllByJobId(jobId);
+        // 摘挂改变尾车或编组版本：列尾绑定保留，但一致性确认立即失效，须重新共同确认。
+        tailDeviceService.invalidateConfirmationOnConsistChanged(jobId);
         BigDecimal totalLength = active.stream().map(CarRow::length).reduce(BigDecimal.ZERO, BigDecimal::add);
         BigDecimal totalWeight = active.stream().map(CarRow::weightTons).reduce(BigDecimal.ZERO, BigDecimal::add);
         int newVersion = job.consistVersion() + 1;
@@ -245,7 +251,8 @@ public class TrainJobService {
     }
 
     private DepartureResponse doConfirmDeparture(long jobId) {
-        JobRow job = requireJob(jobId);
+        JobRow job = jobRepository.lockById(jobId)
+                .orElseThrow(() -> new NotFoundException("作业不存在：" + jobId));
         if (job.status() == JobStatus.CLOSED) {
             throw new BusinessException("作业已销记，不得重复发车确认");
         }
@@ -262,18 +269,24 @@ public class TrainJobService {
         if (!withinClosedCarLimit(closed, active.size())) {
             throw new BusinessException("关门车比例超过 6%，拒绝发车");
         }
+        // 列尾门禁（无生效绑定的历史作业不设新门禁）：自检未过期且一致性确认匹配最新编组，
+        // 与原制动试验有效性在同一事务内检查，不能用旧合格结论放行。
+        tailDeviceService.verifyForDeparture(jobId);
         jobRepository.updateStatus(jobId, JobStatus.DEPARTURE_CONFIRMED);
         return new DepartureResponse(jobId, true, "准许发车");
     }
 
     private ClosureResponse doClose(long jobId) {
-        JobRow job = requireJob(jobId);
+        JobRow job = jobRepository.lockById(jobId)
+                .orElseThrow(() -> new NotFoundException("作业不存在：" + jobId));
         if (job.status() == JobStatus.CLOSED) {
             return new ClosureResponse(jobId, true, true, "重复销记，幂等成功");
         }
         if (job.status() != JobStatus.DEPARTURE_CONFIRMED) {
             throw new BusinessException("未发车确认，不得销记：" + job.status());
         }
+        // 销记才原子解除列尾装置占用并撤销确认；绑定历史全部保留。与销记同事务。
+        tailDeviceService.releaseOnClosure(jobId);
         jobRepository.close(jobId);
         return new ClosureResponse(jobId, true, false, "销记完成，作业终态");
     }
