@@ -1,5 +1,6 @@
 package com.example.starter.compliance;
 
+import com.example.starter.compliance.web.Requests;
 import com.example.starter.compliance.web.Requests.DirectAdditiveDto;
 import com.example.starter.compliance.web.Requests.FileFilingRequest;
 import com.example.starter.compliance.web.Requests.FilingRefRequest;
@@ -74,5 +75,49 @@ public final class Fixtures {
             String maxAmount) {
         return new StandardUpdateRequest(requestId(), additiveCode, categoryCode,
                 new BigDecimal(maxAmount));
+    }
+
+    // -------- 换配方清线 --------
+
+    public static Requests.FormulaAllergenRequest allergensReg(long formulaId,
+            Integer expectedVersion, List<String> allergens) {
+        return new Requests.FormulaAllergenRequest(requestId(), formulaId, expectedVersion,
+                allergens);
+    }
+
+    public static Requests.FormulaAllergenRequest allergensReg(String requestId, long formulaId,
+            Integer expectedVersion, List<String> allergens) {
+        return new Requests.FormulaAllergenRequest(requestId, formulaId, expectedVersion,
+                allergens);
+    }
+    public static Requests.ProductionLineRequest line(String lineCode, String lineName) {
+        return new Requests.ProductionLineRequest(requestId(), lineCode, lineName);
+    }
+
+    public static Requests.ClearanceCertificateRequest clearance(String lineCode,
+            String operatorId, String reviewerId, long cleanedAt, long confirmedAt,
+            List<String> coveredAllergens) {
+        return new Requests.ClearanceCertificateRequest(requestId(), lineCode, operatorId,
+                reviewerId, cleanedAt, confirmedAt, coveredAllergens);
+    }
+
+    public static Requests.ClearanceCertificateRequest clearance(String requestId, String lineCode,
+            String operatorId, String reviewerId, long cleanedAt, long confirmedAt,
+            List<String> coveredAllergens) {
+        return new Requests.ClearanceCertificateRequest(requestId, lineCode, operatorId,
+                reviewerId, cleanedAt, confirmedAt, coveredAllergens);
+    }
+
+    public static Requests.ControlledProductionRequest controlled(String lineCode, long filingId,
+            String batchNo, int occupiedVersion, long occurredAt, Long certificateId) {
+        return new Requests.ControlledProductionRequest(requestId(), lineCode, filingId, batchNo,
+                new BigDecimal("100"), occupiedVersion, occurredAt, certificateId);
+    }
+
+    public static Requests.ControlledProductionRequest controlled(String requestId, String lineCode,
+            long filingId, String batchNo, String quantityKg, int occupiedVersion, long occurredAt,
+            Long certificateId) {
+        return new Requests.ControlledProductionRequest(requestId, lineCode, filingId, batchNo,
+                new BigDecimal(quantityKg), occupiedVersion, occurredAt, certificateId);
     }
 }

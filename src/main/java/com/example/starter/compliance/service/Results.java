@@ -80,4 +80,62 @@ public final class Results {
             List<FormulaView> formulas,
             List<FilingView> filings) {
     }
+
+    /** 过敏原目录项（合成数据）。 */
+    public record AllergenView(String allergenCode, String allergenName) {
+    }
+
+    /** 配方版本过敏原登记视图：version 为乐观变更版本（1 起，每次成功修改 +1）。 */
+    public record FormulaAllergenView(
+            Long formulaId,
+            Integer version,
+            List<String> allergens,
+            Long updatedAt,
+            boolean replayed) {
+    }
+
+    /** 生产线视图：lastFormulaId 为最近量产批准配方版本，occupiedVersion 为递增占用版本。 */
+    public record ProductionLineView(
+            String lineCode,
+            String lineName,
+            Long lastFormulaId,
+            Integer occupiedVersion,
+            Integer version,
+            Long updatedAt) {
+    }
+
+    /**
+     * 清线凭证视图：status 为 VALID/CONSUMED；validFrom=confirmedAt，validUntil=confirmedAt+2h，
+     * 恰满 2 小时（validUntil）失效；occurredAt 为当前判定时刻（UTC 毫秒）。
+     */
+    public record ClearanceCertificateView(
+            Long certificateId,
+            String lineCode,
+            String operatorId,
+            String reviewerId,
+            Long cleanedAt,
+            Long confirmedAt,
+            Long validUntil,
+            Integer occupiedVersion,
+            List<String> coveredAllergens,
+            String status,
+            Long consumedAt,
+            Long controlledProductionId,
+            Long now,
+            boolean replayed) {
+    }
+
+    /** 受控量产记录视图。 */
+    public record ControlledProductionView(
+            Long controlledProductionId,
+            String lineCode,
+            Long filingId,
+            Long formulaId,
+            String batchNo,
+            String quantityKg,
+            Integer occupiedVersion,
+            Long certificateId,
+            Long occurredAt,
+            boolean replayed) {
+    }
 }

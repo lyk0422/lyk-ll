@@ -121,3 +121,76 @@ CREATE TABLE IF NOT EXISTS idempotent_request (
     response_json CLOB,
     created_at BIGINT NOT NULL
 );
+
+-- ================= 换配方清线凭证（合成规则，仅演示，不用于生产） =================
+
+-- 过敏原合成目录：allergen_code 为过敏原归组键（花生/乳/蛋等），全部为合成数据
+CREATE TABLE IF NOT EXISTS allergen (
+    allergen_code VARCHAR(64) PRIMARY KEY,
+    allergen_name VARCHAR(128) NOT NULL
+);
+
+-- 配方版本过敏原登记：version 为乐观变更版本，登记时为 1，每次修改成功 +1（expectedVersion 并发控制）
+CREATE TABLE IF NOT EXISTS formula_allergen_reg (
+    formula_id BIGINT PRIMARY KEY,
+    version INT NOT NULL,
+    request_id VARCHAR(96),
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+-- 配方版本过敏原明细：allergen_code 必须存在于过敏原合成目录；同一配方内不重复
+CREATE TABLE IF NOT EXISTS formula_allergen_item (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    formula_id BIGINT NOT NULL,
+    allergen_code VARCHAR(64) NOT NULL,
+    UNIQUE (formula_id, allergen_code)
+);
+
+-- 生产线：last_formula_id 为最近一次受控量产受理的批准配方版本（NULL 表示登记后尚无量产）；
+-- occupied_version 为递增占用版本，登记时为 1，每受理成功一笔受控量产 +1（量产声明显式携带当前值）；
+-- version 为乐观变更版本，登记时为 1，每次成功变更加 1
+CREATE TABLE IF NOT EXISTS production_line (
+    line_code VARCHAR(64) PRIMARY KEY,
+    line_name VARCHAR(128) NOT NULL,
+    last_formula_id BIGINT,
+    occupied_version INT NOT NULL,
+    version INT NOT NULL,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+-- 清线凭证：操作人、复核人两名不同人员共同确认；固定线路、清线时刻（UTC 毫秒）及确认时占用版本；
+-- covered_allergens 为覆盖过敏原编码的结构化 JSON 数组；UTC 确认后 2 小时内有效，恰满 2 小时失效；
+-- status 为 VALID 有效 / CONSUMED 已核销；consumed_at 为核销时刻（UTC 毫秒），未核销为空
+CREATE TABLE IF NOT EXISTS line_clearance_certificate (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    line_code VARCHAR(64) NOT NULL,
+    operator_id VARCHAR(64) NOT NULL,
+    reviewer_id VARCHAR(64) NOT NULL,
+    cleaned_at BIGINT NOT NULL,
+    confirmed_at BIGINT NOT NULL,
+    occupied_version INT NOT NULL,
+    covered_allergens CLOB NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    request_id VARCHAR(96),
+    consumed_at BIGINT,
+    controlled_production_id BIGINT,
+    created_at BIGINT NOT NULL
+);
+
+-- 受控量产记录（新受控入口，历史不可变）：occupied_version 为该笔量产在该线路上使用的占用版本；
+-- certificate_id 为引用的清线凭证（无过敏原切换时为空）；occurred_at 为申报的精确生产时刻（UTC 毫秒）
+CREATE TABLE IF NOT EXISTS controlled_production_record (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    line_code VARCHAR(64) NOT NULL,
+    filing_id BIGINT NOT NULL,
+    formula_id BIGINT NOT NULL,
+    batch_no VARCHAR(96) NOT NULL,
+    quantity_kg DECIMAL(18,6) NOT NULL,
+    occupied_version INT NOT NULL,
+    certificate_id BIGINT,
+    occurred_at BIGINT NOT NULL,
+    request_id VARCHAR(96),
+    created_at BIGINT NOT NULL
+);
