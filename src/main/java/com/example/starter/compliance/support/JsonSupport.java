@@ -48,6 +48,17 @@ public final class JsonSupport {
         return MAPPER.convertValue(value, type);
     }
 
+    /** 反序列化字符串列表（过敏原集合以 JSON 数组落库）。 */
+    public static List<String> readStringList(String json) {
+        try {
+            return MAPPER.readValue(json,
+                    MAPPER.getTypeFactory().constructCollectionType(List.class, String.class));
+        } catch (IOException e) {
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "SNAPSHOT_UNREADABLE",
+                    "存储列表无法解析");
+        }
+    }
+
     public static JsonNode readTree(String json) {
         try {
             return MAPPER.readTree(json);

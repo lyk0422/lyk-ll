@@ -22,11 +22,7 @@ import com.example.starter.compliance.web.Requests.ProductionReportRequest;
 import com.example.starter.compliance.web.Requests.StandardUpdateRequest;
 import com.example.starter.compliance.web.Requests.SubmitFormulaRequest;
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -61,13 +57,15 @@ public class ComplianceService {
     private final ComplianceClock clock;
     private final LimitEngine engine;
     private final FilingTransitions transitions;
+    private final IdempotentExecutor idempotency;
 
     public ComplianceService(ComplianceRepository repository, ComplianceClock clock,
-            LimitEngine engine, FilingTransitions transitions) {
+            LimitEngine engine, FilingTransitions transitions, IdempotentExecutor idempotency) {
         this.repository = repository;
         this.clock = clock;
         this.engine = engine;
         this.transitions = transitions;
+        this.idempotency = idempotency;
     }
 
     // ---------------- 配方：提交 / 审查 / 批准 ----------------
@@ -90,7 +88,7 @@ public class ComplianceService {
                 repository.insertIngredientUse(formulaId, use.ingredientCode(), use.ratio());
             }
             FormulaRow row = repository.findFormulaById(formulaId).orElseThrow();
-            return new Outcome<>(buildFormulaView(row, false), HttpStatus.OK.value());
+            return new IdempotentExecutor.Outcome<>(buildFormulaView(row, false), HttpStatus.OK.value());
         });
     }
 
@@ -107,7 +105,7 @@ public class ComplianceService {
             repository.markReviewed(formula.id(), report.passed(), JsonSupport.write(report),
                     clock.nowMillis());
             FormulaRow refreshed = repository.findFormulaById(formula.id()).orElseThrow();
-            return new Outcome<>(
+            return new IdempotentExecutor.Outcome<>(
                     new Results.ReviewView(refreshed.id(), refreshed.state(), report, false),
                     HttpStatus.OK.value());
         });
@@ -118,7 +116,7 @@ public class ComplianceService {
         return withIdempotency(request.requestId(), request, Results.FormulaView.class, () -> {
             FormulaRow formula = requireFormula(request.formulaId());
             if ("APPROVED".equals(formula.state())) {
-                return new Outcome<>(buildFormulaView(formula, false), HttpStatus.OK.value());
+                return new IdempotentExecutor.Outcome<>(buildFormulaView(formula, false), HttpStatus.OK.value());
             }
             if (!"REVIEWED".equals(formula.state()) || !Boolean.TRUE.equals(formula.reviewPassed())) {
                 throw new ApiException(HttpStatus.CONFLICT, "REVIEW_NOT_PASSED",
@@ -139,7 +137,7 @@ public class ComplianceService {
             }
 
             FormulaRow refreshed = repository.findFormulaById(formula.id()).orElseThrow();
-            return new Outcome<>(buildFormulaView(refreshed, false), HttpStatus.OK.value());
+            return new IdempotentExecutor.Outcome<>(buildFormulaView(refreshed, false), HttpStatus.OK.value());
         });
     }
 
@@ -176,7 +174,7 @@ public class ComplianceService {
                         "并发备案冲突，同一产品仅允许一个有效备案版本");
             }
             FilingRow row = repository.findFilingById(filingId).orElseThrow();
-            return new Outcome<>(buildFilingView(row, false), HttpStatus.OK.value());
+            return new IdempotentExecutor.Outcome<>(buildFilingView(row, false), HttpStatus.OK.value());
         });
     }
 
@@ -190,7 +188,7 @@ public class ComplianceService {
                 repository.releaseProduct(filing.productCode());
             }
             FilingRow refreshed = repository.findFilingById(filing.id()).orElseThrow();
-            return new Outcome<>(buildFilingView(refreshed, false), HttpStatus.OK.value());
+            return new IdempotentExecutor.Outcome<>(buildFilingView(refreshed, false), HttpStatus.OK.value());
         });
     }
 
@@ -213,7 +211,7 @@ public class ComplianceService {
                 // 同一 requestId 重放返回相同 409 结果。
                 transitions.suspendOverdueNewTransaction(filing);
                 FilingRow suspended = repository.findFilingById(filing.id()).orElseThrow();
-                return new Outcome<>(new Results.FilingReviewView(suspended.id(),
+                return new IdempotentExecutor.Outcome<>(new Results.FilingReviewView(suspended.id(),
                         suspended.status(), false, null, clock.nowMillis(), false),
                         HttpStatus.CONFLICT.value());
             }
@@ -234,7 +232,7 @@ public class ComplianceService {
             repository.insertFilingReview(filing.id(), request.requestId(), passed,
                     JsonSupport.write(report), clock.nowMillis());
             FilingRow refreshed = repository.findFilingById(filing.id()).orElseThrow();
-            return new Outcome<>(new Results.FilingReviewView(refreshed.id(),
+            return new IdempotentExecutor.Outcome<>(new Results.FilingReviewView(refreshed.id(),
                     refreshed.status(), passed, report, clock.nowMillis(), false),
                     HttpStatus.OK.value());
         });
@@ -264,13 +262,13 @@ public class ComplianceService {
                 // 逾期未复审：独立事务立即暂停备案；量产记录不写入，首次结果记 409 并落幂等记录。
                 transitions.suspendOverdueNewTransaction(filing);
                 FilingRow suspended = repository.findFilingById(filing.id()).orElseThrow();
-                return new Outcome<>(new Results.ProductionView(suspended.id(), request.batchNo(),
+                return new IdempotentExecutor.Outcome<>(new Results.ProductionView(suspended.id(), request.batchNo(),
                         null, clock.nowMillis(), false), HttpStatus.CONFLICT.value());
             }
             long now = clock.nowMillis();
             repository.insertProductionRecord(filing.id(), request.batchNo(),
                     request.quantityKg(), now);
-            return new Outcome<>(new Results.ProductionView(filing.id(), request.batchNo(),
+            return new IdempotentExecutor.Outcome<>(new Results.ProductionView(filing.id(), request.batchNo(),
                     request.quantityKg().stripTrailingZeros().toPlainString(), now, false),
                     HttpStatus.OK.value());
         });
@@ -316,7 +314,7 @@ public class ComplianceService {
                 repository.markReviewWatch(filing.id(), clock.todayEpochDay());
                 watchIds.add(filing.id());
             }
-            return new Outcome<>(new Results.StandardView(request.additiveCode(),
+            return new IdempotentExecutor.Outcome<>(new Results.StandardView(request.additiveCode(),
                     request.categoryCode(),
                     request.maxAmount().stripTrailingZeros().toPlainString(), now,
                     List.copyOf(watchIds), false), HttpStatus.OK.value());
@@ -515,70 +513,11 @@ public class ComplianceService {
     }
 
     /**
-     * requestId 幂等包装：指纹覆盖 requestId 与全部业务字段。
-     * 先插入占位行（status_code=0）抢占 requestId，执行业务动作后回填首次响应；
-     * 同键同参返回首次结果（含首次状态码），同键异参返回 409；
-     * 业务动作抛错时外层事务回滚，占位行一并回滚，客户端可用同一 requestId 重试。
+     * requestId 幂等包装委托给 {@link IdempotentExecutor}：指纹覆盖 requestId 与全部业务字段，
+     * 同键同参重放首次结果，同键异参 409；业务、版本与幂等结果同事务。
      */
     private <T> ServiceResult<T> withIdempotency(String requestId, Object params, Class<T> type,
-            Supplier<Outcome<T>> action) {
-        if (requestId == null || requestId.isBlank()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "REQUEST_ID_REQUIRED",
-                    "变更接口必须提供 requestId");
-        }
-        String fingerprint = fingerprint(requestId, params);
-        Optional<com.example.starter.compliance.repo.IdempotentRow> existing =
-                repository.findIdempotent(requestId);
-        if (existing.isPresent()) {
-            return resolveIdempotent(existing.get(), fingerprint, type);
-        }
-        try {
-            repository.insertIdempotent(requestId, fingerprint, 0, null, clock.nowMillis());
-        } catch (DuplicateKeyException e) {
-            // 并发同键：另一事务已占位或已完成，按其记录重放或报 409。
-            com.example.starter.compliance.repo.IdempotentRow raced =
-                    repository.findIdempotent(requestId)
-                            .orElseThrow(() -> new ApiException(HttpStatus.CONFLICT,
-                                    "REQUEST_IN_PROGRESS", "同一 requestId 正在处理中"));
-            return resolveIdempotent(raced, fingerprint, type);
-        }
-
-        Outcome<T> outcome = action.get();
-        repository.completeIdempotent(requestId, outcome.status(),
-                JsonSupport.write(outcome.body()));
-        return new ServiceResult<>(outcome.body(), false, outcome.status());
-    }
-
-    private <T> ServiceResult<T> resolveIdempotent(
-            com.example.starter.compliance.repo.IdempotentRow row, String fingerprint,
-            Class<T> type) {
-        if (!row.fingerprint().equals(fingerprint)) {
-            throw new ApiException(HttpStatus.CONFLICT, "REQUEST_PARAM_CONFLICT",
-                    "requestId 已用于不同业务参数");
-        }
-        if (row.statusCode() == 0 || row.responseJson() == null) {
-            throw new ApiException(HttpStatus.CONFLICT, "REQUEST_IN_PROGRESS",
-                    "同一 requestId 的请求正在处理中");
-        }
-        return ServiceResult.replay(JsonSupport.readReplayed(row.responseJson(), type),
-                row.statusCode());
-    }
-
-    private static String fingerprint(String requestId, Object params) {
-        Map<String, Object> material = new LinkedHashMap<>();
-        material.put("requestId", requestId);
-        material.put("params", params);
-        String canonical = JsonSupport.canonical(material);
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(canonical.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
-    /** 业务动作结果：响应体 + 首次 HTTP 状态码（逾期自动暂停等场景首次结果即 409）。 */
-    private record Outcome<T>(T body, int status) {
+            Supplier<IdempotentExecutor.Outcome<T>> action) {
+        return idempotency.execute(requestId, params, type, action);
     }
 }

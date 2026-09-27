@@ -1,6 +1,7 @@
 package com.example.starter.compliance.bootstrap;
 
 import com.example.starter.compliance.repo.ComplianceRepository;
+import com.example.starter.compliance.repo.LineControlRepository;
 import java.math.BigDecimal;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
@@ -16,6 +17,8 @@ import org.springframework.transaction.annotation.Transactional;
  *       E129 诱惑红/着色剂、E300 抗坏血酸/抗氧化剂；</li>
  *   <li>复合配料：ING_SAUCE 复合调味酱（含 E202 2.0 g/kg、E211 4.0 g/kg）、
  *       ING_SYRUP 果味糖浆（含 E102 0.5 g/kg）；</li>
+ *   <li>过敏原（合成清线目录）：ALG_MILK 乳、ALG_EGG 蛋、ALG_PEANUT 花生、
+ *       ALG_SOY 大豆、ALG_WHEAT 小麦、ALG_FISH 鱼；</li>
  *   <li>初始限量（g/kg 终产品）：BEV01 下 E202=0.5、E211=1.0、E102=0.1、E129=0.1、E300=0.5；
  *       BAK01 下 E202=1.0、E211=1.0、E300=2.0；MEAT01 下 E202=1.5、E300=0.5。</li>
  * </ul>
@@ -25,9 +28,12 @@ import org.springframework.transaction.annotation.Transactional;
 public class SyntheticDataInitializer implements ApplicationRunner {
 
     private final ComplianceRepository repository;
+    private final LineControlRepository lineRepository;
 
-    public SyntheticDataInitializer(ComplianceRepository repository) {
+    public SyntheticDataInitializer(ComplianceRepository repository,
+            LineControlRepository lineRepository) {
         this.repository = repository;
+        this.lineRepository = lineRepository;
     }
 
     @Override
@@ -52,6 +58,13 @@ public class SyntheticDataInitializer implements ApplicationRunner {
         repository.insertIngredientAdditive("ING_SAUCE", "E202", new BigDecimal("2.000000"));
         repository.insertIngredientAdditive("ING_SAUCE", "E211", new BigDecimal("4.000000"));
         repository.insertIngredientAdditive("ING_SYRUP", "E102", new BigDecimal("0.500000"));
+
+        lineRepository.insertAllergen("ALG_MILK", "乳");
+        lineRepository.insertAllergen("ALG_EGG", "蛋");
+        lineRepository.insertAllergen("ALG_PEANUT", "花生");
+        lineRepository.insertAllergen("ALG_SOY", "大豆");
+        lineRepository.insertAllergen("ALG_WHEAT", "小麦");
+        lineRepository.insertAllergen("ALG_FISH", "鱼");
 
         long now = System.currentTimeMillis();
         repository.insertLimit("E202", "BEV01", new BigDecimal("0.500000"), now);

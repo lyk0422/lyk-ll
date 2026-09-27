@@ -267,13 +267,25 @@ public class ComplianceRepository {
         }
     }
 
-    public Optional<FilingRow> findFilingByFormulaId(long formulaId) {
-        try {
+    public Optional<FilingRow> findFilingByFormulaId(long formulaId) {        try {
             return Optional.of(jdbcTemplate.queryForObject(
                     "SELECT id, formula_id, product_code, version, status, request_id, snapshot, "
                             + "watch_start_day, suspend_reason, created_at, finalized_at "
                             + "FROM filing WHERE formula_id = ?",
                     FILING_MAPPER, formulaId));
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    /** 行级锁读取备案：受控量产先锁定备案行，与暂停/注销并发时形成唯一提交顺序。 */
+    public Optional<FilingRow> findFilingByIdForUpdate(long filingId) {
+        try {
+            return Optional.of(jdbcTemplate.queryForObject(
+                    "SELECT id, formula_id, product_code, version, status, request_id, snapshot, "
+                            + "watch_start_day, suspend_reason, created_at, finalized_at "
+                            + "FROM filing WHERE id = ? FOR UPDATE",
+                    FILING_MAPPER, filingId));
         } catch (EmptyResultDataAccessException e) {
             return Optional.empty();
         }
@@ -394,6 +406,58 @@ public class ComplianceRepository {
         return count == null ? 0L : count;
     }
 
+    /** 受控量产写入并回填自增主键；同线路同占用版本唯一冲突由调用方转并发失败。 */
+    public long insertControlledProductionRecord(long filingId, String batchNo,
+            BigDecimal quantityKg, long reportedAt, String lineCode, int occupiedVersion,
+            Long certificateId) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbcTemplate.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO production_record(filing_id, batch_no, quantity_kg, reported_at, "
+                            + "line_code, occupied_version, clearance_certificate_id) "
+                            + "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    Statement.RETURN_GENERATED_KEYS);
+            ps.setLong(1, filingId);
+            ps.setString(2, batchNo);
+            ps.setBigDecimal(3, quantityKg);
+            ps.setLong(4, reportedAt);
+            ps.setString(5, lineCode);
+            ps.setInt(6, occupiedVersion);
+            if (certificateId == null) {
+                ps.setObject(7, null);
+            } else {
+                ps.setLong(7, certificateId);
+            }
+            return ps;
+        }, keyHolder);
+        Number key = keyHolder.getKey();
+        if (key == null) {
+            throw new IllegalStateException("量产记录主键生成失败");
+        }
+        return key.longValue();
+    }
+
+    /** 线路受控量产历史（按提交先后升序）。 */
+    public List<ProductionRecordRow> findProductionRecordsByLine(String lineCode) {
+        return jdbcTemplate.query(
+                "SELECT id, filing_id, batch_no, quantity_kg, reported_at, line_code, "
+                        + "occupied_version, clearance_certificate_id FROM production_record "
+                        + "WHERE line_code = ? ORDER BY id",
+                PRODUCTION_RECORD_MAPPER, lineCode);
+    }
+
+    public Optional<ProductionRecordRow> findProductionRecordById(long id) {
+        try {
+            return Optional.of(jdbcTemplate.queryForObject(
+                    "SELECT id, filing_id, batch_no, quantity_kg, reported_at, line_code, "
+                            + "occupied_version, clearance_certificate_id FROM production_record "
+                            + "WHERE id = ?",
+                    PRODUCTION_RECORD_MAPPER, id));
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
     // ---------------- requestId 幂等 ----------------
 
     public Optional<IdempotentRow> findIdempotent(String requestId) {
@@ -432,6 +496,9 @@ public class ComplianceRepository {
         jdbcTemplate.update("DELETE FROM formula_direct_additive");
         jdbcTemplate.update("DELETE FROM formula_ingredient");
         jdbcTemplate.update("DELETE FROM formula");
+        jdbcTemplate.update("DELETE FROM clearance_certificate");
+        jdbcTemplate.update("DELETE FROM production_line");
+        jdbcTemplate.update("DELETE FROM formula_allergen");
         jdbcTemplate.update("DELETE FROM idempotent_request");
     }
 
@@ -474,4 +541,11 @@ public class ComplianceRepository {
     private static final RowMapper<IdempotentRow> IDEMPOTENT_MAPPER = (rs, n) -> new IdempotentRow(
             rs.getString("request_id"), rs.getString("fingerprint"), rs.getInt("status_code"),
             rs.getString("response_json"), rs.getLong("created_at"));
+
+    private static final RowMapper<ProductionRecordRow> PRODUCTION_RECORD_MAPPER = (rs, n) ->
+            new ProductionRecordRow(rs.getLong("id"), rs.getLong("filing_id"),
+                    rs.getString("batch_no"), rs.getBigDecimal("quantity_kg"),
+                    rs.getLong("reported_at"), rs.getString("line_code"),
+                    rs.getObject("occupied_version", Integer.class),
+                    rs.getObject("clearance_certificate_id", Long.class));
 }

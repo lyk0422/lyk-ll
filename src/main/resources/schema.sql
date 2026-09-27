@@ -104,13 +104,66 @@ CREATE TABLE IF NOT EXISTS filing_review (
     created_at BIGINT NOT NULL
 );
 
--- 量产上报记录：仅 ACTIVE（含复审观察受理期内）备案可写入
+-- 量产上报记录：仅 ACTIVE（含复审观察受理期内）备案可写入；
+-- line_code/occupied_version 仅受控量产入口写入，原入口保持 NULL；
+-- (line_code, occupied_version) 唯一：同一线路同一占用版本至多一笔量产成功
 CREATE TABLE IF NOT EXISTS production_record (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     filing_id BIGINT NOT NULL,
     batch_no VARCHAR(96) NOT NULL,
     quantity_kg DECIMAL(18,6) NOT NULL,
-    reported_at BIGINT NOT NULL
+    reported_at BIGINT NOT NULL,
+    line_code VARCHAR(64),
+    occupied_version INT,
+    clearance_certificate_id BIGINT,
+    UNIQUE (line_code, occupied_version)
+);
+
+-- 过敏原合成目录（仅合成数据，不用于生产）
+CREATE TABLE IF NOT EXISTS allergen (
+    allergen_code VARCHAR(64) PRIMARY KEY,
+    allergen_name VARCHAR(128) NOT NULL
+);
+
+-- 配方版本过敏原登记：同一 (product_code, formula_version) 一条；
+-- version 为登记乐观版本，从 1 开始，成功变更加 1
+CREATE TABLE IF NOT EXISTS formula_allergen (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    product_code VARCHAR(64) NOT NULL,
+    formula_version INT NOT NULL,
+    allergens CLOB NOT NULL,
+    version INT NOT NULL,
+    registered_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    UNIQUE (product_code, formula_version)
+);
+
+-- 生产线：last_formula_version 为最近一次量产的配方版本（空表示尚未量产）；
+-- occupied_version 为递增占用版本，从 1 开始，每次受控量产成功加 1
+CREATE TABLE IF NOT EXISTS production_line (
+    line_code VARCHAR(64) PRIMARY KEY,
+    line_name VARCHAR(128) NOT NULL,
+    last_product_code VARCHAR(64),
+    last_formula_version INT,
+    occupied_version INT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+-- 清线凭证：操作人与复核人两名不同人员共同确认后生效，固定线路、清线时刻与当时占用版本；
+-- UTC 确认后 2 小时内有效（恰满 2 小时失效）；线路随后任何量产提交成功即失效；
+-- status 为 ACTIVE 有效 / CONSUMED 已核销 / SUPERSEDED 已被后续量产作废
+CREATE TABLE IF NOT EXISTS clearance_certificate (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    certificate_no VARCHAR(96) NOT NULL UNIQUE,
+    line_code VARCHAR(64) NOT NULL,
+    cleared_allergens CLOB NOT NULL,
+    operator_code VARCHAR(64) NOT NULL,
+    reviewer_code VARCHAR(64) NOT NULL,
+    cleared_at BIGINT NOT NULL,
+    occupied_version INT NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    confirmed_at BIGINT NOT NULL,
+    consumed_at BIGINT
 );
 
 -- requestId 幂等记录：fingerprint 覆盖 requestId 与全部业务字段

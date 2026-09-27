@@ -4,8 +4,12 @@ import com.example.starter.compliance.web.Requests.DirectAdditiveDto;
 import com.example.starter.compliance.web.Requests.FileFilingRequest;
 import com.example.starter.compliance.web.Requests.FilingRefRequest;
 import com.example.starter.compliance.web.Requests.FormulaRefRequest;
+import com.example.starter.compliance.web.Requests.ConfirmCertificateRequest;
+import com.example.starter.compliance.web.Requests.ControlledProductionRequest;
+import com.example.starter.compliance.web.Requests.FormulaAllergenRequest;
 import com.example.starter.compliance.web.Requests.IngredientDto;
 import com.example.starter.compliance.web.Requests.ProductionReportRequest;
+import com.example.starter.compliance.web.Requests.RegisterLineRequest;
 import com.example.starter.compliance.web.Requests.StandardUpdateRequest;
 import com.example.starter.compliance.web.Requests.SubmitFormulaRequest;
 import java.math.BigDecimal;
@@ -74,5 +78,31 @@ public final class Fixtures {
             String maxAmount) {
         return new StandardUpdateRequest(requestId(), additiveCode, categoryCode,
                 new BigDecimal(maxAmount));
+    }
+
+    public static FormulaAllergenRequest allergens(String requestId, String productCode,
+            int formulaVersion, List<String> allergens, int expectedVersion, long registeredAt) {
+        return new FormulaAllergenRequest(requestId, productCode, formulaVersion, allergens,
+                expectedVersion, registeredAt);
+    }
+
+    public static RegisterLineRequest line(String requestId, String lineCode, String lineName,
+            String lastProductCode, Integer lastFormulaVersion, long registeredAt) {
+        return new RegisterLineRequest(requestId, lineCode, lineName, lastProductCode,
+                lastFormulaVersion, registeredAt);
+    }
+
+    public static ConfirmCertificateRequest certificate(String requestId, String certificateNo,
+            String lineCode, List<String> allergens, String operator, String reviewer,
+            long clearedAt, long confirmedAt) {
+        return new ConfirmCertificateRequest(requestId, certificateNo, lineCode, allergens,
+                operator, reviewer, clearedAt, confirmedAt);
+    }
+
+    public static ControlledProductionRequest controlled(String requestId, long filingId,
+            String lineCode, int occupiedVersion, String batchNo, String quantityKg,
+            Long certificateId, long reportedAt) {
+        return new ControlledProductionRequest(requestId, filingId, lineCode, occupiedVersion,
+                batchNo, new BigDecimal(quantityKg), certificateId, reportedAt);
     }
 }
