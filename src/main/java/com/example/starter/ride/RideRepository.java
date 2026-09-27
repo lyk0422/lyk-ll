@@ -30,6 +30,8 @@ public class RideRepository {
     private static Ride map(ResultSet rs) throws SQLException {
         Date checkDate = rs.getDate("check_date");
         Date reopenDate = rs.getDate("reopen_date");
+        long currentCertificateId = rs.getLong("current_certificate_id");
+        Long currentCertificate = rs.wasNull() ? null : currentCertificateId;
         return new Ride(
                 rs.getLong("id"),
                 rs.getString("name"),
@@ -40,20 +42,25 @@ public class RideRepository {
                 rs.getInt("reopen_count"),
                 checkDate == null ? null : checkDate.toLocalDate(),
                 reopenDate == null ? null : reopenDate.toLocalDate(),
+                rs.getBoolean("inspection_required"),
+                rs.getInt("overhaul_version"),
+                currentCertificate,
                 rs.getLong("version"));
     }
 
-    /** 插入新设备，初始状态为待日检。 */
-    public Ride insert(String name, int maxLoad, int maxSpeed) {
+    /** 插入新设备，初始状态为待日检；inspectionRequired 为受检标志。 */
+    public Ride insert(String name, int maxLoad, int maxSpeed, boolean inspectionRequired) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(con -> {
             PreparedStatement ps = con.prepareStatement(
-                    "INSERT INTO ride (name, status, max_load, max_speed) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO ride (name, status, max_load, max_speed, inspection_required)"
+                            + " VALUES (?, ?, ?, ?, ?)",
                     new String[]{"id"});
             ps.setString(1, name);
             ps.setString(2, RideStatus.PENDING_CHECK.name());
             ps.setInt(3, maxLoad);
             ps.setInt(4, maxSpeed);
+            ps.setBoolean(5, inspectionRequired);
             return ps;
         }, keyHolder);
         long id = keyHolder.getKey().longValue();
@@ -73,17 +80,20 @@ public class RideRepository {
 
     /**
      * 乐观锁更新：仅当版本号匹配时写入，返回是否成功。
-     * 并发下只有一条状态链能生效。
+     * 并发下只有一条状态链能生效；成功变更版本号加1。
      */
     public boolean updateWithVersion(Ride ride, RideStatus newStatus, int trialCount,
-            int reopenCount, LocalDate checkDate, LocalDate reopenDate) {
+            int reopenCount, LocalDate checkDate, LocalDate reopenDate,
+            int overhaulVersion, Long currentCertificateId) {
         int rows = jdbc.update(
                 "UPDATE ride SET status = ?, trial_count = ?, reopen_count = ?,"
-                        + " check_date = ?, reopen_date = ?, version = version + 1"
+                        + " check_date = ?, reopen_date = ?, overhaul_version = ?,"
+                        + " current_certificate_id = ?, version = version + 1"
                         + " WHERE id = ? AND version = ?",
                 newStatus.name(), trialCount, reopenCount,
                 checkDate == null ? null : Date.valueOf(checkDate),
                 reopenDate == null ? null : Date.valueOf(reopenDate),
+                overhaulVersion, currentCertificateId,
                 ride.id(), ride.version());
         return rows == 1;
     }

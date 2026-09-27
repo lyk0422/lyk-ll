@@ -1,5 +1,6 @@
 package com.example.starter.ride.dto;
 
+import java.time.Instant;
 import java.util.List;
 
 import jakarta.validation.Valid;
@@ -23,11 +24,22 @@ public final class RideDtos {
             @NotNull(message = "检查项合格标记不能为空") Boolean passed) {
     }
 
-    /** 创建设备请求（合成数据）。 */
+    /** 创建设备请求（合成数据）；inspectionRequired 缺省为 false，旧设备行为不变。 */
     public record CreateRideRequest(
             @NotBlank(message = "设备名称不能为空") String name,
             @Positive(message = "载荷阈值必须为正数") int maxLoad,
-            @Positive(message = "速度阈值必须为正数") int maxSpeed) {
+            @Positive(message = "速度阈值必须为正数") int maxSpeed,
+            Boolean inspectionRequired) {
+
+        /** 兼容旧入口：不携带受检标志时按未受检设备处理。 */
+        public CreateRideRequest(String name, int maxLoad, int maxSpeed) {
+            this(name, maxLoad, maxSpeed, null);
+        }
+
+        /** 受检标志，NULL 视为 false。 */
+        public boolean inspectionRequiredFlag() {
+            return Boolean.TRUE.equals(inspectionRequired);
+        }
     }
 
     /** 日检请求：清单逐项合格方可试运行。 */
@@ -73,6 +85,39 @@ public final class RideDtos {
     public record ReadingRequest(
             @NotNull(message = "载荷读数不能为空") Integer loadValue,
             @NotNull(message = "速度读数不能为空") Integer speedValue) {
+    }
+
+    /**
+     * 年度检验证书登记/换证请求：证书固定设备编号与检验合格时刻；
+     * validUntil 缺省为合格时刻加365×24小时（合成规则，不引用真实法定周期）。
+     */
+    public record RegisterCertificateRequest(
+            @NotBlank(message = "requestId不能为空") @Size(max = 64) String requestId,
+            @NotNull(message = "expectedVersion不能为空") Long expectedVersion,
+            @NotNull(message = "检验合格时刻不能为空") Instant passedAt,
+            Instant validUntil) {
+    }
+
+    /** 年度检验证书撤销请求：撤销当前证书后开放资格立即失效。 */
+    public record RevokeCertificateRequest(
+            @NotBlank(message = "requestId不能为空") @Size(max = 64) String requestId,
+            @NotNull(message = "expectedVersion不能为空") Long expectedVersion,
+            @Size(max = 256, message = "撤销原因最长256字符") String reason) {
+    }
+
+    /** 大修登记请求：原子递增大修版本、暂停开放并使旧监督检验失效。 */
+    public record OverhaulRequest(
+            @NotBlank(message = "requestId不能为空") @Size(max = 64) String requestId,
+            @NotNull(message = "expectedVersion不能为空") Long expectedVersion) {
+    }
+
+    /** 大修后监督检验确认请求：两名不同检验人共同确认全清单合格，绑定当前大修版本。 */
+    public record OverhaulInspectionRequest(
+            @NotBlank(message = "requestId不能为空") @Size(max = 64) String requestId,
+            @NotNull(message = "expectedVersion不能为空") Long expectedVersion,
+            @NotBlank(message = "检验人一不能为空") @Size(max = 64) String inspectorOne,
+            @NotBlank(message = "检验人二不能为空") @Size(max = 64) String inspectorTwo,
+            @NotEmpty(message = "监督检验清单不能为空") List<@Valid CheckItem> items) {
     }
 
     /** 统一错误响应体。 */

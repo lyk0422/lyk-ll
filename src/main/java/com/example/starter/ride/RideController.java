@@ -20,9 +20,13 @@ import com.example.starter.ride.dto.RideDtos.ArchiveRequest;
 import com.example.starter.ride.dto.RideDtos.CreateRideRequest;
 import com.example.starter.ride.dto.RideDtos.DailyCheckRequest;
 import com.example.starter.ride.dto.RideDtos.OpenRequest;
+import com.example.starter.ride.dto.RideDtos.OverhaulInspectionRequest;
+import com.example.starter.ride.dto.RideDtos.OverhaulRequest;
 import com.example.starter.ride.dto.RideDtos.ReadingRequest;
 import com.example.starter.ride.dto.RideDtos.RecheckRequest;
+import com.example.starter.ride.dto.RideDtos.RegisterCertificateRequest;
 import com.example.starter.ride.dto.RideDtos.ReopenRequest;
+import com.example.starter.ride.dto.RideDtos.RevokeCertificateRequest;
 import com.example.starter.ride.dto.RideDtos.SafetyFaultRequest;
 import com.example.starter.ride.dto.RideDtos.TrialRunRequest;
 
@@ -116,6 +120,46 @@ public class RideController {
     @GetMapping("/{rideId}/readings")
     public List<Map<String, Object>> readings(@PathVariable long rideId) {
         return service.listReadings(rideId);
+    }
+
+    @PostMapping("/{rideId}/annual-certificates")
+    public ResponseEntity<String> registerCertificate(@PathVariable long rideId,
+            @Valid @RequestBody RegisterCertificateRequest request) {
+        return render(service.registerCertificate(rideId, request));
+    }
+
+    @PostMapping("/{rideId}/annual-certificates/{certificateId}/revoke")
+    public ResponseEntity<String> revokeCertificate(@PathVariable long rideId,
+            @PathVariable long certificateId,
+            @Valid @RequestBody RevokeCertificateRequest request) {
+        return render(service.revokeCertificate(rideId, certificateId, request));
+    }
+
+    @PostMapping("/{rideId}/overhauls")
+    public ResponseEntity<String> registerOverhaul(@PathVariable long rideId,
+            @Valid @RequestBody OverhaulRequest request) {
+        return render(service.registerOverhaul(rideId, request));
+    }
+
+    @PostMapping("/{rideId}/overhaul-inspections")
+    public ResponseEntity<String> confirmOverhaulInspection(@PathVariable long rideId,
+            @Valid @RequestBody OverhaulInspectionRequest request) {
+        return render(service.confirmOverhaulInspection(rideId, request));
+    }
+
+    @GetMapping("/{rideId}/annual-certificates")
+    public List<Map<String, Object>> certificates(@PathVariable long rideId) {
+        return service.listCertificates(rideId);
+    }
+
+    @GetMapping("/{rideId}/overhaul-inspections")
+    public List<Map<String, Object>> overhaulInspections(@PathVariable long rideId) {
+        return service.listOverhaulInspections(rideId);
+    }
+
+    @GetMapping("/{rideId}/eligibility")
+    public Map<String, Object> eligibility(@PathVariable long rideId) {
+        return service.eligibilityEvidence(rideId);
     }
 
     private ResponseEntity<String> render(ApiResult result) {

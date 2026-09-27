@@ -14,7 +14,10 @@ import java.time.LocalDate;
  * @param reopenCount 当日复开次数，恰2次合法
  * @param checkDate   最近一次日检合格日期，NULL 表示未日检
  * @param reopenDate  最近一次复开日期，用于跨日重置复开计数
- * @param version     乐观锁版本号
+ * @param inspectionRequired 受检标志：true 表示纳入年度检验与大修门禁，false 为旧设备行为不变
+ * @param overhaulVersion    大修版本，登记大修时原子递增，0 表示从未大修
+ * @param currentCertificateId 当前年度检验证书指针，NULL 表示无当前证书
+ * @param version     乐观锁版本号，从1开始、成功变更加1
  */
 public record Ride(
         long id,
@@ -26,6 +29,9 @@ public record Ride(
         int reopenCount,
         LocalDate checkDate,
         LocalDate reopenDate,
+        boolean inspectionRequired,
+        int overhaulVersion,
+        Long currentCertificateId,
         long version) {
 
     /** 安全装置检查项名称，任一失效整机立即停运。 */

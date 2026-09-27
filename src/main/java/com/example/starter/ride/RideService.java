@@ -1,24 +1,33 @@
 package com.example.starter.ride;
 
 import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.example.starter.ride.CertificateRepository.Certificate;
 import com.example.starter.ride.Idempotency.ApiResult;
 import com.example.starter.ride.dto.RideDtos.ArchiveRequest;
 import com.example.starter.ride.dto.RideDtos.CheckItem;
 import com.example.starter.ride.dto.RideDtos.CreateRideRequest;
 import com.example.starter.ride.dto.RideDtos.DailyCheckRequest;
 import com.example.starter.ride.dto.RideDtos.OpenRequest;
+import com.example.starter.ride.dto.RideDtos.OverhaulInspectionRequest;
+import com.example.starter.ride.dto.RideDtos.OverhaulRequest;
 import com.example.starter.ride.dto.RideDtos.ReadingRequest;
 import com.example.starter.ride.dto.RideDtos.RecheckRequest;
+import com.example.starter.ride.dto.RideDtos.RegisterCertificateRequest;
 import com.example.starter.ride.dto.RideDtos.ReopenRequest;
+import com.example.starter.ride.dto.RideDtos.RevokeCertificateRequest;
 import com.example.starter.ride.dto.RideDtos.SafetyFaultRequest;
 import com.example.starter.ride.dto.RideDtos.TrialRunRequest;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -32,25 +41,32 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @Service
 public class RideService {
 
+    /** 年度证书默认有效期：合格时刻加365×24小时（合成规则，不引用真实法定周期）。 */
+    private static final Duration DEFAULT_CERT_VALIDITY = Duration.ofHours(365L * 24);
+
     private final RideRepository rides;
     private final RideRecordRepository records;
+    private final CertificateRepository certificates;
     private final Idempotency.Executor idempotency;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
     public RideService(RideRepository rides, RideRecordRepository records,
-            Idempotency.Executor idempotency, ObjectMapper objectMapper, Clock clock) {
+            CertificateRepository certificates, Idempotency.Executor idempotency,
+            ObjectMapper objectMapper, Clock clock) {
         this.rides = rides;
         this.records = records;
+        this.certificates = certificates;
         this.idempotency = idempotency;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
 
-    /** 创建设备（合成数据），初始状态为待日检。 */
+    /** 创建设备（合成数据），初始状态为待日检；inspectionRequired 为受检标志。 */
     @Transactional
     public Map<String, Object> createRide(CreateRideRequest request) {
-        Ride ride = rides.insert(request.name(), request.maxLoad(), request.maxSpeed());
+        Ride ride = rides.insert(request.name(), request.maxLoad(), request.maxSpeed(),
+                request.inspectionRequiredFlag());
         records.insertEvent(ride.id(), "CREATE", "设备登记：" + ride.name());
         return rideView(ride);
     }
@@ -120,7 +136,7 @@ public class RideService {
         });
     }
 
-    /** 开放：须当日日检合格且试运行恰3次合格；未日检设备无法开放；并发开放唯一成功。 */
+    /** 开放：须当日日检合格且试运行恰3次合格；受检设备还须当前有效年度证书；并发开放唯一成功。 */
     public ApiResult open(long rideId, OpenRequest request) {
         return idempotency.execute(request.requestId(), "OPEN", rideId, request, () -> {
             Ride ride = lock(rideId);
@@ -129,6 +145,7 @@ public class RideService {
             }
             requireStatus(ride, "当前状态不允许开放，须试运行恰3次合格",
                     RideStatus.READY);
+            requireEligibility(ride, "开放");
             update(ride, RideStatus.OPEN, ride.trialCount(), ride.reopenCount(),
                     ride.checkDate(), ride.reopenDate());
             records.insertEvent(rideId, "OPEN", "设备开放载客");
@@ -188,7 +205,7 @@ public class RideService {
         });
     }
 
-    /** 复开：同日复开最多2次，恰2次合法，超出当日禁开。 */
+    /** 复开：同日复开最多2次，恰2次合法，超出当日禁开；受检设备还须当前有效年度证书。 */
     public ApiResult reopen(long rideId, ReopenRequest request) {
         return idempotency.execute(request.requestId(), "REOPEN", rideId, request, () -> {
             Ride ride = lock(rideId);
@@ -199,6 +216,7 @@ public class RideService {
                 throw ApiException.unprocessable(
                         "同日复开已达上限" + Ride.MAX_DAILY_REOPEN + "次，当日禁开");
             }
+            requireEligibility(ride, "复开");
             int reopenCount = used + 1;
             update(ride, RideStatus.OPEN, ride.trialCount(), reopenCount,
                     ride.checkDate(), today);
@@ -242,6 +260,19 @@ public class RideService {
         }
         if (ride.status() != RideStatus.OPEN) {
             throw ApiException.conflict("设备未开放，拒绝运行监测读数");
+        }
+        // 受检设备资格失效（证书过期/撤销/大修未确认）：载客读数只记录并告警，不恢复资格
+        Eligibility eligibility = eligibility(ride);
+        if (ride.inspectionRequired() && !eligibility.eligible()) {
+            records.insertReading(rideId, request.loadValue(), request.speedValue(), false, false);
+            records.insertEvent(rideId, "CERT_ALARM",
+                    "年度检验资格失效，载客读数仅记录并告警：" + String.join("；", eligibility.reasons())
+                            + "（载荷=" + request.loadValue() + "，速度=" + request.speedValue() + "）");
+            Map<String, Object> body = rideView(rideId);
+            body.put("certificateAlarm", true);
+            body.put("alarmReasons", eligibility.reasons());
+            body.put("message", "年度检验资格失效，读数仅记录并告警，不恢复开放资格");
+            return body;
         }
         boolean exceeded = request.loadValue() > ride.maxLoad()
                 || request.speedValue() > ride.maxSpeed();
@@ -303,6 +334,167 @@ public class RideService {
         return records.listReadings(rideId);
     }
 
+    /**
+     * 登记/换证年度检验证书：证书固定设备编号与检验合格时刻，
+     * 默认截止为合格时刻加365×24小时；换证原子切换唯一当前指针，历史证书不可覆盖。
+     */
+    public ApiResult registerCertificate(long rideId, RegisterCertificateRequest request) {
+        return idempotency.execute(request.requestId(), "CERT_REGISTER", rideId, request, () -> {
+            Ride ride = lock(rideId);
+            requireVersion(ride, request.expectedVersion());
+            requireInspected(ride);
+            requireNotArchived(ride, "登记年度检验证书");
+            Instant validUntil = request.validUntil() != null ? request.validUntil()
+                    : request.passedAt().plus(DEFAULT_CERT_VALIDITY);
+            if (!validUntil.isAfter(request.passedAt())) {
+                throw ApiException.unprocessable("有效截止必须晚于检验合格时刻");
+            }
+            long certificateId = certificates.insertCertificate(rideId, request.requestId(),
+                    request.passedAt(), validUntil);
+            update(ride, ride.status(), ride.trialCount(), ride.reopenCount(),
+                    ride.checkDate(), ride.reopenDate(), ride.overhaulVersion(), certificateId);
+            records.insertEvent(rideId, "CERT_REGISTER",
+                    "年度检验证书登记并切换为当前证书：证书ID=" + certificateId
+                            + "，合格时刻=" + request.passedAt() + "，截止=" + validUntil);
+            Map<String, Object> body = rideView(rideId);
+            body.put("certificate", certificateView(
+                    certificates.findCertificate(certificateId).orElseThrow(), true));
+            return ok(body);
+        });
+    }
+
+    /** 撤销证书：撤销当前证书后开放资格立即失效；重复撤销幂等成功。 */
+    public ApiResult revokeCertificate(long rideId, long certificateId,
+            RevokeCertificateRequest request) {
+        return idempotency.execute(request.requestId(), "CERT_REVOKE", rideId, request, () -> {
+            Ride ride = lock(rideId);
+            requireVersion(ride, request.expectedVersion());
+            Certificate cert = certificates.findCertificate(certificateId)
+                    .filter(c -> c.rideId() == rideId)
+                    .orElseThrow(() -> ApiException.notFound("证书不存在：" + certificateId));
+            if (cert.revoked()) {
+                Map<String, Object> body = rideView(rideId);
+                body.put("certificate", certificateView(cert,
+                        Objects.equals(ride.currentCertificateId(), certificateId)));
+                body.put("message", "证书已撤销，重复撤销幂等成功");
+                return ok(body);
+            }
+            Instant now = Instant.now(clock);
+            certificates.revokeCertificate(certificateId, request.reason(), now);
+            Long newCurrent = Objects.equals(ride.currentCertificateId(), certificateId)
+                    ? null : ride.currentCertificateId();
+            update(ride, ride.status(), ride.trialCount(), ride.reopenCount(),
+                    ride.checkDate(), ride.reopenDate(), ride.overhaulVersion(), newCurrent);
+            records.insertEvent(rideId, "CERT_REVOKE",
+                    "年度检验证书撤销：证书ID=" + certificateId
+                            + (request.reason() == null ? "" : "，原因=" + request.reason()));
+            Map<String, Object> body = rideView(rideId);
+            body.put("certificate", certificateView(
+                    certificates.findCertificate(certificateId).orElseThrow(), false));
+            return ok(body);
+        });
+    }
+
+    /** 登记大修：原子递增大修版本、暂停开放并使旧监督检验失效（旧年度证书可查但不足以复开）。 */
+    public ApiResult registerOverhaul(long rideId, OverhaulRequest request) {
+        return idempotency.execute(request.requestId(), "OVERHAUL", rideId, request, () -> {
+            Ride ride = lock(rideId);
+            requireVersion(ride, request.expectedVersion());
+            requireInspected(ride);
+            requireNotArchived(ride, "登记大修");
+            int newOverhaulVersion = ride.overhaulVersion() + 1;
+            RideStatus newStatus = ride.status() == RideStatus.OPEN
+                    ? RideStatus.SUSPENDED : ride.status();
+            update(ride, newStatus, ride.trialCount(), ride.reopenCount(),
+                    ride.checkDate(), ride.reopenDate(), newOverhaulVersion,
+                    ride.currentCertificateId());
+            records.insertEvent(rideId, "OVERHAUL",
+                    "登记大修：大修版本=" + newOverhaulVersion
+                            + "，暂停开放，旧监督检验失效，须新监督检验确认后方可复开");
+            Map<String, Object> body = rideView(rideId);
+            body.put("overhaulVersion", newOverhaulVersion);
+            return ok(body);
+        });
+    }
+
+    /**
+     * 大修后监督检验确认：绑定当前大修版本，两名不同检验人共同确认全清单合格。
+     * 确认后只恢复开放资格，不自动开放，也不重置原当日复开次数。
+     */
+    public ApiResult confirmOverhaulInspection(long rideId, OverhaulInspectionRequest request) {
+        return idempotency.execute(request.requestId(), "OVERHAUL_INSPECTION", rideId, request,
+                () -> {
+                    Ride ride = lock(rideId);
+                    requireVersion(ride, request.expectedVersion());
+                    requireInspected(ride);
+                    requireNotArchived(ride, "监督检验确认");
+                    if (ride.overhaulVersion() == 0) {
+                        throw ApiException.unprocessable("设备未登记大修，拒绝监督检验确认");
+                    }
+                    if (request.inspectorOne().equals(request.inspectorTwo())) {
+                        throw ApiException.unprocessable("两名检验人须为不同人员："
+                                + request.inspectorOne());
+                    }
+                    boolean allPassed = request.items().stream().allMatch(CheckItem::passed);
+                    certificates.insertOverhaulInspection(rideId, request.requestId(),
+                            ride.overhaulVersion(), request.inspectorOne(),
+                            request.inspectorTwo(), allPassed, request.items());
+                    records.insertEvent(rideId, "OVERHAUL_INSPECTION",
+                            allPassed ? "监督检验双人确认全清单合格，恢复开放资格（不自动开放，大修版本="
+                                    + ride.overhaulVersion() + "）"
+                                    : "监督检验存在不合格项，开放资格未恢复");
+                    // 只恢复开放资格：不改变设备状态、不重置当日复开次数；成功变更版本加1
+                    update(ride, ride.status(), ride.trialCount(), ride.reopenCount(),
+                            ride.checkDate(), ride.reopenDate(), ride.overhaulVersion(),
+                            ride.currentCertificateId());
+                    Map<String, Object> body = rideView(rideId);
+                    body.put("allPassed", allPassed);
+                    body.put("overhaulVersion", ride.overhaulVersion());
+                    return ok(body);
+                });
+    }
+
+    /** 证书查询（含历史与撤销信息），current 标记唯一当前指针。 */
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> listCertificates(long rideId) {
+        Ride ride = rides.findById(rideId)
+                .orElseThrow(() -> ApiException.notFound("设备不存在：" + rideId));
+        List<Map<String, Object>> list = certificates.listCertificates(rideId);
+        for (Map<String, Object> cert : list) {
+            long certId = ((Number) cert.get("id")).longValue();
+            cert.put("current", ride.currentCertificateId() != null
+                    && ride.currentCertificateId() == certId);
+        }
+        return list;
+    }
+
+    /** 大修后监督检验记录查询（含清单明细），可复算。 */
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> listOverhaulInspections(long rideId) {
+        ensureExists(rideId);
+        return certificates.listOverhaulInspections(rideId);
+    }
+
+    /** 开放资格证据查询：受检标志、当前证书、大修版本与监督检验确认状态及失效原因。 */
+    @Transactional(readOnly = true)
+    public Map<String, Object> eligibilityEvidence(long rideId) {
+        Ride ride = rides.findById(rideId)
+                .orElseThrow(() -> ApiException.notFound("设备不存在：" + rideId));
+        Eligibility result = eligibility(ride);
+        Certificate current = ride.currentCertificateId() == null ? null
+                : certificates.findCertificate(ride.currentCertificateId()).orElse(null);
+        Map<String, Object> body = rideView(ride);
+        body.put("inspectionRequired", ride.inspectionRequired());
+        body.put("eligible", result.eligible());
+        body.put("reasons", result.reasons());
+        body.put("now", Instant.now(clock).toString());
+        body.put("overhaulVersion", ride.overhaulVersion());
+        body.put("overhaulInspectionConfirmed", ride.overhaulVersion() > 0
+                && certificates.existsConfirmedInspection(rideId, ride.overhaulVersion()));
+        body.put("currentCertificate", current == null ? null : certificateView(current, true));
+        return body;
+    }
+
     private void ensureExists(long rideId) {
         if (rides.findById(rideId).isEmpty()) {
             throw ApiException.notFound("设备不存在：" + rideId);
@@ -322,14 +514,95 @@ public class RideService {
 
     private void update(Ride ride, RideStatus status, int trialCount, int reopenCount,
             LocalDate checkDate, LocalDate reopenDate) {
+        update(ride, status, trialCount, reopenCount, checkDate, reopenDate,
+                ride.overhaulVersion(), ride.currentCertificateId());
+    }
+
+    private void update(Ride ride, RideStatus status, int trialCount, int reopenCount,
+            LocalDate checkDate, LocalDate reopenDate, int overhaulVersion,
+            Long currentCertificateId) {
         if (!rides.updateWithVersion(ride, status, trialCount, reopenCount,
-                checkDate, reopenDate)) {
+                checkDate, reopenDate, overhaulVersion, currentCertificateId)) {
             throw ApiException.conflict("设备状态并发变更，请重试");
         }
     }
 
     private boolean isSafetyDevice(String name) {
         return Arrays.asList(Ride.SAFETY_DEVICES).contains(name);
+    }
+
+    /** 开放资格判定结果：eligible 为 false 时 reasons 给出全部失效原因。 */
+    private record Eligibility(boolean eligible, List<String> reasons) {
+    }
+
+    /**
+     * 受检设备开放资格：须当前有效年度证书（UTC下now<截止有效、恰截止失效），
+     * 且大修后须当前大修版本的监督检验已确认；未受检设备不参与门禁。
+     */
+    private Eligibility eligibility(Ride ride) {
+        List<String> reasons = new ArrayList<>();
+        if (!ride.inspectionRequired()) {
+            return new Eligibility(true, reasons);
+        }
+        Instant now = Instant.now(clock);
+        Certificate current = ride.currentCertificateId() == null ? null
+                : certificates.findCertificate(ride.currentCertificateId()).orElse(null);
+        if (current == null) {
+            reasons.add("无当前年度检验证书");
+        } else if (current.revoked()) {
+            reasons.add("当前年度检验证书已撤销");
+        } else if (!now.isBefore(current.validUntil())) {
+            reasons.add("年度检验证书已过期或恰截止失效（截止=" + current.validUntil() + "）");
+        }
+        if (ride.overhaulVersion() > 0
+                && !certificates.existsConfirmedInspection(ride.id(), ride.overhaulVersion())) {
+            reasons.add("大修后监督检验未确认（当前大修版本=" + ride.overhaulVersion() + "）");
+        }
+        return new Eligibility(reasons.isEmpty(), reasons);
+    }
+
+    /** 受检设备开放/复开门禁：资格不满足按业务拒绝422。 */
+    private void requireEligibility(Ride ride, String action) {
+        Eligibility result = eligibility(ride);
+        if (!result.eligible()) {
+            throw ApiException.unprocessable("受检设备" + action + "被拒绝："
+                    + String.join("；", result.reasons()));
+        }
+    }
+
+    /** 版本校验：expectedVersion 须等于当前版本，不一致按冲突409。 */
+    private void requireVersion(Ride ride, long expectedVersion) {
+        if (ride.version() != expectedVersion) {
+            throw ApiException.conflict("expectedVersion与当前版本不一致：期望="
+                    + expectedVersion + "，当前=" + ride.version());
+        }
+    }
+
+    /** 受检标志校验：未启用受检标志的旧设备拒绝年度检验相关操作，按业务拒绝422。 */
+    private void requireInspected(Ride ride) {
+        if (!ride.inspectionRequired()) {
+            throw ApiException.unprocessable("设备未启用受检标志，拒绝年度检验相关操作");
+        }
+    }
+
+    /** 归档终态校验：归档设备拒绝年度检验相关变更，按业务拒绝422。 */
+    private void requireNotArchived(Ride ride, String action) {
+        if (ride.status() == RideStatus.ARCHIVED) {
+            throw ApiException.unprocessable("设备已归档，拒绝" + action);
+        }
+    }
+
+    private Map<String, Object> certificateView(Certificate cert, boolean current) {
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("certificateId", cert.id());
+        view.put("rideId", cert.rideId());
+        view.put("passedAt", cert.passedAt().toString());
+        view.put("validUntil", cert.validUntil().toString());
+        view.put("revoked", cert.revoked());
+        view.put("revokeReason", cert.revokeReason());
+        view.put("revokedAt", cert.revokedAt() == null ? null : cert.revokedAt().toString());
+        view.put("current", current);
+        return view;
     }
 
     private Map<String, Object> rideView(long rideId) {
@@ -346,6 +619,10 @@ public class RideService {
         view.put("trialCount", ride.trialCount());
         view.put("reopenCount", ride.reopenCount());
         view.put("checkDate", ride.checkDate() == null ? null : ride.checkDate().toString());
+        view.put("inspectionRequired", ride.inspectionRequired());
+        view.put("overhaulVersion", ride.overhaulVersion());
+        view.put("currentCertificateId", ride.currentCertificateId());
+        view.put("version", ride.version());
         return view;
     }
 
