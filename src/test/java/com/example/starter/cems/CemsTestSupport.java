@@ -25,6 +25,14 @@ final class CemsTestSupport {
         jdbc.update("DELETE FROM data_gap");
         jdbc.update("DELETE FROM exceedance_mark");
         jdbc.update("DELETE FROM monitor_reading");
+        jdbc.update("DELETE FROM rainfall_adjustment");
+        jdbc.update("DELETE FROM overflow_anomaly");
+        jdbc.update("DELETE FROM overflow_daily_summary");
+        jdbc.update("DELETE FROM overflow_daily_freeze");
+        jdbc.update("DELETE FROM overflow_mark");
+        jdbc.update("DELETE FROM overflow_hourly_record");
+        jdbc.update("DELETE FROM rainfall_reading");
+        jdbc.update("DELETE FROM overflow_permit");
         jdbc.update("DELETE FROM discharge_outlet");
     }
 

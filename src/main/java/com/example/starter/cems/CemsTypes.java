@@ -221,4 +221,177 @@ public final class CemsTypes {
     /** 统一操作回执。 */
     public record Receipt(String requestId, String action, boolean replayed) {
     }
+
+    // ================= 雨季溢流（UTC 口径，合成许可） =================
+
+    /**
+     * 新建溢流许可版本。UTC 半开窗口 [validFromUtc, validToUtc)，两端必须为 UTC 整点。
+     * 首个版本号固定为 1；与既有版本窗口重叠拒绝（422）。
+     */
+    public record OverflowPermitCreateRequest(
+            String requestId,
+            String outletCode,
+            LocalDateTime validFromUtc,
+            LocalDateTime validToUtc,
+            BigDecimal minHourlyRainfallMm,
+            Integer maxConsecutiveOverflowHours
+    ) {
+    }
+
+    /**
+     * 修改溢流许可：必须携带 expectedVersion（当前最新版本），成功后版本加 1。
+     */
+    public record OverflowPermitUpdateRequest(
+            String requestId,
+            String outletCode,
+            Integer expectedVersion,
+            LocalDateTime validFromUtc,
+            LocalDateTime validToUtc,
+            BigDecimal minHourlyRainfallMm,
+            Integer maxConsecutiveOverflowHours
+    ) {
+    }
+
+    /** 溢流许可版本视图。 */
+    public record OverflowPermitView(
+            String outletCode,
+            int version,
+            LocalDateTime validFromUtc,
+            LocalDateTime validToUtc,
+            BigDecimal minHourlyRainfallMm,
+            int maxConsecutiveOverflowHours,
+            LocalDateTime createdAt
+    ) {
+    }
+
+    /**
+     * 上报/更正某 UTC 整点小时雨量。version 从 1 开始：首次上报 expectedVersion 留空且落 version 1；
+     * 更正须携带 expectedVersion=当前最新版本，成功后新增一行 version+1（历史版本保留）。
+     * 雨量 0.0 是合法实测值；缺雨量是“无任何版本行”，不得用 0 代替。requestId 幂等。
+     */
+    public record RainfallReportRequest(
+            String requestId,
+            String outletCode,
+            LocalDateTime hourUtc,
+            BigDecimal rainfallMm,
+            Integer expectedVersion
+    ) {
+    }
+
+    /** 雨量上报结果（回显最新版本）。 */
+    public record RainfallReportResult(
+            String outletCode,
+            LocalDateTime hourUtc,
+            BigDecimal rainfallMm,
+            int version
+    ) {
+    }
+
+    /**
+     * 上报 UTC 整点小时排放数据并申报溢流。overflowFlag=true 时进入溢流证据判定：
+     * 许可有效、该小时雨量（最新版本）≥门槛、小时完整落窗才证据齐全；缺雨量只能待核。
+     * 浓度与溢流标记独立留证：溢流不抹掉原浓度超标，也不取消限排令。requestId 幂等。
+     */
+    public record OverflowHourlyRequest(
+            String requestId,
+            String outletCode,
+            LocalDateTime hourUtc,
+            BigDecimal avgValue,
+            boolean overflowFlag
+    ) {
+    }
+
+    /** 小时溢流证据视图。 */
+    public record OverflowHourView(
+            String outletCode,
+            LocalDateTime hourUtc,
+            BigDecimal avgValue,
+            boolean overflowFlag,
+            String overflowStatus,
+            Integer permitVersion,
+            Integer rainfallVersion,
+            BigDecimal rainfallMm
+    ) {
+    }
+
+    /**
+     * 标记复核：冻结指定溢流小时所用许可版本与雨量版本，并在同一事务产出该 UTC 日双口径日结。
+     * requestId 幂等：同键同参重放首次冻结结果；小时须证据齐全（READY）方可冻结。
+     */
+    public record OverflowReviewRequest(
+            String requestId,
+            String outletCode,
+            LocalDate dayUtc
+    ) {
+    }
+
+    /**
+     * 冻结后独立雨量调差：不改日结快照、不改冻结版本列，仅追加调差证据。
+     */
+    public record RainfallAdjustRequest(
+            String requestId,
+            String outletCode,
+            LocalDateTime hourUtc,
+            BigDecimal correctedRainfallMm,
+            String reason
+    ) {
+    }
+
+    /** 独立调差结果。 */
+    public record RainfallAdjustResult(
+            String requestId,
+            String outletCode,
+            LocalDateTime hourUtc,
+            Integer frozenRainfallVersion,
+            BigDecimal frozenRainfallMm,
+            int newRainfallVersion,
+            BigDecimal newRainfallMm
+    ) {
+    }
+
+    /** 单口径日结：分母、排除小时、缺点均明示。 */
+    public record OverflowCaliberSummary(
+            String caliber,
+            BigDecimal averageValue,
+            int denominator,
+            int excludedHours,
+            int missingPoints,
+            boolean noData
+    ) {
+    }
+
+    /** 双口径日结视图：NORMAL 仅排除证据齐全的合规溢流小时；ALL 不排除；空集合返回无结果而非零。 */
+    public record OverflowDailySummaryView(
+            String outletCode,
+            LocalDate dayUtc,
+            boolean replayed,
+            OverflowCaliberSummary normal,
+            OverflowCaliberSummary all
+    ) {
+    }
+
+    /** 专项异常视图。 */
+    public record OverflowAnomalyView(
+            String outletCode,
+            String anomalyType,
+            LocalDateTime segmentFromUtc,
+            LocalDateTime segmentToUtc,
+            int consecutiveHours,
+            int limitHours,
+            Integer permitVersion,
+            String detail
+    ) {
+    }
+
+    /** 标记复核/日结冻结结果：双口径与专项异常在同一冻结事务内一致产出。 */
+    public record OverflowReviewResult(
+            String requestId,
+            String outletCode,
+            LocalDate dayUtc,
+            boolean replayed,
+            int frozenCompliantHours,
+            OverflowDailySummaryView summary,
+            List<OverflowAnomalyView> anomalies
+    ) {
+    }
 }

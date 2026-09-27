@@ -31,6 +31,65 @@ public class IdempotencySupport {
             sorted.putAll(businessFields);
         }
         String canonical = "requestId=" + nullToEmpty(requestId) + "|" + sorted;
+        return sha256(canonical);
+    }
+
+    /**
+     * 结构化无歧义指纹：字段名与标量值均以“长度前缀:”编码，null 以独立标记表示，
+     * 集合/Map/数组递归编码并带类型与元素个数标记。
+     * 长度前缀保证即使合法文本包含 ':'、';'、'='、'|'、空串或跨行，也不会与字段边界混淆。
+     * 字段按给定 Map 的迭代顺序写入（调用方用 LinkedHashMap 固定语义顺序）。
+     */
+    public String fingerprintStructured(String requestId, Map<String, ?> businessFields) {
+        StringBuilder canonical = new StringBuilder();
+        canonical.append("rid=").append(token(requestId));
+        if (businessFields != null) {
+            businessFields.forEach((name, value) -> {
+                canonical.append(';').append(token(name)).append('=');
+                appendValue(canonical, value);
+            });
+        }
+        return sha256(canonical.toString());
+    }
+
+    /** 递归追加一个值：标量走长度前缀；集合带类型+元素个数并逐项递归，杜绝拼接歧义。 */
+    private void appendValue(StringBuilder out, Object value) {
+        if (value == null) {
+            out.append("null");
+        } else if (value instanceof Map<?, ?> map) {
+            out.append("map{").append(map.size()).append('}');
+            map.forEach((k, v) -> {
+                out.append('[').append(token(String.valueOf(k))).append('=');
+                appendValue(out, v);
+                out.append(']');
+            });
+        } else if (value instanceof java.util.Collection<?> collection) {
+            out.append("col[").append(collection.size()).append(']');
+            for (Object element : collection) {
+                out.append('<');
+                appendValue(out, element);
+                out.append('>');
+            }
+        } else if (value.getClass().isArray()) {
+            int length = java.lang.reflect.Array.getLength(value);
+            out.append("arr[").append(length).append(']');
+            for (int i = 0; i < length; i++) {
+                out.append('<');
+                appendValue(out, java.lang.reflect.Array.get(value, i));
+                out.append('>');
+            }
+        } else {
+            out.append("val:").append(token(String.valueOf(value)));
+        }
+    }
+
+    /** 长度前缀令牌：{长度}:{原文}；空串为 "0:"，与缺字段/null 可区分。 */
+    private static String token(String value) {
+        String safe = value == null ? "" : value;
+        return safe.length() + ":" + safe;
+    }
+
+    private static String sha256(String canonical) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] hash = digest.digest(canonical.getBytes(StandardCharsets.UTF_8));
