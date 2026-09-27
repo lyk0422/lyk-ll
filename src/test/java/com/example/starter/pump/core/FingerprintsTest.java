@@ -39,4 +39,18 @@ class FingerprintsTest {
     void nullAndEmptyAreStable() {
         assertThat(Fingerprints.sha256("r", null)).isEqualTo(Fingerprints.sha256("r", (Object) null));
     }
+
+    @Test
+    void separatorInLegalText_doesNotCollideWithFieldBoundary() {
+        // 合法文本含分隔符也须区分：结构化长度前缀编码保证字段边界无歧义
+        assertThat(Fingerprints.sha256("a|b", "c")).isNotEqualTo(Fingerprints.sha256("a", "b|c"));
+        assertThat(Fingerprints.sha256("a:b", "c")).isNotEqualTo(Fingerprints.sha256("a", "b:c"));
+        assertThat(Fingerprints.sha256("ab", "c")).isNotEqualTo(Fingerprints.sha256("a", "bc"));
+        assertThat(Fingerprints.sha256("1:x", "y")).isNotEqualTo(Fingerprints.sha256("1", "x:y"));
+    }
+
+    @Test
+    void nullAndEmptyString_areDistinguished() {
+        assertThat(Fingerprints.sha256("r", null)).isNotEqualTo(Fingerprints.sha256("r", ""));
+    }
 }

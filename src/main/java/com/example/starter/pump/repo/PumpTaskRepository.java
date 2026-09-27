@@ -158,6 +158,53 @@ public class PumpTaskRepository {
         }
     }
 
+    /**
+     * 强排切换专用：直接插入新序列（不复用同时刻旧序列）。
+     *
+     * @throws DuplicateKeyException 同分区同时刻已存在序列（占用冲突）
+     */
+    public Long insertSequence(Long pumpdownId, String zoneCode, LocalDateTime taskTime,
+                               LocalDateTime now) {
+        GeneratedKeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(con -> {
+            java.sql.PreparedStatement ps = con.prepareStatement(
+                    """
+                    INSERT INTO pump_sequence (pumpdown_id, zone_code, task_time, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    new String[]{"id"});
+            ps.setLong(1, pumpdownId);
+            ps.setString(2, zoneCode);
+            ps.setObject(3, taskTime);
+            ps.setObject(4, now);
+            return ps;
+        }, keyHolder);
+        Number key = keyHolder.getKey();
+        if (key == null) {
+            throw new IllegalStateException("启停序列自增ID回填失败");
+        }
+        return key.longValue();
+    }
+
+    /** 终结分区在指定预降事件下的全部活动序列（强排切换原子换序列）。 */
+    public void terminateActiveSequences(Long pumpdownId, String zoneCode,
+                                         LocalDateTime terminatedAt) {
+        jdbc.update(
+                """
+                UPDATE pump_sequence SET status = 'TERMINATED', terminated_at = ?
+                WHERE pumpdown_id = ? AND zone_code = ? AND status = 'ACTIVE'
+                """,
+                terminatedAt, pumpdownId, zoneCode);
+    }
+
+    /** 某站是否已在指定时刻存在启停任务（切换前占用校验）。 */
+    public boolean taskExistsAt(String stationCode, LocalDateTime taskTime) {
+        Integer cnt = jdbc.queryForObject(
+                "SELECT COUNT(1) FROM pump_task WHERE station_code = ? AND task_time = ?",
+                Integer.class, stationCode, taskTime);
+        return cnt != null && cnt > 0;
+    }
+
     /** 复算：预降事件的启停序列（LEFT JOIN 闸门开度）。 */
     public List<ReplayResult.TaskItem> loadTasks(Long pumpdownId) {
         return jdbc.query(

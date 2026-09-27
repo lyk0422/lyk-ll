@@ -28,6 +28,12 @@ public abstract class AbstractIntegrationTest {
             "miss_contact_order",
             "review_archive",
             "pumpdown_event",
+            "tide_switch_candidate_station",
+            "tide_switch_candidate",
+            "tide_mode_trail",
+            "tide_level_reading",
+            "late_tide_event",
+            "tide_zone_config",
             "idempotent_request");
 
     @Autowired

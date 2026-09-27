@@ -119,3 +119,77 @@ CREATE TABLE IF NOT EXISTS review_archive (
     summary CLOB NOT NULL COMMENT '复盘摘要（曲线、启停序列、失联台账复算结果）',
     archived_at TIMESTAMP NOT NULL COMMENT '归档时刻'
 );
+
+-- 启停序列生命周期：强排切换原子启用新序列、终结旧序列
+ALTER TABLE pump_sequence ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE';
+ALTER TABLE pump_sequence ADD COLUMN IF NOT EXISTS terminated_at TIMESTAMP NULL;
+
+-- 分区潮汐控制配置：未配置的分区保持原行为
+CREATE TABLE IF NOT EXISTS tide_zone_config (
+    zone_code VARCHAR(32) PRIMARY KEY COMMENT '流域分区代码',
+    backwater_threshold DECIMAL(8,3) NOT NULL COMMENT '潮位顶托门槛（米），非负；恰达进入强排',
+    current_mode VARCHAR(16) NOT NULL COMMENT '当前工况 NORMAL常规/FORCED强排',
+    version INT NOT NULL COMMENT '工况版本，从1开始，每次成功变更加1',
+    updated_at TIMESTAMP NOT NULL COMMENT '最近变更时刻（Asia/Shanghai）',
+    CONSTRAINT chk_threshold_nonneg CHECK (backwater_threshold >= 0)
+);
+
+-- 潮位数据：按分区+UTC观测时刻唯一，潮位非负
+CREATE TABLE IF NOT EXISTS tide_level_reading (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '潮位数据ID',
+    zone_code VARCHAR(32) NOT NULL COMMENT '流域分区代码',
+    observed_at TIMESTAMP NOT NULL COMMENT '潮位观测时刻（UTC）',
+    tide_level DECIMAL(8,3) NOT NULL COMMENT '潮位（米），非负',
+    received_at TIMESTAMP NOT NULL COMMENT '服务接收时刻（Asia/Shanghai）',
+    CONSTRAINT uk_zone_tide_time UNIQUE (zone_code, observed_at),
+    CONSTRAINT chk_tide_level_nonneg CHECK (tide_level >= 0)
+);
+
+-- 迟到/归档后潮位证据：只留证据，不让当前工况倒退、不重开已归档事件
+CREATE TABLE IF NOT EXISTS late_tide_event (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '迟到潮位事件ID',
+    zone_code VARCHAR(32) NOT NULL COMMENT '流域分区代码',
+    observed_at TIMESTAMP NOT NULL COMMENT '潮位观测时刻（UTC）',
+    tide_level DECIMAL(8,3) NOT NULL COMMENT '潮位（米），非负',
+    received_at TIMESTAMP NOT NULL COMMENT '服务接收时刻（Asia/Shanghai）',
+    reason VARCHAR(24) NOT NULL COMMENT '迟到原因 OUT_OF_ORDER乱序/ARCHIVED已归档',
+    CONSTRAINT uk_late_zone_tide_time UNIQUE (zone_code, observed_at)
+);
+
+-- 强排切换候选序列：固定触发潮位版本与全部相关站闸门目标，确认前不产生任何启停
+CREATE TABLE IF NOT EXISTS tide_switch_candidate (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '候选序列ID',
+    request_id VARCHAR(64) NOT NULL UNIQUE COMMENT '生成候选的潮位上送requestId',
+    zone_code VARCHAR(32) NOT NULL COMMENT '流域分区代码',
+    target_mode VARCHAR(16) NOT NULL COMMENT '目标工况 FORCED进入强排/NORMAL退出强排',
+    tide_reading_id BIGINT NOT NULL COMMENT '固定的触发潮位数据ID',
+    tide_level DECIMAL(8,3) NOT NULL COMMENT '固定的触发潮位（米）',
+    tide_observed_at TIMESTAMP NOT NULL COMMENT '固定的触发潮位观测时刻（UTC）',
+    threshold_snapshot DECIMAL(8,3) NOT NULL COMMENT '生成时顶托门槛快照（米）',
+    base_version INT NOT NULL COMMENT '生成时工况版本',
+    status VARCHAR(16) NOT NULL COMMENT '候选状态 PENDING待确认/ACTIVATED已启用/SUPERSEDED已被取代',
+    created_at TIMESTAMP NOT NULL COMMENT '候选生成时刻（Asia/Shanghai）',
+    activated_at TIMESTAMP NULL COMMENT '启用时刻，NULL表示未启用'
+);
+
+-- 候选序列的站闸门目标：确认时回执须与此快照逐一吻合
+CREATE TABLE IF NOT EXISTS tide_switch_candidate_station (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '候选站目标ID',
+    candidate_id BIGINT NOT NULL COMMENT '所属候选序列ID',
+    station_code VARCHAR(32) NOT NULL COMMENT '泵站代码',
+    target_opening DECIMAL(5,2) NOT NULL COMMENT '固定闸门目标开度（百分比，0-100）',
+    CONSTRAINT uk_candidate_station UNIQUE (candidate_id, station_code),
+    CONSTRAINT chk_target_opening CHECK (target_opening >= 0 AND target_opening <= 100)
+);
+
+-- 工况轨迹：每次成功切换追加一条，版本单调递增
+CREATE TABLE IF NOT EXISTS tide_mode_trail (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '轨迹ID',
+    zone_code VARCHAR(32) NOT NULL COMMENT '流域分区代码',
+    from_mode VARCHAR(16) NOT NULL COMMENT '切换前工况 NORMAL/FORCED',
+    to_mode VARCHAR(16) NOT NULL COMMENT '切换后工况 NORMAL/FORCED',
+    version INT NOT NULL COMMENT '切换后的工况版本',
+    candidate_id BIGINT NOT NULL COMMENT '被启用的候选序列ID',
+    request_id VARCHAR(64) NOT NULL COMMENT '候选确认requestId',
+    switched_at TIMESTAMP NOT NULL COMMENT '切换生效时刻（Asia/Shanghai）'
+);

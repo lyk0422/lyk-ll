@@ -114,4 +114,16 @@ public class LevelReadingRepository {
                         rs.getBigDecimal("level")),
                 pumpdownId);
     }
+
+    /** 某站点在预降事件内最近一次液位值（米），无数据返回 null；强排切换安全校验用。 */
+    public BigDecimal latestLevel(String stationCode, Long pumpdownId) {
+        List<BigDecimal> levels = jdbc.query(
+                """
+                SELECT level FROM level_reading
+                WHERE station_code = ? AND pumpdown_id = ?
+                ORDER BY reading_time DESC, id DESC LIMIT 1
+                """,
+                (rs, n) -> rs.getBigDecimal("level"), stationCode, pumpdownId);
+        return levels.isEmpty() ? null : levels.get(0);
+    }
 }
