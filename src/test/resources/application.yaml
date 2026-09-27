@@ -14,3 +14,5 @@ spring:
 cosmetic:
   public-notice:
     scheduling-enabled: false
+  children-public-notice:
+    scheduling-enabled: false

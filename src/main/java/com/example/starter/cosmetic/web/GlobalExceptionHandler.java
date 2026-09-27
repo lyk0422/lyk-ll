@@ -2,6 +2,7 @@ package com.example.starter.cosmetic.web;
 
 import com.example.starter.cosmetic.service.ConflictException;
 import com.example.starter.cosmetic.service.NotFoundException;
+import com.example.starter.cosmetic.service.UnprocessableException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -28,6 +29,17 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ConflictException.class)
     public ResponseEntity<Map<String, Object>> handleConflict(ConflictException e) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(body(e.code(), e.getMessage()));
+    }
+
+    /** 422 业务拒绝（缺项一次列全）。 */
+    @ExceptionHandler(UnprocessableException.class)
+    public ResponseEntity<Map<String, Object>> handleUnprocessable(UnprocessableException e) {
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("code", e.code());
+        body.put("message", String.valueOf(e.getMessage()));
+        body.put("problems", e.problems());
+        body.put("atUtc", Instant.now().toString());
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(body);
     }
 
     /** 400 参数校验。 */
