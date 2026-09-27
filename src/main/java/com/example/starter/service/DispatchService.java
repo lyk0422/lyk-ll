@@ -3,6 +3,7 @@ package com.example.starter.service;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +33,7 @@ import com.example.starter.dto.ReportResponse;
 import com.example.starter.dto.SettleResponse;
 import com.example.starter.repo.DispatchRepository;
 import com.example.starter.repo.IdempotentRepository;
+import com.example.starter.repo.PlanRepository;
 import com.example.starter.repo.TurbineRepository;
 import com.example.starter.support.Fingerprints;
 import com.example.starter.support.ServiceClock;
@@ -55,17 +57,20 @@ public class DispatchService {
     private final TurbineRepository turbineRepository;
     private final DispatchRepository dispatchRepository;
     private final IdempotentRepository idempotentRepository;
+    private final PlanRepository planRepository;
     private final ObjectMapper objectMapper;
 
     public DispatchService(ServiceClock clock,
                            TurbineRepository turbineRepository,
                            DispatchRepository dispatchRepository,
                            IdempotentRepository idempotentRepository,
+                           PlanRepository planRepository,
                            ObjectMapper objectMapper) {
         this.clock = clock;
         this.turbineRepository = turbineRepository;
         this.dispatchRepository = dispatchRepository;
         this.idempotentRepository = idempotentRepository;
+        this.planRepository = planRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -307,6 +312,22 @@ public class DispatchService {
         }
 
         List<Turbine> turbines = turbineRepository.findByFarm(order.getFarmCode());
+        // 计划绑定指令：超时重分摊仍引用受理时冻结的原计划版本该段核定值，
+        // 仅以回报刷新的最新实时可用出力重新取 min；不随后续新版本计划重算。
+        boolean planBound = order.getPlanId() != null;
+        if (planBound) {
+            Map<Long, Integer> plannedByTurbineId = new HashMap<>();
+            planRepository.findBasisByOrder(order.getId()).forEach(b ->
+                    plannedByTurbineId.put(b.getTurbineId(), b.getPlannedPowerKw()));
+            for (Turbine t : turbines) {
+                Integer planned = plannedByTurbineId.get(t.getId());
+                if (planned == null) {
+                    throw new ApiBadRequestException(
+                            "绑定指令冻结基数缺失机组：" + t.getTurbineCode());
+                }
+                t.setAvailablePowerKw(Math.min(t.getAvailablePowerKw(), planned));
+            }
+        }
         int farmActual = turbines.stream().mapToInt(Turbine::getAvailablePowerKw).sum();
         if (farmActual <= order.getTargetPowerKw()) {
             return;
@@ -411,10 +432,25 @@ public class DispatchService {
                         e.getMeasuredAt(), e.getPowerKw(), e.getRequestId(), e.getRecordedAt()))
                 .toList();
 
+        // 计划绑定证据：未绑定计划的原实时模式指令两个字段均为 null，行为不变。
+        OrderDetailResponse.PlanBindingView planBinding = null;
+        List<OrderDetailResponse.FrozenBasisView> frozenBasis = null;
+        if (order.getPlanId() != null) {
+            com.example.starter.domain.DayAheadPlan boundPlan =
+                    planRepository.findPlanById(order.getPlanId());
+            int versionNo = boundPlan == null ? 0 : boundPlan.getVersionNo();
+            planBinding = new OrderDetailResponse.PlanBindingView(
+                    order.getPlanId(), versionNo, order.getPlanDate(), order.getSegmentIndex());
+            frozenBasis = planRepository.findBasisByOrder(order.getId()).stream()
+                    .map(b -> new OrderDetailResponse.FrozenBasisView(b.getTurbineCode(),
+                            b.getPlannedPowerKw(), b.getRealtimeAvailableKw(), b.getParticipatingKw()))
+                    .toList();
+        }
+
         return new OrderDetailResponse(order.getId(), order.getOrderNo(), order.getFarmCode(),
                 order.getRequestId(), order.getTargetPowerKw(), order.getStatus().name(),
                 order.getCurrentCycleNo(), order.getReceivedAt(), order.getSettledAt(),
-                cycleViews, curve, alerts, late);
+                cycleViews, curve, alerts, late, planBinding, frozenBasis);
     }
 
     private OrderReceiveResponse buildReceiveResponse(CurtailOrder order, List<Turbine> turbines,

@@ -49,6 +49,11 @@ public class DispatchRepository {
         o.setReceivedAt(rs.getTimestamp("received_at").toInstant());
         Timestamp settled = rs.getTimestamp("settled_at");
         o.setSettledAt(settled == null ? null : settled.toInstant());
+        long planId = rs.getLong("plan_id");
+        o.setPlanId(rs.wasNull() ? null : planId);
+        o.setPlanDate(rs.getString("plan_date"));
+        int seg = rs.getInt("segment_index");
+        o.setSegmentIndex(rs.wasNull() ? null : seg);
         return o;
     };
 
@@ -120,8 +125,8 @@ public class DispatchRepository {
                     INSERT INTO curtail_order
                         (order_no, farm_code, request_id, fingerprint, target_power_kw,
                          status, current_cycle_no, superseded_by_order_id, active_flag,
-                         received_at, settled_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         received_at, settled_at, plan_id, plan_date, segment_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, Statement.RETURN_GENERATED_KEYS);
             ps.setString(1, order.getOrderNo());
             ps.setString(2, order.getFarmCode());
@@ -140,6 +145,17 @@ public class DispatchRepository {
             ps.setNull(9, java.sql.Types.CHAR);
             ps.setTimestamp(10, Timestamp.from(order.getReceivedAt()));
             ps.setTimestamp(11, order.getSettledAt() == null ? null : Timestamp.from(order.getSettledAt()));
+            if (order.getPlanId() == null) {
+                ps.setNull(12, java.sql.Types.BIGINT);
+            } else {
+                ps.setLong(12, order.getPlanId());
+            }
+            ps.setString(13, order.getPlanDate());
+            if (order.getSegmentIndex() == null) {
+                ps.setNull(14, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(14, order.getSegmentIndex());
+            }
             return ps;
         }, keyHolder);
         Number key = keyHolder.getKey();

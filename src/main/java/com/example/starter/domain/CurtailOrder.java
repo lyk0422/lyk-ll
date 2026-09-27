@@ -21,6 +21,12 @@ public class CurtailOrder {
     private Long supersededByOrderId;
     private Instant receivedAt;
     private Instant settledAt;
+    /** 绑定的日前计划版本 id；null 表示原实时模式指令（行为不变）。 */
+    private Long planId;
+    /** 绑定计划的 UTC 日期（yyyy-MM-dd）；null 表示未绑定。 */
+    private String planDate;
+    /** 绑定的 15 分钟半开时段序号 0-95（UTC）；null 表示未绑定。 */
+    private Integer segmentIndex;
 
     public Long getId() {
         return id;
@@ -108,5 +114,29 @@ public class CurtailOrder {
 
     public void setSettledAt(Instant settledAt) {
         this.settledAt = settledAt;
+    }
+
+    public Long getPlanId() {
+        return planId;
+    }
+
+    public void setPlanId(Long planId) {
+        this.planId = planId;
+    }
+
+    public String getPlanDate() {
+        return planDate;
+    }
+
+    public void setPlanDate(String planDate) {
+        this.planDate = planDate;
+    }
+
+    public Integer getSegmentIndex() {
+        return segmentIndex;
+    }
+
+    public void setSegmentIndex(Integer segmentIndex) {
+        this.segmentIndex = segmentIndex;
     }
 }

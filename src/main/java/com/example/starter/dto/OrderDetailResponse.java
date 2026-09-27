@@ -19,7 +19,25 @@ public record OrderDetailResponse(
         List<CycleView> cycles,
         List<ReportPoint> executionCurve,
         List<AlertView> alerts,
-        List<LateReportView> lateReports) {
+        List<LateReportView> lateReports,
+        PlanBindingView planBinding,
+        List<FrozenBasisView> frozenBasis) {
+
+    /** 计划绑定信息；未绑定计划的原实时模式指令为 null。 */
+    public record PlanBindingView(
+            Long planId,
+            Integer versionNo,
+            String planDate,
+            int segmentIndex) {
+    }
+
+    /** 受理时逐机组冻结的计划绑定基数证据；未绑定计划的指令为 null。 */
+    public record FrozenBasisView(
+            String turbineCode,
+            int plannedPowerKw,
+            int realtimeAvailableKw,
+            int participatingKw) {
+    }
 
     /** 一轮分摊下发：时刻与该轮各机组分摊明细。 */
     public record CycleView(
