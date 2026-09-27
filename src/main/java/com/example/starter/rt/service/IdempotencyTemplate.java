@@ -66,6 +66,40 @@ public class IdempotencyTemplate {
         return result;
     }
 
+    /**
+     * 新写操作幂等模板（设备能力/排程发布/排程取消/受控治疗）：
+     * <ul>
+     *   <li>指纹采用 {@link Fingerprint#structured} 结构化无歧义计算，覆盖版本、集合与精确时刻；</li>
+     *   <li>同键同参：重放首次冻结的成功结果（replayed=true）；同键异参：抛 409；</li>
+     *   <li>失败不占键：仅 2xx 成功结果落幂等记录，业务拒绝（422/409 等）不留痕，
+     *       同一 requestId 修正参数或待状态变化后可再次执行；</li>
+     *   <li>成功结果与业务写库、版本推进同事务提交。</li>
+     * </ul>
+     */
+    public RecordedResponse executeSuccessOnly(OperationType operation, String requestId,
+                                               Map<String, ?> params,
+                                               Supplier<RecordedResponse> action) {
+        String fingerprint = Fingerprint.structured(operation, requestId, params);
+        Optional<IdempotentRow> existing = workflow.findIdempotent(requestId);
+        if (existing.isPresent()) {
+            return replayOrConflict(existing.get(), fingerprint);
+        }
+
+        RecordedResponse result = action.get();
+        if (result.httpStatus() >= 300) {
+            // 失败不占键：业务拒绝不落幂等记录，直接返回首次拒绝结果。
+            return result;
+        }
+        try {
+            workflow.insertIdempotent(requestId, operation.name(), fingerprint,
+                    result.httpStatus(), writeJson(result.body()), LocalDateTime.now(clock));
+        } catch (DuplicateKeyException concurrent) {
+            throw ApiException.conflict("IDEMPOTENCY_RACE",
+                    "requestId=" + requestId + " 并发冲突，仅一个请求生效");
+        }
+        return result;
+    }
+
     private RecordedResponse replayOrConflict(IdempotentRow row, String fingerprint) {
         if (!row.fingerprint().equals(fingerprint)) {
             throw ApiException.conflict("IDEMPOTENCY_FINGERPRINT_CONFLICT",

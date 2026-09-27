@@ -53,16 +53,19 @@ public class WorkflowService {
     private final WorkflowRepository workflowRepository;
     private final DoseEvaluation doseEvaluation;
     private final IdempotencyTemplate idempotency;
+    private final ScheduleService scheduleService;
     private final Clock clock;
 
     public WorkflowService(PlanRepository planRepository, DirectoryRepository directoryRepository,
                            WorkflowRepository workflowRepository, DoseEvaluation doseEvaluation,
-                           IdempotencyTemplate idempotency, Clock clock) {
+                           IdempotencyTemplate idempotency, ScheduleService scheduleService,
+                           Clock clock) {
         this.planRepository = planRepository;
         this.directoryRepository = directoryRepository;
         this.workflowRepository = workflowRepository;
         this.doseEvaluation = doseEvaluation;
         this.idempotency = idempotency;
+        this.scheduleService = scheduleService;
         this.clock = clock;
     }
 
@@ -169,6 +172,8 @@ public class WorkflowService {
                 return reject(409, "PLAN_REVISION_RACE",
                         "换版批准并发冲突：旧版本失效或守卫切换未成功");
             }
+            // 改版联动：同事务取消旧版本全部未开始排程并释放资源；已执行分次剂量与实绩不改写。
+            scheduleService.cancelActiveSchedulesOfOtherVersions(patientId, planCode, version.id());
         }
 
         planRepository.markApproved(version.id(), now);
