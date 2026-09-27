@@ -30,6 +30,7 @@ import com.example.starter.api.dto.MergeLotsRequest;
 import com.example.starter.api.dto.RecipeItemInput;
 import com.example.starter.api.dto.ScheduleLotRequest;
 import com.example.starter.api.dto.WeighingInput;
+import com.example.starter.domain.ApprovalStatus;
 import com.example.starter.domain.LotStatus;
 import com.example.starter.domain.RecipeStatus;
 import com.example.starter.domain.Verdict;
@@ -48,7 +49,7 @@ public class DyeService {
     static final BigDecimal WEIGH_LIMIT_PCT = new BigDecimal("0.5");
     /** 缸差阈值：超过 0.5 须回修。 */
     static final BigDecimal LOT_DIFF_LIMIT = new BigDecimal("0.5");
-    private static final int DEVIATION_SCALE = 6;
+    static final int DEVIATION_SCALE = 6;
 
     private final JdbcTemplate jdbc;
     private final IdempotencyService idempotency;
@@ -212,6 +213,23 @@ public class DyeService {
             if (((BigDecimal) source.get("liquor_ratio")).compareTo((BigDecimal) target.get("liquor_ratio")) != 0) {
                 throw new ApiException(HttpStatus.CONFLICT, "浴比不同拒绝并缸");
             }
+            // 受控缸次并缸：补偿批次与补偿目标须完全相同；受控与非受控不得互并。
+            Map<String, Object> sourceApproval = latestValidApproval((String) source.get("lot_no"));
+            Map<String, Object> targetApproval = latestValidApproval((String) target.get("lot_no"));
+            if ((sourceApproval == null) != (targetApproval == null)) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "受控缸次与非受控缸次拒绝并缸");
+            }
+            if (sourceApproval != null) {
+                List<Map<String, Object>> sourceItems = compensationItems(
+                        ((Number) sourceApproval.get("id")).longValue());
+                List<Map<String, Object>> targetItems = compensationItems(
+                        ((Number) targetApproval.get("id")).longValue());
+                if (!frozenCompensationEquals(sourceItems, targetItems)) {
+                    throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                            "补偿批次或补偿目标不完全相同，拒绝并缸");
+                }
+            }
             Timestamp now = nowTs();
             BigDecimal combinedWeight = ((BigDecimal) source.get("fabric_weight_kg"))
                     .add((BigDecimal) target.get("fabric_weight_kg"));
@@ -254,6 +272,13 @@ public class DyeService {
         return idempotency.execute(req.requestId(), "FEED", payload, () -> {
             Map<String, Object> lot = requireLot(req.lotNo());
             requireStatus(lot, LotStatus.CREATED);
+            Integer controlled = jdbc.query(
+                    "SELECT 1 FROM compensation_approval WHERE lot_no = ? AND status = ? LIMIT 1",
+                    rs -> rs.next() ? 1 : null, req.lotNo(), ApprovalStatus.VALID.name());
+            if (controlled != null) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "缸次 " + req.lotNo() + " 已有有效补偿批准，须走受控投料入口 /api/controlled-feedings");
+            }
 
             Long versionRecipeId = recipeId((String) lot.get("recipe_code"),
                     ((Number) lot.get("recipe_version")).intValue());
@@ -526,15 +551,27 @@ public class DyeService {
             BigDecimal ratio = (BigDecimal) lot.get("liquor_ratio");
             BigDecimal fabric = (BigDecimal) lot.get("fabric_weight_kg");
             List<Map<String, Object>> stored = jdbc.queryForList(
-                    "SELECT dye_code, target_g, actual_g, deviation_pct FROM weighing w "
+                    "SELECT w.dye_code, w.batch_no, w.target_g, w.actual_g, w.deviation_pct, f.approval_id "
+                            + "FROM weighing w "
                             + "JOIN feeding f ON f.id = w.feeding_id WHERE f.lot_id = ? ORDER BY w.id",
                     lot.get("id"));
             for (Map<String, Object> w : stored) {
-                BigDecimal dosage = jdbc.queryForObject(
-                        "SELECT dosage_gpl FROM recipe_item ri JOIN recipe r ON r.id = ri.recipe_id "
-                                + "WHERE r.recipe_code = ? AND r.version = ? AND ri.dye_code = ?",
-                        BigDecimal.class, recipeCode, lot.get("recipe_version"), w.get("dye_code"));
-                BigDecimal target = dosage.multiply(ratio).multiply(fabric).setScale(4, RoundingMode.HALF_UP);
+                BigDecimal target;
+                if (w.get("batch_no") != null) {
+                    // 受控称量：按批准冻结快照复算 补偿目标=原目标/冻结系数（三位小数）
+                    Map<String, Object> frozen = jdbc.queryForMap(
+                            "SELECT factor, base_target_g FROM compensation_item "
+                                    + "WHERE approval_id = ? AND dye_code = ?",
+                            w.get("approval_id"), w.get("dye_code"));
+                    target = ((BigDecimal) frozen.get("base_target_g"))
+                            .divide((BigDecimal) frozen.get("factor"), 3, RoundingMode.HALF_UP);
+                } else {
+                    BigDecimal dosage = jdbc.queryForObject(
+                            "SELECT dosage_gpl FROM recipe_item ri JOIN recipe r ON r.id = ri.recipe_id "
+                                    + "WHERE r.recipe_code = ? AND r.version = ? AND ri.dye_code = ?",
+                            BigDecimal.class, recipeCode, lot.get("recipe_version"), w.get("dye_code"));
+                    target = dosage.multiply(ratio).multiply(fabric).setScale(4, RoundingMode.HALF_UP);
+                }
                 BigDecimal deviation = ((BigDecimal) w.get("actual_g")).subtract(target)
                         .multiply(BigDecimal.valueOf(100))
                         .divide(target, DEVIATION_SCALE, RoundingMode.HALF_UP);
@@ -653,18 +690,18 @@ public class DyeService {
         return row;
     }
 
-    private Long recipeId(String code, int version) {
+    Long recipeId(String code, int version) {
         return jdbc.queryForObject("SELECT id FROM recipe WHERE recipe_code = ? AND version = ?",
                 Long.class, code, version);
     }
 
-    private List<Map<String, Object>> recipeItems(Long recipeId) {
+    List<Map<String, Object>> recipeItems(Long recipeId) {
         return jdbc.queryForList(
                 "SELECT dye_code, dosage_gpl FROM recipe_item WHERE recipe_id = ? ORDER BY dye_code",
                 recipeId);
     }
 
-    private Map<String, Object> requireLot(String lotNo) {
+    Map<String, Object> requireLot(String lotNo) {
         List<Map<String, Object>> rows = jdbc.queryForList("SELECT * FROM lot WHERE lot_no = ?", lotNo);
         if (rows.isEmpty()) {
             throw new ApiException(HttpStatus.NOT_FOUND, "缸次 " + lotNo + " 不存在");
@@ -711,6 +748,39 @@ public class DyeService {
         Long id = recipeId(code, version);
         row.put("items", recipeItems(id));
         return row;
+    }
+
+    private Map<String, Object> latestValidApproval(String lotNo) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT id FROM compensation_approval WHERE lot_no = ? AND status = ? "
+                        + "ORDER BY id DESC LIMIT 1", lotNo, ApprovalStatus.VALID.name());
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    private List<Map<String, Object>> compensationItems(Long approvalId) {
+        return jdbc.queryForList(
+                "SELECT dye_code, batch_no, factor, compensated_target_g FROM compensation_item "
+                        + "WHERE approval_id = ? ORDER BY dye_code", approvalId);
+    }
+
+    /** 并缸补偿一致性：染料集合、冻结批次、冻结系数与补偿目标逐项完全相同。 */
+    private boolean frozenCompensationEquals(List<Map<String, Object>> left,
+                                             List<Map<String, Object>> right) {
+        if (left.size() != right.size()) {
+            return false;
+        }
+        for (int i = 0; i < left.size(); i++) {
+            Map<String, Object> l = left.get(i);
+            Map<String, Object> r = right.get(i);
+            if (!l.get("dye_code").equals(r.get("dye_code"))
+                    || !l.get("batch_no").equals(r.get("batch_no"))
+                    || ((BigDecimal) l.get("factor")).compareTo((BigDecimal) r.get("factor")) != 0
+                    || ((BigDecimal) l.get("compensated_target_g"))
+                            .compareTo((BigDecimal) r.get("compensated_target_g")) != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private Map<String, Object> lotView(String lotNo) {

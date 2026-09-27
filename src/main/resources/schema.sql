@@ -98,24 +98,76 @@ CREATE TABLE IF NOT EXISTS feeding (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     request_id VARCHAR(64) NOT NULL UNIQUE,
     lot_id BIGINT NOT NULL,
+    approval_id BIGINT,
     fed_at TIMESTAMP NOT NULL
 );
 COMMENT ON COLUMN feeding.request_id IS '投料幂等键';
 COMMENT ON COLUMN feeding.lot_id IS '所属缸次';
+COMMENT ON COLUMN feeding.approval_id IS '受控投料引用的补偿批准主键;空为旧非受控投料';
 
 CREATE TABLE IF NOT EXISTS weighing (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     feeding_id BIGINT NOT NULL,
     dye_code VARCHAR(64) NOT NULL,
+    batch_no VARCHAR(64),
     target_g DECIMAL(14, 4) NOT NULL,
     actual_g DECIMAL(14, 4) NOT NULL,
     deviation_pct DECIMAL(9, 6)
 );
 COMMENT ON COLUMN weighing.feeding_id IS '所属投料单';
 COMMENT ON COLUMN weighing.dye_code IS '染化料编码';
-COMMENT ON COLUMN weighing.target_g IS '放大配方目标克重,单位g';
+COMMENT ON COLUMN weighing.batch_no IS '受控投料称量快照的染料批次号;空为旧非受控称量';
+COMMENT ON COLUMN weighing.target_g IS '目标克重,单位g;受控投料为补偿目标(原目标/系数,三位小数)';
 COMMENT ON COLUMN weighing.actual_g IS '实际称量克重,单位g';
 COMMENT ON COLUMN weighing.deviation_pct IS '称量偏差百分比=(实际-目标)/目标*100,绝对值>0.5拒绝投料(恰0.5合法)';
+
+CREATE TABLE IF NOT EXISTS dye_batch (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_no VARCHAR(64) NOT NULL UNIQUE,
+    dye_code VARCHAR(64) NOT NULL,
+    factor DECIMAL(14, 6) NOT NULL,
+    available_g DECIMAL(14, 3) NOT NULL,
+    valid_until TIMESTAMP NOT NULL,
+    version INT NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+COMMENT ON COLUMN dye_batch.batch_no IS '染料批次号(唯一)';
+COMMENT ON COLUMN dye_batch.dye_code IS '所属染化料编码,错配整单拒绝';
+COMMENT ON COLUMN dye_batch.factor IS '效价系数,正数;补偿目标=原目标/系数,仅按线性模型使用';
+COMMENT ON COLUMN dye_batch.available_g IS '批次可用克重,单位g,受控投料原子扣减';
+COMMENT ON COLUMN dye_batch.valid_until IS '有效截止(Asia/Shanghai);now<截止有效,恰在截止失效';
+COMMENT ON COLUMN dye_batch.version IS '系数版本,从1开始,成功修订加1;修订使未投料批准失效';
+
+CREATE TABLE IF NOT EXISTS compensation_approval (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id VARCHAR(64) NOT NULL UNIQUE,
+    lot_no VARCHAR(64) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+COMMENT ON COLUMN compensation_approval.request_id IS '补偿审批幂等键';
+COMMENT ON COLUMN compensation_approval.lot_no IS '受控缸次号';
+COMMENT ON COLUMN compensation_approval.status IS '状态:VALID 未投料有效/INVALID 系数修订失效/FED 已投料冻结';
+
+CREATE TABLE IF NOT EXISTS compensation_item (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    approval_id BIGINT NOT NULL,
+    dye_code VARCHAR(64) NOT NULL,
+    batch_no VARCHAR(64) NOT NULL,
+    factor_version INT NOT NULL,
+    factor DECIMAL(14, 6) NOT NULL,
+    base_target_g DECIMAL(14, 4) NOT NULL,
+    compensated_target_g DECIMAL(14, 3) NOT NULL
+);
+COMMENT ON COLUMN compensation_item.approval_id IS '所属补偿批准';
+COMMENT ON COLUMN compensation_item.dye_code IS '染化料编码';
+COMMENT ON COLUMN compensation_item.batch_no IS '批准冻结的染料批次号';
+COMMENT ON COLUMN compensation_item.factor_version IS '批准冻结的批次系数版本,投料须与批次当前版本一致';
+COMMENT ON COLUMN compensation_item.factor IS '批准冻结的效价系数快照,已投料历史不追改';
+COMMENT ON COLUMN compensation_item.base_target_g IS '放大配方原目标克重,单位g';
+COMMENT ON COLUMN compensation_item.compensated_target_g IS '补偿目标克重=原目标/系数,四舍五入三位小数,单位g';
 
 CREATE TABLE IF NOT EXISTS lot_judgment (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -164,3 +216,10 @@ INSERT INTO recipe_item (recipe_id, dye_code, dosage_gpl)
 SELECT id, 'D-YELLOW', 1.5000 FROM recipe WHERE recipe_code = 'R-BASE' AND version = 1;
 INSERT INTO recipe_item (recipe_id, dye_code, dosage_gpl)
 SELECT id, 'D-BLUE',   0.5000 FROM recipe WHERE recipe_code = 'R-BASE' AND version = 1;
+
+-- 合成染料批次（效价系数 + 可用克重 + 有效截止），随服务启动自动可用
+INSERT INTO dye_batch (batch_no, dye_code, factor, available_g, valid_until, version, created_at, updated_at)
+VALUES
+    ('B-RED-1',    'D-RED',    1.250000, 3000.000, '2099-01-01 00:00:00', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+    ('B-YELLOW-1', 'D-YELLOW', 1.000000, 3000.000, '2099-01-01 00:00:00', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+    ('B-BLUE-1',   'D-BLUE',   0.800000, 3000.000, '2099-01-01 00:00:00', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);

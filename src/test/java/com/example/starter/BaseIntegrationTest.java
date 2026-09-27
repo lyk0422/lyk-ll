@@ -36,12 +36,15 @@ public abstract class BaseIntegrationTest {
         jdbc.update("DELETE FROM lot_judgment");
         jdbc.update("DELETE FROM weighing");
         jdbc.update("DELETE FROM feeding");
+        jdbc.update("DELETE FROM compensation_item");
+        jdbc.update("DELETE FROM compensation_approval");
         jdbc.update("DELETE FROM lot");
         jdbc.update("DELETE FROM vat_active");
         jdbc.update("DELETE FROM color_check");
         jdbc.update("DELETE FROM idempotent_request");
         jdbc.update("DELETE FROM recipe_item");
         jdbc.update("DELETE FROM recipe");
+        jdbc.update("DELETE FROM dye_batch");
         jdbc.update("DELETE FROM dye");
 
         jdbc.update("INSERT INTO dye (code, name, stock_g, created_at) VALUES "
@@ -56,6 +59,11 @@ public abstract class BaseIntegrationTest {
                 + "SELECT id,'D-YELLOW',1.5000 FROM recipe WHERE recipe_code='R-BASE' AND version=1");
         jdbc.update("INSERT INTO recipe_item (recipe_id, dye_code, dosage_gpl) "
                 + "SELECT id,'D-BLUE',0.5000 FROM recipe WHERE recipe_code='R-BASE' AND version=1");
+        jdbc.update("INSERT INTO dye_batch (batch_no, dye_code, factor, available_g, valid_until, version, "
+                + "created_at, updated_at) VALUES "
+                + "('B-RED-1','D-RED',1.250000,3000.000,'2099-01-01 00:00:00',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP),"
+                + "('B-YELLOW-1','D-YELLOW',1.000000,3000.000,'2099-01-01 00:00:00',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP),"
+                + "('B-BLUE-1','D-BLUE',0.800000,3000.000,'2099-01-01 00:00:00',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)");
     }
 
     protected String url(String path) {
@@ -112,6 +120,43 @@ public abstract class BaseIntegrationTest {
 
     protected BigDecimal stock(String dyeCode) {
         return jdbc.queryForObject("SELECT stock_g FROM dye WHERE code = ?", BigDecimal.class, dyeCode);
+    }
+
+    protected Map<String, Object> registerBatch(String requestId, String batchNo, String dyeCode,
+                                                String factor, String availableG, String validUntil) {
+        return postOk("/api/dye-batches", Map.of(
+                "requestId", requestId,
+                "batchNo", batchNo,
+                "dyeCode", dyeCode,
+                "factor", new BigDecimal(factor),
+                "availableG", new BigDecimal(availableG),
+                "validUntil", validUntil));
+    }
+
+    /** 用种子批次（B-RED-1/B-YELLOW-1/B-BLUE-1，系数版本均 1）为 R-BASE 缸次做补偿批准。 */
+    protected Map<String, Object> approveDefault(String requestId, String lotNo) {
+        return postOk("/api/lots/" + lotNo + "/compensation", Map.of(
+                "requestId", requestId,
+                "items", List.of(
+                        Map.of("dyeCode", "D-RED", "batchNo", "B-RED-1", "factorVersion", 1),
+                        Map.of("dyeCode", "D-YELLOW", "batchNo", "B-YELLOW-1", "factorVersion", 1),
+                        Map.of("dyeCode", "D-BLUE", "batchNo", "B-BLUE-1", "factorVersion", 1))));
+    }
+
+    /** R-BASE 50kg 补偿目标：RED 1000/1.25=800.000，YELLOW 750/1.00=750.000，BLUE 250/0.80=312.500。 */
+    protected Map<String, Object> controlledFeedExact(String requestId, String lotNo) {
+        return postOk("/api/controlled-feedings", Map.of(
+                "requestId", requestId,
+                "lotNo", lotNo,
+                "weighings", List.of(
+                        Map.of("dyeCode", "D-RED", "actualG", new BigDecimal("800.000")),
+                        Map.of("dyeCode", "D-YELLOW", "actualG", new BigDecimal("750.000")),
+                        Map.of("dyeCode", "D-BLUE", "actualG", new BigDecimal("312.500")))));
+    }
+
+    protected BigDecimal batchAvailable(String batchNo) {
+        return jdbc.queryForObject("SELECT available_g FROM dye_batch WHERE batch_no = ?",
+                BigDecimal.class, batchNo);
     }
 
     /** JSON 往返后数字可能是 Double，统一归一化为 BigDecimal 再做数值比较。 */
