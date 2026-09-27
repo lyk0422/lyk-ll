@@ -99,10 +99,50 @@ CREATE TABLE IF NOT EXISTS late_report_event (
 CREATE TABLE IF NOT EXISTS idempotent_record (
     id            BIGINT AUTO_INCREMENT PRIMARY KEY,
     request_id    VARCHAR(96) NOT NULL COMMENT '请求幂等键',
-    biz_type      VARCHAR(16) NOT NULL COMMENT '业务类型：ORDER/REPORT',
+    biz_type      VARCHAR(16) NOT NULL COMMENT '业务类型：ORDER/REPORT/PLAN/PLAN_ORDER',
     fingerprint   VARCHAR(64) NOT NULL COMMENT '覆盖 requestId 与全部业务字段的指纹',
     ref_id        BIGINT COMMENT '首建业务实体 id',
     response_body CLOB NOT NULL COMMENT '首次响应 JSON，重放时原样返回',
     created_at    TIMESTAMP NOT NULL COMMENT '首次受理时刻',
     CONSTRAINT uk_idempotent_request UNIQUE (request_id)
 );
+
+-- 日前计划版本表：发布即不可变；current_flag 仅当前版本为 'Y'，历史版本为 NULL，
+-- 配合唯一索引保证同风场同 UTC 日期至多一个当前版本；新版发布原子替换指针并保留历史。
+CREATE TABLE IF NOT EXISTS day_ahead_plan_version (
+    id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+    farm_code     VARCHAR(64) NOT NULL COMMENT '风场编码',
+    plan_date     DATE NOT NULL COMMENT '计划适用的 UTC 日期',
+    version_no    INT NOT NULL COMMENT '同风场同日期版本号，从 1 开始，成功发布加 1',
+    current_flag  CHAR(1) COMMENT '当前版本标记 Y；历史版本为 NULL（唯一索引允许多个 NULL）',
+    request_id    VARCHAR(96) NOT NULL COMMENT '发布请求幂等键',
+    fingerprint   VARCHAR(64) NOT NULL COMMENT '覆盖 requestId、版本、96 段集合与精确时刻的结构化指纹',
+    published_at  TIMESTAMP NOT NULL COMMENT '发布时刻（UTC 存储）',
+    CONSTRAINT uk_plan_version_no UNIQUE (farm_code, plan_date, version_no),
+    CONSTRAINT uk_plan_current UNIQUE (farm_code, plan_date, current_flag),
+    CONSTRAINT uk_plan_request UNIQUE (request_id)
+);
+
+-- 日前计划段明细表：每版本完整 96 个十五分钟半开时段（segment_index 0..95，UTC），
+-- 每段覆盖全场每台机组一条非负整数 kW 核定计划；版本不可变，明细随之不可变。
+CREATE TABLE IF NOT EXISTS day_ahead_plan_segment (
+    id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+    version_id    BIGINT NOT NULL COMMENT '所属计划版本 id',
+    segment_index INT NOT NULL COMMENT '时段序号 0..95：[date 00:00UTC + 15i 分, +15 分) 半开区间',
+    turbine_id    BIGINT NOT NULL COMMENT '机组 id',
+    power_kw      INT NOT NULL COMMENT '该机组该段核定计划出力，单位 kW，非负且不超过合成装机容量',
+    CONSTRAINT uk_plan_segment_turbine UNIQUE (version_id, segment_index, turbine_id)
+);
+CREATE INDEX IF NOT EXISTS idx_plan_segment_version ON day_ahead_plan_segment(version_id);
+
+-- 计划绑定增量列（旧指令为 NULL，旧入口行为不变）。
+-- 绑定日前计划的限电指令：冻结受理时的版本 id/版本号、UTC 日期与时段序号。
+ALTER TABLE curtail_order ADD COLUMN IF NOT EXISTS plan_version_id BIGINT COMMENT '绑定的日前计划版本 id，NULL 表示未绑定计划的旧模式指令';
+ALTER TABLE curtail_order ADD COLUMN IF NOT EXISTS plan_version_no INT COMMENT '绑定的计划版本号（冗余留证），NULL 表示未绑定';
+ALTER TABLE curtail_order ADD COLUMN IF NOT EXISTS plan_date DATE COMMENT '绑定计划的 UTC 日期，NULL 表示未绑定';
+ALTER TABLE curtail_order ADD COLUMN IF NOT EXISTS segment_index INT COMMENT '绑定计划的时段序号 0..95（UTC 半开区间），NULL 表示未绑定';
+
+-- 计划绑定指令的分摊留证：计划核定出力与该轮实时可用出力分别冻结；
+-- base_available_kw 即参与出力 = min(实时可用, 核定计划)；超时重分摊仍引用原版本计划值，仅刷新实时值。
+ALTER TABLE allocation ADD COLUMN IF NOT EXISTS planned_power_kw INT COMMENT '该轮冻结的日前核定计划出力，单位 kW，NULL 表示未绑定计划的旧指令';
+ALTER TABLE allocation ADD COLUMN IF NOT EXISTS realtime_available_kw INT COMMENT '该轮时刻的机组实时可用出力，单位 kW，NULL 表示未绑定计划的旧指令';

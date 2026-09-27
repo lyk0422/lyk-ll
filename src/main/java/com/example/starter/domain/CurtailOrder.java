@@ -1,6 +1,7 @@
 package com.example.starter.domain;
 
 import java.time.Instant;
+import java.time.LocalDate;
 
 /**
  * 限电指令。
@@ -21,6 +22,14 @@ public class CurtailOrder {
     private Long supersededByOrderId;
     private Instant receivedAt;
     private Instant settledAt;
+    /** 绑定的日前计划版本 id；null 表示未绑定计划的旧模式指令，行为与旧入口一致。 */
+    private Long planVersionId;
+    /** 冻结的计划版本号（留证）；null 表示未绑定。 */
+    private Integer planVersionNo;
+    /** 绑定计划的 UTC 日期；null 表示未绑定。 */
+    private LocalDate planDate;
+    /** 绑定时段序号 0..95（UTC 半开区间）；null 表示未绑定。 */
+    private Integer segmentIndex;
 
     public Long getId() {
         return id;
@@ -108,5 +117,37 @@ public class CurtailOrder {
 
     public void setSettledAt(Instant settledAt) {
         this.settledAt = settledAt;
+    }
+
+    public Long getPlanVersionId() {
+        return planVersionId;
+    }
+
+    public void setPlanVersionId(Long planVersionId) {
+        this.planVersionId = planVersionId;
+    }
+
+    public Integer getPlanVersionNo() {
+        return planVersionNo;
+    }
+
+    public void setPlanVersionNo(Integer planVersionNo) {
+        this.planVersionNo = planVersionNo;
+    }
+
+    public LocalDate getPlanDate() {
+        return planDate;
+    }
+
+    public void setPlanDate(LocalDate planDate) {
+        this.planDate = planDate;
+    }
+
+    public Integer getSegmentIndex() {
+        return segmentIndex;
+    }
+
+    public void setSegmentIndex(Integer segmentIndex) {
+        this.segmentIndex = segmentIndex;
     }
 }

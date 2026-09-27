@@ -49,6 +49,14 @@ public class DispatchRepository {
         o.setReceivedAt(rs.getTimestamp("received_at").toInstant());
         Timestamp settled = rs.getTimestamp("settled_at");
         o.setSettledAt(settled == null ? null : settled.toInstant());
+        long planVersionId = rs.getLong("plan_version_id");
+        o.setPlanVersionId(rs.wasNull() ? null : planVersionId);
+        int planVersionNo = rs.getInt("plan_version_no");
+        o.setPlanVersionNo(rs.wasNull() ? null : planVersionNo);
+        java.sql.Date planDate = rs.getDate("plan_date");
+        o.setPlanDate(planDate == null ? null : planDate.toLocalDate());
+        int segmentIndex = rs.getInt("segment_index");
+        o.setSegmentIndex(rs.wasNull() ? null : segmentIndex);
         return o;
     };
 
@@ -71,6 +79,10 @@ public class DispatchRepository {
         a.setBaseAvailableKw(rs.getInt("base_available_kw"));
         a.setTargetPowerKw(rs.getInt("target_power_kw"));
         a.setCurtailKw(rs.getInt("curtail_kw"));
+        int planned = rs.getInt("planned_power_kw");
+        a.setPlannedPowerKw(rs.wasNull() ? null : planned);
+        int realtime = rs.getInt("realtime_available_kw");
+        a.setRealtimeAvailableKw(rs.wasNull() ? null : realtime);
         return a;
     };
 
@@ -120,8 +132,9 @@ public class DispatchRepository {
                     INSERT INTO curtail_order
                         (order_no, farm_code, request_id, fingerprint, target_power_kw,
                          status, current_cycle_no, superseded_by_order_id, active_flag,
-                         received_at, settled_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         received_at, settled_at, plan_version_id, plan_version_no,
+                         plan_date, segment_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, Statement.RETURN_GENERATED_KEYS);
             ps.setString(1, order.getOrderNo());
             ps.setString(2, order.getFarmCode());
@@ -140,6 +153,26 @@ public class DispatchRepository {
             ps.setNull(9, java.sql.Types.CHAR);
             ps.setTimestamp(10, Timestamp.from(order.getReceivedAt()));
             ps.setTimestamp(11, order.getSettledAt() == null ? null : Timestamp.from(order.getSettledAt()));
+            if (order.getPlanVersionId() == null) {
+                ps.setNull(12, java.sql.Types.BIGINT);
+            } else {
+                ps.setLong(12, order.getPlanVersionId());
+            }
+            if (order.getPlanVersionNo() == null) {
+                ps.setNull(13, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(13, order.getPlanVersionNo());
+            }
+            if (order.getPlanDate() == null) {
+                ps.setNull(14, java.sql.Types.DATE);
+            } else {
+                ps.setDate(14, java.sql.Date.valueOf(order.getPlanDate()));
+            }
+            if (order.getSegmentIndex() == null) {
+                ps.setNull(15, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(15, order.getSegmentIndex());
+            }
             return ps;
         }, keyHolder);
         Number key = keyHolder.getKey();
@@ -255,8 +288,9 @@ public class DispatchRepository {
     public void insertAllocations(long orderId, int cycleNo, List<Allocation> allocations) {
         jdbc.batchUpdate("""
                 INSERT INTO allocation
-                    (order_id, cycle_no, turbine_id, base_available_kw, target_power_kw, curtail_kw)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (order_id, cycle_no, turbine_id, base_available_kw, target_power_kw, curtail_kw,
+                     planned_power_kw, realtime_available_kw)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 allocations, allocations.size(), (ps, a) -> {
                     ps.setLong(1, orderId);
@@ -265,6 +299,16 @@ public class DispatchRepository {
                     ps.setInt(4, a.getBaseAvailableKw());
                     ps.setInt(5, a.getTargetPowerKw());
                     ps.setInt(6, a.getCurtailKw());
+                    if (a.getPlannedPowerKw() == null) {
+                        ps.setNull(7, java.sql.Types.INTEGER);
+                    } else {
+                        ps.setInt(7, a.getPlannedPowerKw());
+                    }
+                    if (a.getRealtimeAvailableKw() == null) {
+                        ps.setNull(8, java.sql.Types.INTEGER);
+                    } else {
+                        ps.setInt(8, a.getRealtimeAvailableKw());
+                    }
                 });
     }
 

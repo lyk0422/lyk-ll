@@ -14,6 +14,10 @@ public class Allocation {
     private int baseAvailableKw;
     private int targetPowerKw;
     private int curtailKw;
+    /** 冻结的日前核定计划出力（kW）；null 表示未绑定计划的旧指令。 */
+    private Integer plannedPowerKw;
+    /** 该轮机组实时可用出力（kW）；baseAvailableKw=min(本值, plannedPowerKw)；null 表示旧指令。 */
+    private Integer realtimeAvailableKw;
 
     public Long getId() {
         return id;
@@ -69,5 +73,21 @@ public class Allocation {
 
     public void setCurtailKw(int curtailKw) {
         this.curtailKw = curtailKw;
+    }
+
+    public Integer getPlannedPowerKw() {
+        return plannedPowerKw;
+    }
+
+    public void setPlannedPowerKw(Integer plannedPowerKw) {
+        this.plannedPowerKw = plannedPowerKw;
+    }
+
+    public Integer getRealtimeAvailableKw() {
+        return realtimeAvailableKw;
+    }
+
+    public void setRealtimeAvailableKw(Integer realtimeAvailableKw) {
+        this.realtimeAvailableKw = realtimeAvailableKw;
     }
 }

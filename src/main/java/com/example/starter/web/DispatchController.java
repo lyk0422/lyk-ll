@@ -7,9 +7,12 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.example.starter.dto.OrderBasisResponse;
 import com.example.starter.dto.OrderDetailResponse;
 import com.example.starter.dto.OrderReceiveRequest;
 import com.example.starter.dto.OrderReceiveResponse;
+import com.example.starter.dto.PlanOrderReceiveRequest;
+import com.example.starter.dto.PlanOrderReceiveResponse;
 import com.example.starter.dto.ReportRequest;
 import com.example.starter.dto.ReportResponse;
 import com.example.starter.dto.SettleResponse;
@@ -52,5 +55,17 @@ public class DispatchController {
     @GetMapping("/orders/{orderNo}")
     public OrderDetailResponse detail(@PathVariable String orderNo) {
         return dispatchService.detail(orderNo);
+    }
+
+    /** 计划绑定模式受理：指定 UTC 日期、时段与已发布当前计划版本，冻结基数分摊下发，同 requestId 幂等。 */
+    @PostMapping("/plan-orders")
+    public PlanOrderReceiveResponse receivePlanOrder(@Valid @RequestBody PlanOrderReceiveRequest request) {
+        return dispatchService.receivePlanOrder(request);
+    }
+
+    /** 指令基数证据：绑定版本、UTC 时段及各轮核定计划/实时可用/参与出力/分摊冻结值。 */
+    @GetMapping("/orders/{orderNo}/basis")
+    public OrderBasisResponse basis(@PathVariable String orderNo) {
+        return dispatchService.basis(orderNo);
     }
 }

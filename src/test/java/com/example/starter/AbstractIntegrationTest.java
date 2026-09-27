@@ -9,7 +9,12 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import com.example.starter.config.SyntheticDataInitializer;
+import com.example.starter.dto.PlanSegmentInput;
 import com.example.starter.support.ServiceClock;
+
+import java.time.LocalDate;
+import java.util.Map;
+import java.util.function.BiFunction;
 
 /**
  * H2 集成测试支撑：每场景前清空业务表并播种风场/机组，固定可控时钟。
@@ -17,6 +22,9 @@ import com.example.starter.support.ServiceClock;
 public abstract class AbstractIntegrationTest {
 
     protected static final String FARM = SyntheticDataInitializer.FARM_CODE;
+
+    /** 测试用计划 UTC 日期。 */
+    protected static final LocalDate PLAN_DATE = LocalDate.of(2026, 9, 27);
 
     @Autowired
     protected JdbcTemplate jdbc;
@@ -42,10 +50,42 @@ public abstract class AbstractIntegrationTest {
         jdbc.update("DELETE FROM allocation");
         jdbc.update("DELETE FROM dispatch_cycle");
         jdbc.update("DELETE FROM curtail_order");
+        jdbc.update("DELETE FROM day_ahead_plan_segment");
+        jdbc.update("DELETE FROM day_ahead_plan_version");
         jdbc.update("DELETE FROM idempotent_record");
         jdbc.update("DELETE FROM wind_turbine");
         jdbc.update("DELETE FROM wind_farm");
         seedFarm(defaultSeeds());
+    }
+
+    /**
+     * 构造完整合法的 96 段 × 全场机组计划明细。
+     *
+     * @param valueAt 以（时段序号, 机组编码）给出核定出力（kW）
+     */
+    protected List<PlanSegmentInput> fullSegments(BiFunction<Integer, String, Integer> valueAt) {
+        List<String> codes = defaultSeeds().stream().map(Seed::code).toList();
+        List<PlanSegmentInput> segments = new java.util.ArrayList<>();
+        for (int idx = 0; idx < 96; idx++) {
+            for (String code : codes) {
+                segments.add(new PlanSegmentInput(idx, code, valueAt.apply(idx, code)));
+            }
+        }
+        return segments;
+    }
+
+    /** 全部段全部机组同一核定出力的完整 96 段计划。 */
+    protected List<PlanSegmentInput> fullSegments(int samePowerKw) {
+        return fullSegments((idx, code) -> samePowerKw);
+    }
+
+    /** 完整 96 段计划：仅指定段按 overrides 覆盖，其余段与机组取 otherPowerKw。 */
+    protected List<PlanSegmentInput> fullSegmentsWith(int specialSegment,
+                                                      Map<String, Integer> overrides,
+                                                      int otherPowerKw) {
+        return fullSegments((idx, code) ->
+                idx == specialSegment && overrides.containsKey(code)
+                        ? overrides.get(code) : otherPowerKw);
     }
 
     protected void seedFarm(List<Seed> seeds) {
