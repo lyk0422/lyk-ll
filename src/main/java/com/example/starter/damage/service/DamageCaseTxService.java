@@ -20,6 +20,7 @@ import com.example.starter.damage.dto.Views.PhotoResult;
 import com.example.starter.damage.store.DamageCaseRepository;
 import com.example.starter.damage.store.DamageCaseRepository.CaseRow;
 import com.example.starter.damage.store.DamageFlowRepository;
+import com.example.starter.damage.store.InquiryRepository;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -48,15 +49,18 @@ public class DamageCaseTxService {
 
     private final DamageCaseRepository caseRepository;
     private final DamageFlowRepository flowRepository;
+    private final InquiryRepository inquiryRepository;
     private final IdempotencyExecutor idempotency;
     private final Clock clock;
 
     public DamageCaseTxService(DamageCaseRepository caseRepository,
                                DamageFlowRepository flowRepository,
+                               InquiryRepository inquiryRepository,
                                IdempotencyExecutor idempotency,
                                Clock clock) {
         this.caseRepository = caseRepository;
         this.flowRepository = flowRepository;
+        this.inquiryRepository = inquiryRepository;
         this.idempotency = idempotency;
         this.clock = clock;
     }
@@ -110,6 +114,12 @@ public class DamageCaseTxService {
         } else if (row.status() != CaseStatus.SURVEYED && row.status() != CaseStatus.ESTIMATED) {
             throw ApiException.conflict("当前状态不允许估价: " + row.status());
         }
+        if (row.status() == CaseStatus.ESTIMATED) {
+            // 询价/开标进行中固定残损项集合与全损判定，禁止重新估价；零有效报价（NO_AWARD）后允许
+            if (inquiryRepository.hasOpenOrOpenedInquiry(caseId)) {
+                throw ApiException.unprocessable("密封询价进行中，残损项集合与判定已固定，不能重新估价");
+            }
+        }
         var items = flowRepository.listItems(caseId);
         if (items.isEmpty()) {
             throw ApiException.badRequest("残损清单为空，无法估价");
@@ -141,6 +151,10 @@ public class DamageCaseTxService {
         requireStatus(row, CaseStatus.ESTIMATED, "仅已估价状态可批复修理");
         if (row.determination() != Determination.REPAIR) {
             throw ApiException.conflict("全损案件不得批复修理，判定唯一");
+        }
+        // 询价投标/开标进行中必须经密封比价，旧批复入口不得绕过；零有效报价（NO_AWARD）后旧入口兼容
+        if (inquiryRepository.hasOpenOrOpenedInquiry(caseId)) {
+            throw ApiException.unprocessable("密封询价进行中，须经开标比价与双重复核批复，不能直接批复");
         }
         EstimateView current = flowRepository.findCurrentEstimate(caseId);
         if (current == null) {

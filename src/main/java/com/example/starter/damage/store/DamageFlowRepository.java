@@ -42,7 +42,9 @@ public class DamageFlowRepository {
             rs.getLong("id"),
             rs.getLong("estimate_id"),
             rs.getDate("approval_date").toLocalDate(),
-            rs.getString("status"));
+            rs.getString("status"),
+            rs.getString("source"),
+            (Long) rs.getObject("opening_id"));
 
     private static final RowMapper<CompletionView> COMPLETION_MAPPER = (rs, n) -> new CompletionView(
             rs.getLong("id"),
@@ -102,14 +104,20 @@ public class DamageFlowRepository {
         return jdbc.query("select * from estimate where case_id = ? order by version", ESTIMATE_MAPPER, caseId);
     }
 
-    /** 新增修理批复，旧批复置 SUPERSEDED；返回批复 ID */
+    /** 新增修理批复（旧入口：source=DIRECT，opening_id=NULL），旧批复置 SUPERSEDED；返回批复 ID */
     public long insertApproval(long caseId, long estimateId, LocalDate approvalDate, LocalDateTime now) {
+        return insertApproval(caseId, estimateId, approvalDate, "DIRECT", null, now);
+    }
+
+    /** 新增修理批复并记录来源（询价中标转批复时 source=INQUIRY 且写入 opening_id）；旧批复置 SUPERSEDED */
+    public long insertApproval(long caseId, long estimateId, LocalDate approvalDate,
+                               String source, Long openingId, LocalDateTime now) {
         jdbc.update("update repair_approval set status = 'SUPERSEDED' where case_id = ? and status = 'ACTIVE'", caseId);
-        jdbc.update("insert into repair_approval(case_id, estimate_id, approval_date, status, created_at)"
-                        + " values (?,?,?,?,?)",
-                caseId, estimateId, approvalDate, "ACTIVE", now);
+        jdbc.update("insert into repair_approval(case_id, estimate_id, approval_date, status, source, opening_id, created_at)"
+                        + " values (?,?,?,?,?,?,?)",
+                caseId, estimateId, approvalDate, "ACTIVE", source, openingId, now);
         Long id = jdbc.queryForObject("select max(id) from repair_approval where case_id = ?", Long.class, caseId);
-        return id;
+        return id == null ? 0 : id;
     }
 
     /** 当前有效批复，无则 null */
@@ -167,5 +175,12 @@ public class DamageFlowRepository {
     /** 将当前有效批复置为 SUPERSEDED（重新估价或转全损时调用） */
     public void supersedeActiveApprovals(long caseId) {
         jdbc.update("update repair_approval set status = 'SUPERSEDED' where case_id = ? and status = 'ACTIVE'", caseId);
+    }
+
+    /** 按开标冻结记录 ID 查询批复（询价转批复溯源），无则 null */
+    public ApprovalView findApprovalByOpeningId(long openingId) {
+        return jdbc.query("select * from repair_approval where opening_id = ? order by id desc",
+                        APPROVAL_MAPPER, openingId)
+                .stream().findFirst().orElse(null);
     }
 }

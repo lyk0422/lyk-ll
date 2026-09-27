@@ -29,4 +29,9 @@ public class ApiException extends RuntimeException {
     public static ApiException badRequest(String message) {
         return new ApiException(HttpStatus.BAD_REQUEST, message);
     }
+
+    /** 422：请求语法与对象均有效，但不满足业务规则 */
+    public static ApiException unprocessable(String message) {
+        return new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, message);
+    }
 }

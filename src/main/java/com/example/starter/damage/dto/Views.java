@@ -50,12 +50,18 @@ public final class Views {
             String status) {
     }
 
-    /** 修理批复视图 */
+    /**
+     * 修理批复视图。
+     * source：DIRECT 无询价旧入口 / INQUIRY 密封询价中标转批复；
+     * openingId：询价转批复时的开标冻结记录 ID，旧入口为 null。
+     */
     public record ApprovalView(
             long id,
             long estimateId,
             LocalDate approvalDate,
-            String status) {
+            String status,
+            String source,
+            Long openingId) {
     }
 
     /** 修理完工视图 */
