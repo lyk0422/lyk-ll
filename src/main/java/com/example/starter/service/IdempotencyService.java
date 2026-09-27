@@ -128,6 +128,10 @@ public class IdempotencyService {
         if (value instanceof BigDecimal bd) {
             return bd.stripTrailingZeros().toPlainString();
         }
+        if (value instanceof Instant instant) {
+            // 精确时刻统一规范化为 ISO-8601 文本，避免序列化格式差异导致指纹漂移
+            return instant.toString();
+        }
         return value;
     }
 

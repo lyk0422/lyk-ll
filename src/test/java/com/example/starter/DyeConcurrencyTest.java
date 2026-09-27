@@ -172,4 +172,72 @@ class DyeConcurrencyTest extends BaseIntegrationTest {
                 "SELECT COUNT(*) FROM lot WHERE status='CREATED'", Long.class),
                 "失败缸次保持待投料，可后续重新投料");
     }
+
+    @Test
+    void concurrentControlledFeed_sameBatchRemaining_noOverConsumption() throws Exception {
+        // 受控场景：批次余量仅够一单（RED 补偿目标 500g，余量 500g），两缸争同批余量不得超耗。
+        registerDyeLot("cdl-1", "LOT-XR", "D-RED", "2.0", "500");
+        registerDyeLot("cdl-2", "LOT-XY", "D-YELLOW", "1.5", "2000");
+        registerDyeLot("cdl-3", "LOT-XB", "D-BLUE", "1.0", "2000");
+        schedule("cx-sched-1", "LX1", "VX1", "R-BASE", 1, "50");
+        schedule("cx-sched-2", "LX2", "VX2", "R-BASE", 1, "50");
+        approve("cap-1", "LX1", List.of(
+                List.of("D-RED", "LOT-XR", 1),
+                List.of("D-YELLOW", "LOT-XY", 1),
+                List.of("D-BLUE", "LOT-XB", 1)));
+        approve("cap-2", "LX2", List.of(
+                List.of("D-RED", "LOT-XR", 1),
+                List.of("D-YELLOW", "LOT-XY", 1),
+                List.of("D-BLUE", "LOT-XB", 1)));
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<Integer>> results = new ArrayList<>();
+
+        for (int i = 1; i <= 2; i++) {
+            final int idx = i;
+            results.add(pool.submit(() -> {
+                ready.countDown();
+                start.await();
+                ResponseEntity<Map> resp = post("/api/feedings", Map.of(
+                        "requestId", "cx-feed-" + idx,
+                        "lotNo", "LX" + idx,
+                        "weighings", List.of(
+                                Map.of("dyeCode", "D-RED", "actualG", new BigDecimal("500.000")),
+                                Map.of("dyeCode", "D-YELLOW", "actualG", new BigDecimal("500.000")),
+                                Map.of("dyeCode", "D-BLUE", "actualG", new BigDecimal("250.000")))));
+                return resp.getStatusCode().value();
+            }));
+        }
+
+        assertTrue(ready.await(10, TimeUnit.SECONDS));
+        start.countDown();
+
+        int ok = 0;
+        int rejected = 0;
+        for (Future<Integer> f : results) {
+            int code = f.get(30, TimeUnit.SECONDS);
+            if (code == 200) {
+                ok++;
+            } else if (code == 422) {
+                rejected++;
+            } else {
+                throw new AssertionError("意外状态码: " + code);
+            }
+        }
+        pool.shutdown();
+
+        assertEquals(1, ok, "批次余量只够一单：恰成功一单");
+        assertEquals(1, rejected, "另一单余量不足整单回滚");
+        assertEquals(0, new BigDecimal("0.000").compareTo(batchAvailable("LOT-XR")),
+                "同批余量不得超耗为负");
+        assertEquals(Long.valueOf(1), jdbc.queryForObject(
+                "SELECT COUNT(*) FROM lot WHERE status='FED'", Long.class));
+        assertEquals(Long.valueOf(1), jdbc.queryForObject(
+                "SELECT COUNT(*) FROM comp_approval WHERE status='CONSUMED'", Long.class));
+        assertEquals(Long.valueOf(1), jdbc.queryForObject(
+                "SELECT COUNT(*) FROM comp_approval WHERE status='ACTIVE'", Long.class),
+                "败单批准保持 ACTIVE，可补足余量后重投");
+    }
 }

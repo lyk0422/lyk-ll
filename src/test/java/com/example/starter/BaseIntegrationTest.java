@@ -40,6 +40,9 @@ public abstract class BaseIntegrationTest {
         jdbc.update("DELETE FROM vat_active");
         jdbc.update("DELETE FROM color_check");
         jdbc.update("DELETE FROM idempotent_request");
+        jdbc.update("DELETE FROM comp_approval_item");
+        jdbc.update("DELETE FROM comp_approval");
+        jdbc.update("DELETE FROM dye_lot");
         jdbc.update("DELETE FROM recipe_item");
         jdbc.update("DELETE FROM recipe");
         jdbc.update("DELETE FROM dye");
@@ -112,6 +115,34 @@ public abstract class BaseIntegrationTest {
 
     protected BigDecimal stock(String dyeCode) {
         return jdbc.queryForObject("SELECT stock_g FROM dye WHERE code = ?", BigDecimal.class, dyeCode);
+    }
+
+    /** 登记染料批次：有效截止默认 1 小时后（合成数据）。 */
+    protected Map<String, Object> registerDyeLot(String requestId, String lotCode, String dyeCode,
+                                                 String potency, String availableG) {
+        return postOk("/api/dye-lots", Map.of(
+                "requestId", requestId,
+                "lotCode", lotCode,
+                "dyeCode", dyeCode,
+                "potency", new BigDecimal(potency),
+                "availableG", new BigDecimal(availableG),
+                "validUntil", java.time.Instant.now().plusSeconds(3600).toString()));
+    }
+
+    /** 为受控缸次登记补偿批准：items 为 [dyeCode, lotCode, potencyVersion] 三元组。 */
+    protected Map<String, Object> approve(String requestId, String lotNo, List<List<Object>> items) {
+        return postOk("/api/compensations", Map.of(
+                "requestId", requestId,
+                "lotNo", lotNo,
+                "items", items.stream().map(i -> Map.of(
+                        "dyeCode", i.get(0),
+                        "lotCode", i.get(1),
+                        "potencyVersion", i.get(2))).toList()));
+    }
+
+    protected BigDecimal batchAvailable(String lotCode) {
+        return jdbc.queryForObject("SELECT available_g FROM dye_lot WHERE lot_code = ?",
+                BigDecimal.class, lotCode);
     }
 
     /** JSON 往返后数字可能是 Double，统一归一化为 BigDecimal 再做数值比较。 */

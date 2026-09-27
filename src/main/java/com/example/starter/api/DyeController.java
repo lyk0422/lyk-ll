@@ -13,12 +13,16 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.example.starter.api.dto.ColorCheckRequest;
+import com.example.starter.api.dto.CompensationRequest;
 import com.example.starter.api.dto.CreateRecipeRequest;
 import com.example.starter.api.dto.FeedRequest;
 import com.example.starter.api.dto.JudgeRequest;
 import com.example.starter.api.dto.LateColorRequest;
 import com.example.starter.api.dto.MergeLotsRequest;
+import com.example.starter.api.dto.RegisterDyeLotRequest;
+import com.example.starter.api.dto.RevisePotencyRequest;
 import com.example.starter.api.dto.ScheduleLotRequest;
+import com.example.starter.service.CompensationService;
 import com.example.starter.service.DyeService;
 import com.example.starter.service.ServiceResult;
 
@@ -30,9 +34,11 @@ import com.example.starter.service.ServiceResult;
 public class DyeController {
 
     private final DyeService dyeService;
+    private final CompensationService compensationService;
 
-    public DyeController(DyeService dyeService) {
+    public DyeController(DyeService dyeService, CompensationService compensationService) {
         this.dyeService = dyeService;
+        this.compensationService = compensationService;
     }
 
     /** 创建配方草稿（v1）。 */
@@ -106,6 +112,37 @@ public class DyeController {
     @GetMapping("/recipes/{recipeCode}/recalculate")
     public ResponseEntity<Map<String, Object>> recalculate(@PathVariable String recipeCode) {
         return toResponse(dyeService.recalculate(recipeCode));
+    }
+
+    /** 染料批次登记：染料代码、正数效价系数、可用克重、有效截止（requestId 幂等）。 */
+    @PostMapping("/dye-lots")
+    public ResponseEntity<Map<String, Object>> registerDyeLot(@Valid @RequestBody RegisterDyeLotRequest req) {
+        return toResponse(compensationService.registerDyeLot(req));
+    }
+
+    /** 批次系数修订：expectedVersion 乐观锁，未投料批准失效（requestId 幂等）。 */
+    @PostMapping("/dye-lots/{lotCode}/revise-potency")
+    public ResponseEntity<Map<String, Object>> revisePotency(@PathVariable String lotCode,
+                                                             @Valid @RequestBody RevisePotencyRequest req) {
+        return toResponse(compensationService.revisePotency(lotCode, req));
+    }
+
+    /** 染料批次详情查询。 */
+    @GetMapping("/dye-lots/{lotCode}")
+    public ResponseEntity<Map<String, Object>> getDyeLot(@PathVariable String lotCode) {
+        return toResponse(compensationService.getDyeLot(lotCode));
+    }
+
+    /** 补偿审批：受控缸次投料前冻结批次、系数与补偿目标（requestId 幂等）。 */
+    @PostMapping("/compensations")
+    public ResponseEntity<Map<String, Object>> createApproval(@Valid @RequestBody CompensationRequest req) {
+        return toResponse(compensationService.createApproval(req));
+    }
+
+    /** 补偿证据查询：缸次最近一次补偿批准及冻结明细。 */
+    @GetMapping("/lots/{lotNo}/compensation")
+    public ResponseEntity<Map<String, Object>> getCompensation(@PathVariable String lotNo) {
+        return toResponse(compensationService.getCompensation(lotNo));
     }
 
     private ResponseEntity<Map<String, Object>> toResponse(ServiceResult result) {

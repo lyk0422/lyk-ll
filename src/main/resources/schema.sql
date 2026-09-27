@@ -149,18 +149,92 @@ COMMENT ON COLUMN late_color_event.lot_id IS '归档缸次;归档后迟到测色
 COMMENT ON COLUMN late_color_event.delta_e IS '迟到测色ΔE';
 COMMENT ON COLUMN late_color_event.note IS '迟到说明';
 
--- 合成基础染化料库存（克）
-INSERT INTO dye (code, name, stock_g, created_at) VALUES
-    ('D-RED',    '活性红 RED-3BS',    5000.000, CURRENT_TIMESTAMP),
-    ('D-YELLOW', '活性黄 YELLOW-4G',  5000.000, CURRENT_TIMESTAMP),
-    ('D-BLUE',   '活性蓝 BLUE-RR',    5000.000, CURRENT_TIMESTAMP);
+-- 染料批次效价补偿：批次登记与系数版本
+CREATE TABLE IF NOT EXISTS dye_lot (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    lot_code VARCHAR(64) NOT NULL UNIQUE,
+    dye_code VARCHAR(64) NOT NULL,
+    potency DECIMAL(12, 6) NOT NULL,
+    potency_version INT NOT NULL,
+    available_g DECIMAL(14, 3) NOT NULL,
+    valid_until TIMESTAMP NOT NULL,
+    version INT NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+COMMENT ON COLUMN dye_lot.lot_code IS '染料批次号(唯一)';
+COMMENT ON COLUMN dye_lot.dye_code IS '染化料编码,须与dye.code一致';
+COMMENT ON COLUMN dye_lot.potency IS '当前效价系数,正数;仅按线性模型:补偿目标=原目标/系数';
+COMMENT ON COLUMN dye_lot.potency_version IS '系数版本,从1开始,每次系数修订加1;修订使未投料批准失效';
+COMMENT ON COLUMN dye_lot.available_g IS '批次可用克重,单位g,投料原子扣减,不得为负';
+COMMENT ON COLUMN dye_lot.valid_until IS '有效截止时刻(Asia/Shanghai);now<截止有效,恰在截止失效';
+COMMENT ON COLUMN dye_lot.version IS '乐观锁版本,从1开始,成功修更加1,修改须携带expectedVersion';
+
+-- 补偿批准：冻结批次、系数与补偿目标，不修改已发布基础配方
+CREATE TABLE IF NOT EXISTS comp_approval (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id VARCHAR(64) NOT NULL UNIQUE,
+    lot_no VARCHAR(64) NOT NULL,
+    recipe_code VARCHAR(64) NOT NULL,
+    recipe_version INT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    created_at TIMESTAMP NOT NULL
+);
+COMMENT ON COLUMN comp_approval.request_id IS '补偿审批幂等键';
+COMMENT ON COLUMN comp_approval.lot_no IS '受控缸次号;同一缸次同一时刻只允许一个ACTIVE批准';
+COMMENT ON COLUMN comp_approval.recipe_code IS '批准时缸次引用的已发布配方编码(快照)';
+COMMENT ON COLUMN comp_approval.recipe_version IS '批准时缸次引用的已发布配方版本(快照)';
+COMMENT ON COLUMN comp_approval.status IS '状态:ACTIVE未投料/CONSUMED已投料冻结/INVALIDATED系数修订失效';
+
+CREATE TABLE IF NOT EXISTS comp_approval_item (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    approval_id BIGINT NOT NULL,
+    dye_code VARCHAR(64) NOT NULL,
+    lot_code VARCHAR(64) NOT NULL,
+    potency_version INT NOT NULL,
+    potency DECIMAL(12, 6) NOT NULL,
+    base_target_g DECIMAL(14, 4) NOT NULL,
+    comp_target_g DECIMAL(14, 3) NOT NULL,
+    CONSTRAINT uk_comp_approval_item UNIQUE (approval_id, dye_code)
+);
+COMMENT ON COLUMN comp_approval_item.approval_id IS '所属补偿批准主键';
+COMMENT ON COLUMN comp_approval_item.dye_code IS '染化料编码,须与配方项一致,错配整单拒绝';
+COMMENT ON COLUMN comp_approval_item.lot_code IS '冻结的染料批次号';
+COMMENT ON COLUMN comp_approval_item.potency_version IS '冻结的系数版本;批次修订后不再匹配即失效';
+COMMENT ON COLUMN comp_approval_item.potency IS '冻结的效价系数,批准后不随批次修订变化';
+COMMENT ON COLUMN comp_approval_item.base_target_g IS '放大配方原目标克重,单位g,四位小数';
+COMMENT ON COLUMN comp_approval_item.comp_target_g IS '补偿目标克重=原目标/系数,四舍五入到三位小数,单位g';
+
+-- 受控投料称量链扩展：记录冻结批次与系数；空值表示旧非受控投料
+ALTER TABLE weighing ADD COLUMN IF NOT EXISTS dye_lot_code VARCHAR(64);
+COMMENT ON COLUMN weighing.dye_lot_code IS '受控投料冻结的染料批次号;空为旧非受控投料';
+ALTER TABLE weighing ADD COLUMN IF NOT EXISTS potency DECIMAL(12, 6);
+COMMENT ON COLUMN weighing.potency IS '受控投料冻结的效价系数;空为旧非受控投料';
+
+-- 合成基础染化料库存（克）；多上下文共享内存库时幂等，重复初始化不报错
+INSERT INTO dye (code, name, stock_g, created_at)
+SELECT 'D-RED', '活性红 RED-3BS', 5000.000, CURRENT_TIMESTAMP
+WHERE NOT EXISTS (SELECT 1 FROM dye WHERE code = 'D-RED');
+INSERT INTO dye (code, name, stock_g, created_at)
+SELECT 'D-YELLOW', '活性黄 YELLOW-4G', 5000.000, CURRENT_TIMESTAMP
+WHERE NOT EXISTS (SELECT 1 FROM dye WHERE code = 'D-YELLOW');
+INSERT INTO dye (code, name, stock_g, created_at)
+SELECT 'D-BLUE', '活性蓝 BLUE-RR', 5000.000, CURRENT_TIMESTAMP
+WHERE NOT EXISTS (SELECT 1 FROM dye WHERE code = 'D-BLUE');
 
 -- 合成已发布配方 R-BASE v1（浴比 10L/kg），随服务启动自动可用
 INSERT INTO recipe (recipe_code, version, liquor_ratio, status, created_at)
-VALUES ('R-BASE', 1, 10.00, 'PUBLISHED', CURRENT_TIMESTAMP);
+SELECT 'R-BASE', 1, 10.00, 'PUBLISHED', CURRENT_TIMESTAMP
+WHERE NOT EXISTS (SELECT 1 FROM recipe WHERE recipe_code = 'R-BASE' AND version = 1);
 INSERT INTO recipe_item (recipe_id, dye_code, dosage_gpl)
-SELECT id, 'D-RED',    2.0000 FROM recipe WHERE recipe_code = 'R-BASE' AND version = 1;
+SELECT r.id, 'D-RED', 2.0000 FROM recipe r
+WHERE r.recipe_code = 'R-BASE' AND r.version = 1
+  AND NOT EXISTS (SELECT 1 FROM recipe_item ri WHERE ri.recipe_id = r.id AND ri.dye_code = 'D-RED');
 INSERT INTO recipe_item (recipe_id, dye_code, dosage_gpl)
-SELECT id, 'D-YELLOW', 1.5000 FROM recipe WHERE recipe_code = 'R-BASE' AND version = 1;
+SELECT r.id, 'D-YELLOW', 1.5000 FROM recipe r
+WHERE r.recipe_code = 'R-BASE' AND r.version = 1
+  AND NOT EXISTS (SELECT 1 FROM recipe_item ri WHERE ri.recipe_id = r.id AND ri.dye_code = 'D-YELLOW');
 INSERT INTO recipe_item (recipe_id, dye_code, dosage_gpl)
-SELECT id, 'D-BLUE',   0.5000 FROM recipe WHERE recipe_code = 'R-BASE' AND version = 1;
+SELECT r.id, 'D-BLUE', 0.5000 FROM recipe r
+WHERE r.recipe_code = 'R-BASE' AND r.version = 1
+  AND NOT EXISTS (SELECT 1 FROM recipe_item ri WHERE ri.recipe_id = r.id AND ri.dye_code = 'D-BLUE');
