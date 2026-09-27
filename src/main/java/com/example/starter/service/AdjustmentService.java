@@ -3,13 +3,17 @@ package com.example.starter.service;
 import com.example.starter.domain.AdjustmentTask;
 import com.example.starter.domain.Assessment;
 import com.example.starter.domain.HeatingUnit;
+import com.example.starter.domain.UnsealOrder;
 import com.example.starter.domain.Valve;
 import com.example.starter.domain.ValveVersion;
 import com.example.starter.repository.AdjustmentTaskRepository;
 import com.example.starter.repository.AssessmentRepository;
 import com.example.starter.repository.StationRepository;
 import com.example.starter.repository.UnitRepository;
+import com.example.starter.repository.UnsealOrderRepository;
+import com.example.starter.repository.UnsealQuotaUsageRepository;
 import com.example.starter.repository.ValveRepository;
+import com.example.starter.repository.ValveSealRepository;
 import com.example.starter.repository.ValveVersionRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.dao.DuplicateKeyException;
@@ -47,6 +51,9 @@ public class AdjustmentService {
     private final ValveVersionRepository versionRepository;
     private final AdjustmentTaskRepository taskRepository;
     private final AssessmentRepository assessmentRepository;
+    private final ValveSealRepository sealRepository;
+    private final UnsealOrderRepository unsealRepository;
+    private final UnsealQuotaUsageRepository usageRepository;
     private final BalanceService balanceService;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -57,6 +64,9 @@ public class AdjustmentService {
                              ValveVersionRepository versionRepository,
                              AdjustmentTaskRepository taskRepository,
                              AssessmentRepository assessmentRepository,
+                             ValveSealRepository sealRepository,
+                             UnsealOrderRepository unsealRepository,
+                             UnsealQuotaUsageRepository usageRepository,
                              BalanceService balanceService,
                              ObjectMapper objectMapper,
                              Clock clock) {
@@ -66,6 +76,9 @@ public class AdjustmentService {
         this.versionRepository = versionRepository;
         this.taskRepository = taskRepository;
         this.assessmentRepository = assessmentRepository;
+        this.sealRepository = sealRepository;
+        this.unsealRepository = unsealRepository;
+        this.usageRepository = usageRepository;
         this.balanceService = balanceService;
         this.objectMapper = objectMapper;
         this.clock = clock;
@@ -106,6 +119,15 @@ public class AdjustmentService {
                 .filter(u -> u.stationId() == stationId)
                 .orElseThrow(() -> new NotFoundException(
                         "单元不存在或不属于该换热站: unitId=" + unitId));
+        Valve valve = valveRepository.findByUnitId(unitId)
+                .orElseThrow(() -> new NotFoundException("单元未配置阀门: unitId=" + unitId));
+        // 行锁串行化铅封登记/复封与本调节令（锁顺序：station → valve → unseal）。
+        valve = valveRepository.lockById(valve.id()).orElseThrow();
+        // 完整铅封下新的调节令必须拒绝；无台账的旧阀门仍按原规则工作。
+        if (sealRepository.findActiveByValveId(valve.id()).isPresent()) {
+            throw new UnprocessableException(
+                    "阀门处于完整铅封状态，新的调节令被拒绝，须先临时解封: valveId=" + valve.id());
+        }
         if (taskRepository.existsActiveByStationId(stationId)) {
             throw new ConflictException("换热站存在执行中的调节任务，并发下达唯一受理: stationId=" + stationId);
         }
@@ -124,8 +146,6 @@ public class AdjustmentService {
                 .findFirst()
                 .orElseThrow(() -> new UnprocessableException(
                         "单元无温度数据或未失衡，无法判定调节方向: unitId=" + unitId));
-        Valve valve = valveRepository.findByUnitId(unitId)
-                .orElseThrow(() -> new NotFoundException("单元未配置阀门: unitId=" + unitId));
         BigDecimal oldOpening = valve.openingPercent();
         BigDecimal newOpening = classification == AdjustmentTask.ImbalanceType.UNDERFLOW
                 ? oldOpening.add(stepPercent) : oldOpening.subtract(stepPercent);
@@ -149,6 +169,121 @@ public class AdjustmentService {
         valveRepository.updateOpening(valve.id(), newOpening, now);
         versionRepository.insert(valve.id(), taskId,
                 versionRepository.maxVersionNo(valve.id()) + 1, oldOpening, newOpening, now);
+        return taskRepository.findById(taskId).orElseThrow();
+    }
+
+    /**
+     * 受控调节：在临时解封窗口与额度内下达调节令，仍遵守原 10% 步进、
+     * 24 小时最多 3 次及站内唯一执行中任务规则。
+     * 事务内重查解封未撤销、在窗内（半开区间，恰到终点失效）、额度足够及版本一致，
+     * 再原子更新开度、写版本并消费一次额度；失败不消费，重复同键不消费两次。
+     *
+     * @param unsealId       解封单 ID
+     * @param requestId      客户端幂等键
+     * @param expectedVersion 解封单乐观锁版本
+     * @param stepPercent    步进幅度，单位 %，0 &lt; step &le; 10
+     * @return 已受理（或幂等重放的首次）任务
+     */
+    @Transactional
+    public AdjustmentTask issueControlledAdjustment(long unsealId, String requestId,
+                                                    int expectedVersion, BigDecimal stepPercent) {
+        String fingerprint = Fingerprints.of("CADJ", requestId, String.valueOf(unsealId),
+                String.valueOf(expectedVersion),
+                stepPercent == null ? null : stepPercent.stripTrailingZeros().toPlainString());
+        var existing = taskRepository.findByRequestId(requestId);
+        if (existing.isPresent()) {
+            return replayOrConflict(existing.get(), fingerprint);
+        }
+        if (stepPercent == null || stepPercent.compareTo(BigDecimal.ZERO) <= 0
+                || stepPercent.compareTo(MAX_STEP_PERCENT) > 0) {
+            throw new UnprocessableException("单次步进幅度须为 (0, 10]%，当前: " + stepPercent);
+        }
+        UnsealOrder order = unsealRepository.findById(unsealId)
+                .orElseThrow(() -> new NotFoundException("解封单不存在: unsealId=" + unsealId));
+        long valveId = order.valveId();
+        Valve valveRef = valveRepository.findById(valveId)
+                .orElseThrow(() -> new NotFoundException("阀门不存在: valveId=" + valveId));
+        HeatingUnit unit = unitRepository.findById(valveRef.unitId())
+                .orElseThrow(() -> new NotFoundException("单元不存在: unitId=" + valveRef.unitId()));
+        // 锁顺序：station → valve → unseal，与复封/撤销/普通调节令一致，避免死锁。
+        stationRepository.lockById(unit.stationId())
+                .orElseThrow(() -> new NotFoundException("换热站不存在: stationId=" + unit.stationId()));
+        Valve valve = valveRepository.lockById(valveRef.id()).orElseThrow();
+        order = unsealRepository.lockById(unsealId).orElseThrow();
+        // 持锁后重查幂等键：并发下同键请求在前序事务提交后按重放处理，不重复消费额度。
+        var existingAfterLock = taskRepository.findByRequestId(requestId);
+        if (existingAfterLock.isPresent()) {
+            return replayOrConflict(existingAfterLock.get(), fingerprint);
+        }
+        if (order.status() != UnsealOrder.UnsealStatus.ACTIVE) {
+            throw new UnprocessableException("解封单已撤销或已终结，禁止调节: unsealId=" + unsealId);
+        }
+        Instant now = clock.instant();
+        if (now.isBefore(order.windowStart()) || !now.isBefore(order.windowEnd())) {
+            throw new UnprocessableException("不在解封有效窗口内(UTC，半开区间): 窗口 "
+                    + order.windowStart() + " ~ " + order.windowEnd() + ", 当前 " + now);
+        }
+        if (order.quotaUsed() >= order.quotaTotal()) {
+            throw new UnprocessableException("解封调节额度已用尽: unsealId=" + unsealId);
+        }
+        if (order.version() != expectedVersion) {
+            throw new ConflictException("解封单版本不一致: 当前=" + order.version()
+                    + ", expectedVersion=" + expectedVersion);
+        }
+        int currentValveVersion = versionRepository.maxVersionNo(valve.id());
+        if (currentValveVersion != order.valveVersion() + order.quotaUsed()) {
+            throw new UnprocessableException("阀门开度版本与解封单不一致，禁止调节: 当前="
+                    + currentValveVersion + ", 解封单引用=" + order.valveVersion()
+                    + ", 已消费额度=" + order.quotaUsed());
+        }
+        long stationId = unit.stationId();
+        long unitId = unit.id();
+        if (taskRepository.existsActiveByStationId(stationId)) {
+            throw new ConflictException("换热站存在执行中的调节任务，并发下达唯一受理: stationId=" + stationId);
+        }
+        int executed = taskRepository.countExecutedSince(unitId, now.minus(ADJUSTMENT_WINDOW));
+        if (executed >= MAX_ADJUSTMENTS_PER_24H) {
+            // 遵守 24 小时最多 3 次规则：转人工复核，不消费解封额度。
+            AdjustmentTask review = new AdjustmentTask(0, stationId, unitId, requestId, fingerprint,
+                    null, null, null, null, AdjustmentTask.TaskStatus.MANUAL_REVIEW,
+                    null, null, null, now);
+            return taskRepository.findById(taskRepository.insert(review)).orElseThrow();
+        }
+        BalanceService.BalanceView balance = balanceService.evaluateBalance(stationId, now);
+        AdjustmentTask.ImbalanceType classification = balance.units().stream()
+                .filter(u -> u.unitId() == unit.id())
+                .map(BalanceService.UnitTemperature::classification)
+                .findFirst()
+                .orElseThrow(() -> new UnprocessableException(
+                        "单元无温度数据或未失衡，无法判定调节方向: unitId=" + unitId));
+        BigDecimal oldOpening = valve.openingPercent();
+        BigDecimal newOpening = classification == AdjustmentTask.ImbalanceType.UNDERFLOW
+                ? oldOpening.add(stepPercent) : oldOpening.subtract(stepPercent);
+        if (newOpening.compareTo(BigDecimal.ZERO) < 0
+                || newOpening.compareTo(new BigDecimal("100")) > 0) {
+            throw new UnprocessableException("调节后开度越界 [0,100]%: " + newOpening);
+        }
+        AdjustmentTask task = new AdjustmentTask(0, stationId, unitId, requestId, fingerprint,
+                classification, stepPercent, oldOpening, newOpening,
+                AdjustmentTask.TaskStatus.EXECUTING, now, null, null, now);
+        long taskId;
+        try {
+            taskId = taskRepository.insert(task);
+        } catch (DuplicateKeyException e) {
+            // 并发下同键插入：唯一约束保证只受理一次，重放首个结果且不重复消费额度。
+            return taskRepository.findByRequestId(requestId)
+                    .map(t -> replayOrConflict(t, fingerprint))
+                    .orElseThrow(() -> e);
+        }
+        // 开度、版本与额度消费同事务提交，任一失败整体回滚，失败不消费额度。
+        valveRepository.updateOpening(valve.id(), newOpening, now);
+        versionRepository.insert(valve.id(), taskId, currentValveVersion + 1,
+                oldOpening, newOpening, now);
+        int consumed = unsealRepository.consumeQuota(unsealId, expectedVersion);
+        if (consumed != 1) {
+            throw new ConflictException("解封单并发变更，额度消费失败: unsealId=" + unsealId);
+        }
+        usageRepository.insert(unsealId, taskId, requestId, now);
         return taskRepository.findById(taskId).orElseThrow();
     }
 

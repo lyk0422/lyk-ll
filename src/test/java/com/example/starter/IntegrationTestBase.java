@@ -34,6 +34,9 @@ public abstract class IntegrationTestBase {
 
     @BeforeEach
     void resetDatabase() {
+        jdbc.update("DELETE FROM unseal_quota_usage");
+        jdbc.update("DELETE FROM unseal_order");
+        jdbc.update("DELETE FROM valve_seal");
         jdbc.update("DELETE FROM late_temperature_event");
         jdbc.update("DELETE FROM assessment");
         jdbc.update("DELETE FROM valve_opening_version");
@@ -45,6 +48,9 @@ public abstract class IntegrationTestBase {
         jdbc.update("ALTER TABLE adjustment_task ALTER COLUMN id RESTART WITH 1");
         jdbc.update("ALTER TABLE valve_opening_version ALTER COLUMN id RESTART WITH 1");
         jdbc.update("ALTER TABLE assessment ALTER COLUMN id RESTART WITH 1");
+        jdbc.update("ALTER TABLE valve_seal ALTER COLUMN id RESTART WITH 1");
+        jdbc.update("ALTER TABLE unseal_order ALTER COLUMN id RESTART WITH 1");
+        jdbc.update("ALTER TABLE unseal_quota_usage ALTER COLUMN id RESTART WITH 1");
         jdbc.update("INSERT INTO heat_station (id, code, name) VALUES (1, 'ST-EAST-01', '城东一号换热站')");
         jdbc.update("INSERT INTO heating_unit (id, station_id, code, name) VALUES"
                 + " (1, 1, 'U1', '一号单元'), (2, 1, 'U2', '二号单元'),"

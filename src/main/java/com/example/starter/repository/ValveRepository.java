@@ -43,6 +43,15 @@ public class ValveRepository {
     }
 
     /**
+     * 按阀门 ID 查询并加行级写锁（SELECT ... FOR UPDATE），
+     * 用于铅封登记/复封与受控调节的串行化（锁顺序：station → valve → unseal）。
+     */
+    public Optional<Valve> lockById(long id) {
+        return jdbc.query("SELECT id, unit_id, opening_percent, updated_at FROM valve"
+                + " WHERE id = ? FOR UPDATE", MAPPER, id).stream().findFirst();
+    }
+
+    /**
      * 更新阀门当前开度；必须与版本记录在同一事务内调用。
      */
     public void updateOpening(long valveId, BigDecimal newOpening, Instant updatedAt) {
