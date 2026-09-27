@@ -6,13 +6,18 @@ import java.time.ZoneOffset;
 import java.util.List;
 
 import com.example.starter.radio.domain.DispensingStatus;
+import com.example.starter.radio.domain.DispensingVersionStatus;
+import com.example.starter.radio.domain.DoseChangeStatus;
 import com.example.starter.radio.model.Dispensing;
+import com.example.starter.radio.model.DispensingVersion;
 import com.example.starter.radio.model.MotherLiquor;
 import com.example.starter.radio.model.Nuclide;
 import com.example.starter.radio.model.Prescription;
 import com.example.starter.radio.model.ReconciliationLedger;
 import com.example.starter.radio.repository.CalibratorRepository;
 import com.example.starter.radio.repository.DispensingRepository;
+import com.example.starter.radio.repository.DispensingVersionRepository;
+import com.example.starter.radio.repository.DoseChangeOrderRepository;
 import com.example.starter.radio.repository.MotherLiquorRepository;
 import com.example.starter.radio.repository.NuclideRepository;
 import com.example.starter.radio.repository.PrescriptionRepository;
@@ -35,6 +40,8 @@ public class DispensingService {
     private static final double BALANCE_RELATIVE_TOLERANCE = 1e-9;
 
     private final DispensingRepository dispensings;
+    private final DispensingVersionRepository versions;
+    private final DoseChangeOrderRepository changeOrders;
     private final MotherLiquorRepository motherLiquors;
     private final PrescriptionRepository prescriptions;
     private final CalibratorRepository calibrators;
@@ -43,6 +50,8 @@ public class DispensingService {
     private final Clock clock;
 
     public DispensingService(DispensingRepository dispensings,
+                             DispensingVersionRepository versions,
+                             DoseChangeOrderRepository changeOrders,
                              MotherLiquorRepository motherLiquors,
                              PrescriptionRepository prescriptions,
                              CalibratorRepository calibrators,
@@ -50,6 +59,8 @@ public class DispensingService {
                              DecayService decay,
                              Clock clock) {
         this.dispensings = dispensings;
+        this.versions = versions;
+        this.changeOrders = changeOrders;
         this.motherLiquors = motherLiquors;
         this.prescriptions = prescriptions;
         this.calibrators = calibrators;
@@ -97,11 +108,21 @@ public class DispensingService {
         try {
             if (legal) {
                 long id = dispensings.insertDispensing(requestId, fingerprint, motherLiquorId, prescriptionId,
-                        calibratorId, dispensedAtAdmin, deviation, DispensingStatus.CALCULATED, now);
+                        calibratorId, 1, prescription.administrationTimeEpoch(),
+                        dispensedAtAdmin, deviation, DispensingStatus.CALCULATED, now);
+                versions.insert(new DispensingVersion(0L, id, 1, prescription.administrationTimeEpoch(),
+                        dispensedAtAdmin, deviation, motherLiquorId, mother.initialActivityBq(),
+                        mother.referenceTimeEpoch(), nuclide.halfLifeSeconds(), "INITIAL", null,
+                        DispensingVersionStatus.ACTIVE, now), now);
                 return dispensings.findDispensingById(id).orElseThrow();
             }
             long id = dispensings.insertDispensing(requestId, fingerprint, motherLiquorId, prescriptionId,
-                    calibratorId, null, deviation, DispensingStatus.REJECTED, now);
+                    calibratorId, 1, prescription.administrationTimeEpoch(),
+                    null, deviation, DispensingStatus.REJECTED, now);
+            versions.insert(new DispensingVersion(0L, id, 1, prescription.administrationTimeEpoch(),
+                    null, deviation, motherLiquorId, mother.initialActivityBq(),
+                    mother.referenceTimeEpoch(), nuclide.halfLifeSeconds(), "INITIAL", null,
+                    DispensingVersionStatus.REJECTED, now), now);
             return dispensings.findDispensingById(id).orElseThrow();
         } catch (DuplicateKeyException e) {
             return dispensings.findDispensingByRequestId(requestId)
@@ -124,7 +145,7 @@ public class DispensingService {
         long now = clock.instant().getEpochSecond();
         if (dispensing.firstChecker() == null) {
             dispensings.updateChecker(dispensingId, "first_checker", checker, now);
-            dispensings.insertCheck(dispensingId, checker, 1, now);
+            dispensings.insertCheck(dispensingId, dispensing.version(), checker, 1, now);
             return dispensings.findDispensingById(dispensingId).orElseThrow();
         }
         if (dispensing.firstChecker().equals(checker)) {
@@ -134,7 +155,7 @@ public class DispensingService {
             throw new BusinessException("双人核对已完成，禁止重复核对");
         }
         dispensings.updateChecker(dispensingId, "second_checker", checker, now);
-        dispensings.insertCheck(dispensingId, checker, 2, now);
+        dispensings.insertCheck(dispensingId, dispensing.version(), checker, 2, now);
         dispensings.updateStatus(dispensingId, DispensingStatus.CHECKED, now);
         return dispensings.findDispensingById(dispensingId).orElseThrow();
     }
@@ -178,6 +199,9 @@ public class DispensingService {
         long now = clock.instant().getEpochSecond();
         dispensings.insertLedger(ledger, now);
         dispensings.markDispensed(dispensingId, requestId, fingerprint, now);
+        // 发药先成则待决变更候选同事务拒绝；已持分装行锁，与候选复核串行化，只可一方先提交
+        changeOrders.findPendingByDispensingForUpdate(dispensingId)
+                .ifPresent(pending -> changeOrders.decide(pending.id(), DoseChangeStatus.REJECTED, now));
         // 发药与母液活度扣减同事务：任一步失败整体回滚
         motherLiquors.updateRemaining(mother.id(), remainingActivityBq, measuredAtEpoch);
         Dispensing done = dispensings.findDispensingById(dispensingId).orElseThrow();
@@ -233,9 +257,9 @@ public class DispensingService {
             if (active.dispensedActivityBq() == null) {
                 continue;
             }
-            Prescription p = prescriptions.findById(active.prescriptionId()).orElseThrow();
+            // 一律使用分装当前有效版本的给药时刻与活度，二者同事务替换，杜绝“新时刻搭旧活度”
             dispensedTotal += decay.activityAt(active.dispensedActivityBq(),
-                    p.administrationTimeEpoch(), measuredAtEpoch, halfLife);
+                    active.administrationTimeEpoch(), measuredAtEpoch, halfLife);
         }
         double lhs = mother.initialActivityBq();
         double rhs = dispensedTotal + remainingActivityBq + decayResidual;
