@@ -134,10 +134,67 @@ COMMENT ON TABLE patient_active_plan IS '患者在执行计划守卫表，主键
 
 CREATE TABLE IF NOT EXISTS idempotent_request (
     request_id    VARCHAR(64)  NOT NULL PRIMARY KEY COMMENT '业务幂等键 requestId',
-    operation     VARCHAR(32)  NOT NULL COMMENT '操作类型：AUDIT/APPROVAL/VERIFICATION/FRACTION/CLOSURE',
+    operation     VARCHAR(32)  NOT NULL COMMENT '操作类型：AUDIT/APPROVAL/VERIFICATION/FRACTION/CLOSURE/DEVICE_CAPABILITY/SCHEDULE_PUBLISH/SCHEDULE_CANCEL',
     fingerprint   VARCHAR(64)  NOT NULL COMMENT 'SHA-256指纹，覆盖requestId与全部业务字段',
     http_status   INT          NOT NULL COMMENT '首次成功响应HTTP状态码',
     response_json CLOB         NOT NULL COMMENT '首次成功响应体JSON，重放原样返回',
     created_at    TIMESTAMP    NOT NULL COMMENT '首次请求时间'
 );
-COMMENT ON TABLE idempotent_request IS '审核/批准/验证/分次/结案幂等记录';
+COMMENT ON TABLE idempotent_request IS '审核/批准/验证/分次/结案/设备能力/排程发布取消幂等记录';
+
+-- 分次设备时长配额：合成设备登记可执行复杂度等级1至3；窗口为UTC半开区间，
+-- 等级1/2/3 对应固定时长 10/20/30 分钟（合成规则，非临床规则）。
+CREATE TABLE IF NOT EXISTS device (
+    device_id        VARCHAR(32) NOT NULL PRIMARY KEY COMMENT '合成设备ID',
+    device_name      VARCHAR(64) NOT NULL COMMENT '合成设备名称',
+    capability_level INT         NOT NULL COMMENT '当前可执行最高复杂度等级（1-3），下调只阻断尚未开始排程；历史实绩不随之下调',
+    version          INT         NOT NULL COMMENT '乐观版本号，从1开始，每次成功能力下调加1',
+    created_at       TIMESTAMP   NOT NULL COMMENT '登记时间（Asia/Shanghai）',
+    updated_at       TIMESTAMP   NOT NULL COMMENT '最近能力变更时间（Asia/Shanghai）',
+    CONSTRAINT chk_device_level CHECK (capability_level BETWEEN 1 AND 3)
+);
+COMMENT ON TABLE device IS '合成放疗设备登记表：能力等级1-3，仅可下调不可上调';
+
+-- 分次设备时长排程：发布冻结计划版本/等级/设备/UTC窗口并原子占用设备时长与分次资源。
+-- version 为排程行自身乐观版本：发布=1，取消或受控执行状态迁移成功后加1。
+CREATE TABLE IF NOT EXISTS fraction_schedule (
+    id                    BIGINT      NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    patient_id            VARCHAR(32) NOT NULL COMMENT '患者ID',
+    plan_code             VARCHAR(32) NOT NULL COMMENT '计划业务编码',
+    plan_version_id       BIGINT      NOT NULL COMMENT '发布时冻结的计划版本ID，执行时须仍为当前版本',
+    version_no            INT         NOT NULL COMMENT '发布时冻结的计划版本号',
+    fraction_no           INT         NOT NULL COMMENT '分次号，发布时该分次必须尚未执行',
+    device_id             VARCHAR(32) NOT NULL COMMENT '占用的合成设备ID（发布时冻结）',
+    complexity_level      INT         NOT NULL COMMENT '冻结的复杂度等级1-3，决定窗口时长10/20/30分钟',
+    window_start_utc      TIMESTAMP   NOT NULL COMMENT '窗口起点UTC（含），精确到秒，以UTC本地时刻存储',
+    window_end_utc        TIMESTAMP   NOT NULL COMMENT '窗口终点UTC（不含），半开区间，end-start须恰为等级对应分钟',
+    status                VARCHAR(16) NOT NULL COMMENT '状态：BOOKED已发布占用/EXECUTED已执行释放/CANCELLED已取消释放',
+    version               INT         NOT NULL COMMENT '排程行版本：发布为1，取消或执行成功后加1，取消需携带expectedVersion',
+    publish_request_id    VARCHAR(64) NOT NULL COMMENT '发布幂等 requestId，同批分次共享',
+    cancel_request_id     VARCHAR(64) NULL COMMENT '手动取消幂等requestId；改版系统级取消为空；未取消为空',
+    executed_fraction_id  BIGINT      NULL COMMENT '受控执行后台账分次记录ID，未执行为空',
+    published_at          TIMESTAMP   NOT NULL COMMENT '发布时间（Asia/Shanghai）',
+    cancelled_at          TIMESTAMP   NULL COMMENT '取消（含改版释放）时间，未取消为空',
+    executed_at           TIMESTAMP   NULL COMMENT '受控执行完成时间（Asia/Shanghai），未执行为空',
+    CONSTRAINT chk_schedule_level CHECK (complexity_level BETWEEN 1 AND 3),
+    CONSTRAINT uk_schedule_publish_request UNIQUE (publish_request_id, fraction_no)
+);
+COMMENT ON TABLE fraction_schedule IS '分次设备时长排程历史：BOOKED为活跃占用；EXECUTED/CANCELLED为冻结证据，同分次允许多条历史';
+CREATE INDEX IF NOT EXISTS idx_schedule_patient_plan
+    ON fraction_schedule (patient_id, plan_code, status);
+CREATE INDEX IF NOT EXISTS idx_schedule_version
+    ON fraction_schedule (plan_version_id, status);
+CREATE INDEX IF NOT EXISTS idx_schedule_device_window
+    ON fraction_schedule (device_id, window_start_utc, window_end_utc);
+
+-- 活跃分次占用守卫表：仅当分次处于 BOOKED 时存在一行；主键保证同分次双占必被数据库拒绝。
+-- 取消、改版释放与受控执行在同一事务删除对应行；历史排程行保留在 fraction_schedule。
+CREATE TABLE IF NOT EXISTS fraction_occupancy (
+    patient_id    VARCHAR(32) NOT NULL COMMENT '患者ID',
+    plan_code     VARCHAR(32) NOT NULL COMMENT '计划业务编码',
+    fraction_no   INT         NOT NULL COMMENT '被占用的分次号',
+    schedule_id   BIGINT      NOT NULL COMMENT '对应BOOKED排程行ID',
+    occupied_at   TIMESTAMP   NOT NULL COMMENT '占用发布时间（Asia/Shanghai）',
+    CONSTRAINT pk_fraction_occupancy PRIMARY KEY (patient_id, plan_code, fraction_no)
+);
+COMMENT ON TABLE fraction_occupancy IS '分次活跃占用守卫：一行=一个已发布未完成的分次排程，释放即删行';

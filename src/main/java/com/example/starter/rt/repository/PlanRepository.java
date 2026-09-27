@@ -327,7 +327,10 @@ public class PlanRepository {
     public void deleteAllForTest() {
         jdbc.execute("DELETE FROM idempotent_request");
         jdbc.execute("DELETE FROM late_fraction_event");
+        jdbc.execute("DELETE FROM fraction_occupancy");
+        jdbc.execute("DELETE FROM fraction_schedule");
         jdbc.execute("DELETE FROM fraction_execution");
+        jdbc.execute("DELETE FROM device");
         jdbc.execute("DELETE FROM verification");
         jdbc.execute("DELETE FROM physics_audit_item");
         jdbc.execute("DELETE FROM physics_audit");
@@ -344,5 +347,6 @@ public class PlanRepository {
         jdbc.execute("ALTER TABLE verification ALTER COLUMN id RESTART WITH 1");
         jdbc.execute("ALTER TABLE fraction_execution ALTER COLUMN id RESTART WITH 1");
         jdbc.execute("ALTER TABLE late_fraction_event ALTER COLUMN id RESTART WITH 1");
+        jdbc.execute("ALTER TABLE fraction_schedule ALTER COLUMN id RESTART WITH 1");
     }
 }

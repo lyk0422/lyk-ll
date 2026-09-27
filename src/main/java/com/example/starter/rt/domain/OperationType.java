@@ -14,5 +14,11 @@ public enum OperationType {
     /** 分次执行记录。 */
     FRACTION,
     /** 疗程结案。 */
-    CLOSURE
+    CLOSURE,
+    /** 设备能力等级下调。 */
+    DEVICE_CAPABILITY,
+    /** 分次设备时长排程发布（批量占用）。 */
+    SCHEDULE_PUBLISH,
+    /** 分次排程取消（释放占用）。 */
+    SCHEDULE_CANCEL
 }

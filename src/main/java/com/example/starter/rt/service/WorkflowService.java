@@ -3,6 +3,7 @@ package com.example.starter.rt.service;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,12 +29,16 @@ import com.example.starter.rt.repository.PlanRepository;
 import com.example.starter.rt.repository.PlanRepository.ActivePlanRow;
 import com.example.starter.rt.repository.PlanRepository.OarDoseRow;
 import com.example.starter.rt.repository.PlanRepository.PlanVersionRow;
+import com.example.starter.rt.repository.SchedulingRepository;
+import com.example.starter.rt.repository.SchedulingRepository.DeviceRow;
+import com.example.starter.rt.repository.SchedulingRepository.ScheduleRow;
 import com.example.starter.rt.repository.WorkflowRepository;
 import com.example.starter.rt.repository.WorkflowRepository.AuditItemRow;
 import com.example.starter.rt.repository.WorkflowRepository.AuditRow;
 import com.example.starter.rt.repository.WorkflowRepository.FractionRow;
 import com.example.starter.rt.repository.WorkflowRepository.VerificationRow;
 import com.example.starter.rt.web.ApiException;
+import com.example.starter.rt.web.ClockConfig;
 
 /**
  * 放疗计划核心工作流服务：物理审核→医师批准→首次模体验证→分次执行→疗程结案。
@@ -51,16 +56,20 @@ public class WorkflowService {
     private final PlanRepository planRepository;
     private final DirectoryRepository directoryRepository;
     private final WorkflowRepository workflowRepository;
+    private final SchedulingRepository schedulingRepository;
     private final DoseEvaluation doseEvaluation;
     private final IdempotencyTemplate idempotency;
     private final Clock clock;
 
     public WorkflowService(PlanRepository planRepository, DirectoryRepository directoryRepository,
-                           WorkflowRepository workflowRepository, DoseEvaluation doseEvaluation,
+                           WorkflowRepository workflowRepository,
+                           SchedulingRepository schedulingRepository,
+                           DoseEvaluation doseEvaluation,
                            IdempotencyTemplate idempotency, Clock clock) {
         this.planRepository = planRepository;
         this.directoryRepository = directoryRepository;
         this.workflowRepository = workflowRepository;
+        this.schedulingRepository = schedulingRepository;
         this.doseEvaluation = doseEvaluation;
         this.idempotency = idempotency;
         this.clock = clock;
@@ -169,6 +178,9 @@ public class WorkflowService {
                 return reject(409, "PLAN_REVISION_RACE",
                         "换版批准并发冲突：旧版本失效或守卫切换未成功");
             }
+            // 计划改版：未开始(BOOKED)排程全部取消并原子释放资源；已执行(EXECUTED)分次剂量与实绩不变。
+            schedulingRepository.cancelAllBookedForPlan(patientId, planCode, now);
+            schedulingRepository.deleteOccupanciesForPlan(patientId, planCode);
         }
 
         planRepository.markApproved(version.id(), now);
@@ -280,11 +292,6 @@ public class WorkflowService {
             return reject(422, "PLAN_VERSION_NOT_EXECUTABLE",
                     "计划版本当前状态 " + version.status() + "，不能登记分次");
         }
-        if (!PlanStatus.VERIFIED.name().equals(version.status())
-                && !PlanStatus.EXECUTING.name().equals(version.status())) {
-            return reject(422, "FIRST_VERIFICATION_REQUIRED",
-                    "首次治疗前必须通过模体验证（当前状态 " + version.status() + "），不得执行分次");
-        }
 
         int recorded = workflowRepository.countFractions(patientId, planCode);
         int expected = recorded + 1;
@@ -300,6 +307,51 @@ public class WorkflowService {
                             + " 次，拒绝并告警"));
         }
 
+        // 排程门禁：该计划一旦发布过排程即受控，治疗记录须在 UTC 窗口内（半开区间）、
+        // 匹配 BOOKED 排程与当前计划版本，且设备能力仍覆盖冻结等级；否则拒绝，不能用失效版本治疗。
+        // 从未发布排程的历史计划不启用控制，保持原顺序分次规则兼容。
+        ScheduleRow gateSchedule = null;
+        if (schedulingRepository.scheduleExistsForPlan(patientId, planCode)) {
+            gateSchedule = schedulingRepository.lockBookedSchedule(patientId, planCode, fractionNo)
+                    .orElse(null);
+            if (gateSchedule == null) {
+                return reject(422, "SCHEDULE_REQUIRED",
+                        "该计划已启用排程控制，分次 " + fractionNo
+                                + " 不存在已发布未完成(BOOKED)排程，拒绝治疗登记");
+            }
+            if (gateSchedule.planVersionId() != version.id()) {
+                return reject(422, "SCHEDULE_VERSION_STALE",
+                        "分次 " + fractionNo + " 排程冻结的是计划版本ID "
+                                + gateSchedule.planVersionId() + "，当前可执行版本ID "
+                                + version.id() + "，不能用失效版本治疗");
+            }
+            LocalDateTime nowUtc = now.atZone(ClockConfig.BUSINESS_ZONE).toOffsetDateTime()
+                    .withOffsetSameInstant(ZoneOffset.UTC).toLocalDateTime();
+            if (nowUtc.isBefore(gateSchedule.windowStartUtc())
+                    || !nowUtc.isBefore(gateSchedule.windowEndUtc())) {
+                return reject(422, "OUT_OF_SCHEDULE_WINDOW",
+                        "当前UTC " + nowUtc + " 不在分次 " + fractionNo + " 排程半开窗口 ["
+                                + gateSchedule.windowStartUtc() + ", "
+                                + gateSchedule.windowEndUtc() + ") 内");
+            }
+            String gateDeviceId = gateSchedule.deviceId();
+            DeviceRow device = schedulingRepository.lockDevice(gateDeviceId)
+                    .orElseThrow(() -> ApiException.notFound("DEVICE_NOT_FOUND",
+                            "排程冻结设备不存在：" + gateDeviceId));
+            // 设备能力下调只阻断尚未开始项：已 EXECUTED 实绩不变；此处等级不足直接拒绝执行。
+            if (device.capabilityLevel() < gateSchedule.complexityLevel()) {
+                return reject(422, "DEVICE_CAPABILITY_INSUFFICIENT",
+                        "设备 " + device.deviceId() + " 能力已下调至等级 " + device.capabilityLevel()
+                                + "，低于分次 " + fractionNo + " 排程冻结的复杂度等级 "
+                                + gateSchedule.complexityLevel() + "，阻断本次治疗");
+            }
+        } else if (!PlanStatus.VERIFIED.name().equals(version.status())
+                && !PlanStatus.EXECUTING.name().equals(version.status())) {
+            // 未启用排程门禁的历史计划保持原规则：首次治疗前必须通过模体验证。
+            return reject(422, "FIRST_VERIFICATION_REQUIRED",
+                    "首次治疗前必须通过模体验证（当前状态 " + version.status() + "），不得执行分次");
+        }
+
         long fractionId;
         try {
             fractionId = workflowRepository.insertFraction(patientId, planCode, version.id(),
@@ -309,6 +361,16 @@ public class WorkflowService {
                     "分次 " + fractionNo + " 已存在（并发去重），拒绝重复登记");
         }
         planRepository.markExecutingIfFirst(version.id(), now);
+
+        // 受控执行成功：同一事务原子释放设备时长与分次占用，并冻结实绩（排程→EXECUTED）。
+        if (gateSchedule != null) {
+            int executed = schedulingRepository.markExecuted(gateSchedule.id(), fractionId, now);
+            if (executed == 0) {
+                throw ApiException.conflict("SCHEDULE_EXECUTION_RACE",
+                        "分次 " + fractionNo + " 排程状态并发变化，本次治疗回滚");
+            }
+            schedulingRepository.deleteOccupancyBySchedule(gateSchedule.id());
+        }
 
         FractionResponse response = new FractionResponse(fractionId, patientId, planCode,
                 version.id(), version.versionNo(), fractionNo, deliveredDoseCgy, requestId,

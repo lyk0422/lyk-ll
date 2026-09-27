@@ -15,6 +15,7 @@ import com.example.starter.rt.dto.RecordedResponse;
 import com.example.starter.rt.repository.WorkflowRepository;
 import com.example.starter.rt.repository.WorkflowRepository.IdempotentRow;
 import com.example.starter.rt.support.Fingerprint;
+import com.example.starter.rt.support.StructuredFingerprint;
 import com.example.starter.rt.web.ApiException;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -60,6 +61,38 @@ public class IdempotencyTemplate {
                     result.httpStatus(), writeJson(result.body()), LocalDateTime.now(clock));
         } catch (DuplicateKeyException concurrent) {
             // 非同实体跨行并发：唯一约束决胜，负者整个事务回滚并返回 409（正常同实体并发已被行锁串行化为重放）。
+            throw ApiException.conflict("IDEMPOTENCY_RACE",
+                    "requestId=" + requestId + " 并发冲突，仅一个请求生效");
+        }
+        return result;
+    }
+
+    /**
+     * 排程门禁新写操作的幂等执行：使用 {@link StructuredFingerprint}（长度前缀结构化编码，
+     * 文本含分隔符也无歧义），且<b>失败不占键</b>——仅首次 2xx 结果与业务写库同事务留痕；
+     * 4xx 业务拒绝不写入幂等记录，同 requestId 可在参数修正后重试。
+     *
+     * <p>同实体并发由调用方持有的计划版本/设备/排程行锁串行化，后到者读到首次冻结结果重放；
+     * 同键异参返回 409。</p>
+     */
+    public RecordedResponse executeStructured(OperationType operation, String requestId,
+                                              Map<String, ?> params,
+                                              Supplier<RecordedResponse> action) {
+        String fingerprint = StructuredFingerprint.of(operation, requestId, params);
+        Optional<IdempotentRow> existing = workflow.findIdempotent(requestId);
+        if (existing.isPresent()) {
+            return replayOrConflict(existing.get(), fingerprint);
+        }
+
+        RecordedResponse result = action.get();
+        if (result.httpStatus() >= 400) {
+            // 业务拒绝：动作本身未做任何占用写入，不占幂等键，允许同键修正后重试。
+            return result;
+        }
+        try {
+            workflow.insertIdempotent(requestId, operation.name(), fingerprint,
+                    result.httpStatus(), writeJson(result.body()), LocalDateTime.now(clock));
+        } catch (DuplicateKeyException concurrent) {
             throw ApiException.conflict("IDEMPOTENCY_RACE",
                     "requestId=" + requestId + " 并发冲突，仅一个请求生效");
         }
