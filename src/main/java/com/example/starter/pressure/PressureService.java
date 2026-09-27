@@ -6,6 +6,8 @@ import com.example.starter.idempotent.ReplayResult;
 import com.example.starter.reading.LateEventRepository;
 import com.example.starter.station.Station;
 import com.example.starter.station.StationRepository;
+import com.example.starter.tank.PressureReservationOutcome;
+import com.example.starter.tank.TankService;
 import com.example.starter.valve.ValveState;
 import com.example.starter.valve.ValveStateRepository;
 import com.example.starter.web.ResourceNotFoundException;
@@ -44,6 +46,7 @@ public class PressureService {
     private final LinkageTaskRepository linkageTaskRepository;
     private final AdjustmentIssueRepository adjustmentIssueRepository;
     private final IdempotencyService idempotencyService;
+    private final TankService tankService;
 
     public PressureService(StationRepository stationRepository,
                            ValveStateRepository valveStateRepository,
@@ -53,7 +56,8 @@ public class PressureService {
                            StationTaskLockRepository taskLockRepository,
                            LinkageTaskRepository linkageTaskRepository,
                            AdjustmentIssueRepository adjustmentIssueRepository,
-                           IdempotencyService idempotencyService) {
+                           IdempotencyService idempotencyService,
+                           TankService tankService) {
         this.stationRepository = stationRepository;
         this.valveStateRepository = valveStateRepository;
         this.readingRepository = readingRepository;
@@ -63,6 +67,7 @@ public class PressureService {
         this.linkageTaskRepository = linkageTaskRepository;
         this.adjustmentIssueRepository = adjustmentIssueRepository;
         this.idempotencyService = idempotencyService;
+        this.tankService = tankService;
     }
 
     public PressureDetectResponse detect(PressureDetectRequest request) {
@@ -85,7 +90,7 @@ public class PressureService {
             lateEventRepository.insert(station.id(), "PRESSURE", request.requestId(),
                     request.detectedAt(), request);
             return new PressureDetectResponse(grade, false, null,
-                    measured, measured, null, null, BigDecimal.ZERO, true, false);
+                    measured, measured, null, null, BigDecimal.ZERO, true, false, false);
         }
 
         ValveState state = valveStateRepository.selectForUpdate(station.id());
@@ -97,7 +102,7 @@ public class PressureService {
             return new PressureDetectResponse(grade, false, null,
                     measured, measured,
                     state.currentInjectionRateMgM3(), state.currentInjectionRateMgM3(),
-                    BigDecimal.ZERO, false, false);
+                    BigDecimal.ZERO, false, false, false);
         }
 
         if (taskLockRepository.existsAtSameInstant(station.id(), request.detectedAt())) {
@@ -120,28 +125,51 @@ public class PressureService {
         BigDecimal rateBefore = state.currentInjectionRateMgM3();
         BigDecimal rateAfter;
         BigDecimal dose;
+        boolean injectionBlocked = false;
         if (state.injectionLocked()) {
             // 加注阀锁定中：加注指令以“维持、零加注量”下发，调压仍执行
             rateAfter = rateBefore;
             dose = BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP);
         } else {
             // 比例投加：联动后速率折算浓度回归目标浓度，本次加注量 = 流量 × 目标浓度
-            rateAfter = station.targetConcentrationMgM3();
-            dose = request.gasFlowM3()
-                    .multiply(station.targetConcentrationMgM3())
+            BigDecimal targetRate = station.targetConcentrationMgM3();
+            BigDecimal requiredDoseMg = request.gasFlowM3()
+                    .multiply(targetRate)
                     .setScale(3, RoundingMode.HALF_UP);
+            // 储罐计量单位为 kg（三位小数）：mg ÷ 1000
+            BigDecimal requiredDoseKg = requiredDoseMg
+                    .divide(BigDecimal.valueOf(1000), 3, RoundingMode.HALF_UP);
+            PressureReservationOutcome reservation = tankService.reserveForPressure(
+                    station, request.requestId(), request.detectedAt(), requiredDoseKg);
+            if (reservation.issued()) {
+                // 未绑定储罐（旧行为）或绑定且预占成功：比例加注随调压同一事务下发
+                rateAfter = targetRate;
+                dose = reservation.version() == null
+                        ? requiredDoseMg
+                        : reservation.reservedDoseKg().multiply(BigDecimal.valueOf(1000))
+                            .setScale(3, RoundingMode.HALF_UP);
+            } else {
+                // 预占后可用量将低于安全储备：加注不下发（仅生成待补液事件），
+                // 调压照常进行，速率维持、加注量报 0，不得伪报加注成功
+                injectionBlocked = true;
+                rateAfter = rateBefore;
+                dose = BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP);
+            }
         }
 
-        // 调压与加注调整同事务下发（两条指令 + 状态更新 + 任务完成原子提交）
+        // 调压指令始终下发；INJECTION 加注指令仅在加注实际下发时同事务下发
         adjustmentIssueRepository.insert(taskId, station.id(), "PRESSURE", measured, targetPressure);
-        adjustmentIssueRepository.insert(taskId, station.id(), "INJECTION", rateBefore, rateAfter);
+        if (!injectionBlocked) {
+            adjustmentIssueRepository.insert(taskId, station.id(), "INJECTION", rateBefore, rateAfter);
+        }
         valveStateRepository.updateInjectionAndPressure(station.id(), rateAfter, targetPressure);
         linkageTaskRepository.complete(taskId, targetPressure, rateAfter, dose);
         readingRepository.insert(station.id(), request.requestId(), request.detectedAt(),
                 measured, grade, taskId);
 
         return new PressureDetectResponse(grade, true, taskId,
-                measured, targetPressure, rateBefore, rateAfter, dose, false, false);
+                measured, targetPressure, rateBefore, rateAfter, dose, false,
+                injectionBlocked, false);
     }
 
     private String grade(Station station, BigDecimal measured) {

@@ -160,6 +160,115 @@ CREATE TABLE IF NOT EXISTS late_event (
 COMMENT ON COLUMN late_event.source_type IS 'ODORANT浓度检测/PRESSURE压力检测';
 COMMENT ON COLUMN late_event.payload_json IS '迟到原始报文，封存后不参与任何联动与统计';
 
+-- ===== 储罐交接台账（加臭剂储罐预占/回执/补液） =====
+
+CREATE TABLE IF NOT EXISTS odorant_tank (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    station_id BIGINT NOT NULL,
+    tank_code VARCHAR(64) NOT NULL,
+    capacity_kg DECIMAL(12,3) NOT NULL,
+    safety_reserve_kg DECIMAL(12,3) NOT NULL,
+    balance_kg DECIMAL(12,3) NOT NULL,
+    reserved_kg DECIMAL(12,3) NOT NULL DEFAULT 0,
+    version INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_tank_station UNIQUE (station_id),
+    CONSTRAINT uk_tank_code UNIQUE (tank_code),
+    CONSTRAINT ck_tank_reserve CHECK (safety_reserve_kg >= 0 AND safety_reserve_kg < capacity_kg),
+    CONSTRAINT ck_tank_balance CHECK (balance_kg >= 0 AND balance_kg <= capacity_kg),
+    CONSTRAINT ck_tank_reserved CHECK (reserved_kg >= 0 AND reserved_kg <= balance_kg)
+);
+COMMENT ON COLUMN odorant_tank.capacity_kg IS '储罐容量kg，三位小数';
+COMMENT ON COLUMN odorant_tank.safety_reserve_kg IS '安全储备kg，三位小数，约束0≤安全储备<容量';
+COMMENT ON COLUMN odorant_tank.balance_kg IS '当前实际余额kg，三位小数，0≤余额≤容量';
+COMMENT ON COLUMN odorant_tank.reserved_kg IS '已预占未结算量kg，三位小数，可用量=余额-预占';
+COMMENT ON COLUMN odorant_tank.version IS '乐观版本号，登记为1，每次成功写操作加1';
+
+CREATE TABLE IF NOT EXISTS injection_plan (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    station_id BIGINT NOT NULL,
+    tank_id BIGINT NOT NULL,
+    request_id VARCHAR(64) NOT NULL,
+    source VARCHAR(16) NOT NULL,
+    biz_time TIMESTAMP NOT NULL,
+    required_kg DECIMAL(12,3) NOT NULL,
+    consumed_kg DECIMAL(12,3) NOT NULL DEFAULT 0,
+    released_kg DECIMAL(12,3) NOT NULL DEFAULT 0,
+    status VARCHAR(16) NOT NULL,
+    receipt_request_id VARCHAR(64),
+    cancel_request_id VARCHAR(64),
+    version INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    executed_at TIMESTAMP,
+    cancelled_at TIMESTAMP,
+    CONSTRAINT uk_injection_plan_request UNIQUE (request_id)
+);
+COMMENT ON COLUMN injection_plan.source IS '计划来源：PRESSURE压力联动/MANUAL人工受控加注';
+COMMENT ON COLUMN injection_plan.required_kg IS '预占所需量kg三位小数，预占后可用量不得低于安全储备，恰等允许';
+COMMENT ON COLUMN injection_plan.consumed_kg IS '回执转实际消耗量kg，不得大于预占量';
+COMMENT ON COLUMN injection_plan.released_kg IS '释放未用预占kg，取消仅释放尚未执行部分';
+COMMENT ON COLUMN injection_plan.status IS 'ISSUED已预占下发/EXECUTED已回执/CANCELLED已取消';
+COMMENT ON COLUMN injection_plan.version IS '计划自身版本号，预留扩展';
+
+CREATE TABLE IF NOT EXISTS tank_ledger (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    station_id BIGINT NOT NULL,
+    tank_id BIGINT NOT NULL,
+    request_id VARCHAR(64),
+    entry_type VARCHAR(16) NOT NULL,
+    amount_kg DECIMAL(12,3) NOT NULL,
+    balance_after_kg DECIMAL(12,3) NOT NULL,
+    reserved_after_kg DECIMAL(12,3) NOT NULL,
+    biz_time TIMESTAMP NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON COLUMN tank_ledger.entry_type IS 'REGISTER登记/RESERVE预占/CONSUME消耗/RELEASE释放/REPLENISH补液';
+COMMENT ON COLUMN tank_ledger.amount_kg IS '本笔量kg三位小数；预占/释放仅动预占，消耗同时动余额与预占，补液仅动余额';
+COMMENT ON COLUMN tank_ledger.balance_after_kg IS '本笔后余额kg快照，台账据此逐笔守恒';
+COMMENT ON COLUMN tank_ledger.reserved_after_kg IS '本笔后预占kg快照';
+
+CREATE TABLE IF NOT EXISTS replenishment_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    station_id BIGINT NOT NULL,
+    tank_id BIGINT NOT NULL,
+    request_id VARCHAR(64) NOT NULL,
+    transport_batch_no VARCHAR(64) NOT NULL,
+    quantity_kg DECIMAL(12,3) NOT NULL,
+    accepted_concentration_mg_m3 DECIMAL(10,3) NOT NULL,
+    first_handler VARCHAR(64) NOT NULL,
+    second_handler VARCHAR(64) NOT NULL,
+    balance_before_kg DECIMAL(12,3) NOT NULL,
+    balance_after_kg DECIMAL(12,3) NOT NULL,
+    biz_time TIMESTAMP NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_replenish_request UNIQUE (request_id),
+    CONSTRAINT uk_replenish_batch UNIQUE (transport_batch_no)
+);
+COMMENT ON COLUMN replenishment_order.transport_batch_no IS '唯一运输批号，重复批号拒绝';
+COMMENT ON COLUMN replenishment_order.quantity_kg IS '补液数量kg三位小数，加入后余额不得超容量（恰等允许）';
+COMMENT ON COLUMN replenishment_order.accepted_concentration_mg_m3 IS '合成验收浓度mg/m3，须落在[19.000,21.000]许可闭区间，恰界允许';
+COMMENT ON COLUMN replenishment_order.first_handler IS '第一名交接人工号';
+COMMENT ON COLUMN replenishment_order.second_handler IS '第二名交接人工号，须与第一人不同，单人不得入账';
+
+CREATE TABLE IF NOT EXISTS pending_replenish_event (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    station_id BIGINT NOT NULL,
+    tank_id BIGINT NOT NULL,
+    source_request_id VARCHAR(64) NOT NULL,
+    source VARCHAR(16) NOT NULL,
+    required_kg DECIMAL(12,3) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    closed_order_id BIGINT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    closed_at TIMESTAMP,
+    CONSTRAINT uk_pending_source UNIQUE (source_request_id)
+);
+COMMENT ON COLUMN pending_replenish_event.source_request_id IS '触发待补液的加注计划请求号，仅记录不自动重发';
+COMMENT ON COLUMN pending_replenish_event.required_kg IS '被拦截的预占所需量kg';
+COMMENT ON COLUMN pending_replenish_event.status IS 'OPEN待补液/CLOSED补液后已可满足而关闭，关闭不重发旧加注命令';
+COMMENT ON COLUMN pending_replenish_event.closed_order_id IS '关闭该事件的补液单ID';
+
 CREATE TABLE IF NOT EXISTS idempotent_record (
     request_id VARCHAR(64) PRIMARY KEY,
     station_id BIGINT,
