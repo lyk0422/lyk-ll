@@ -7,6 +7,7 @@ import com.example.starter.survey.service.CertificateQueryService;
 import com.example.starter.survey.service.CertificateService;
 import com.example.starter.survey.service.DefectService;
 import com.example.starter.survey.service.ExtensionService;
+import com.example.starter.survey.service.RecognitionService;
 import com.example.starter.survey.service.ShipService;
 import com.example.starter.survey.service.SurveyService;
 import com.example.starter.survey.service.WindowLedgerService;
@@ -14,6 +15,8 @@ import com.example.starter.survey.web.dto.ApiResult;
 import com.example.starter.survey.web.dto.ApplyExtensionRequest;
 import com.example.starter.survey.web.dto.ApplySurveyRequest;
 import com.example.starter.survey.web.dto.ApproveExtensionRequest;
+import com.example.starter.survey.web.dto.BindRecognitionRequest;
+import com.example.starter.survey.web.dto.BindingResponse;
 import com.example.starter.survey.web.dto.BoardResponse;
 import com.example.starter.survey.web.dto.BoardSurveyRequest;
 import com.example.starter.survey.web.dto.CertificateResponse;
@@ -21,9 +24,14 @@ import com.example.starter.survey.web.dto.CertifyRequest;
 import com.example.starter.survey.web.dto.CertifyResponse;
 import com.example.starter.survey.web.dto.CreateShipRequest;
 import com.example.starter.survey.web.dto.DefectResponse;
+import com.example.starter.survey.web.dto.EvidenceChainResponse;
 import com.example.starter.survey.web.dto.ExtensionResponse;
+import com.example.starter.survey.web.dto.ImportReportRequest;
+import com.example.starter.survey.web.dto.PublishRuleRequest;
 import com.example.starter.survey.web.dto.RectifyDefectRequest;
 import com.example.starter.survey.web.dto.RectifyResponse;
+import com.example.starter.survey.web.dto.ReportResponse;
+import com.example.starter.survey.web.dto.RuleVersionResponse;
 import com.example.starter.survey.web.dto.ShipResponse;
 import com.example.starter.survey.web.dto.SurveyResponse;
 import jakarta.validation.Valid;
@@ -49,6 +57,7 @@ public class SurveyController {
     private final CertificateQueryService certificateQueryService;
     private final ExtensionService extensionService;
     private final WindowLedgerService ledgerService;
+    private final RecognitionService recognitionService;
     private final SurveyEventRepository eventRepository;
 
     public SurveyController(ShipService shipService,
@@ -58,6 +67,7 @@ public class SurveyController {
                             CertificateQueryService certificateQueryService,
                             ExtensionService extensionService,
                             WindowLedgerService ledgerService,
+                            RecognitionService recognitionService,
                             SurveyEventRepository eventRepository) {
         this.shipService = shipService;
         this.surveyService = surveyService;
@@ -66,6 +76,7 @@ public class SurveyController {
         this.certificateQueryService = certificateQueryService;
         this.extensionService = extensionService;
         this.ledgerService = ledgerService;
+        this.recognitionService = recognitionService;
         this.eventRepository = eventRepository;
     }
 
@@ -161,5 +172,55 @@ public class SurveyController {
     public List<com.example.starter.survey.domain.WindowLedgerRow> ledger(
             @RequestParam(required = false) Long shipId) {
         return shipId == null ? ledgerService.listAll() : ledgerService.listByShip(shipId);
+    }
+
+    // ---- 船旗国检查报告互认（合成规则）----
+
+    /** 发布新的合成互认规则版本。 */
+    @PostMapping("/recognition/rules")
+    public ApiResult<RuleVersionResponse> publishRule(
+            @Valid @RequestBody PublishRuleRequest request) {
+        return recognitionService.publishRule(request);
+    }
+
+    /** 列出全部互认规则版本。 */
+    @GetMapping("/recognition/rules")
+    public List<RuleVersionResponse> listRules() {
+        return recognitionService.listRules();
+    }
+
+    /** 导入外部检查报告，或对同编号报告更正（生成新修订）。 */
+    @PostMapping("/recognition/reports")
+    public ApiResult<ReportResponse> importReport(
+            @Valid @RequestBody ImportReportRequest request) {
+        return recognitionService.importReport(request);
+    }
+
+    /** 查询报告当前最新修订。 */
+    @GetMapping("/recognition/reports/{reportNo}")
+    public ReportResponse getReport(@PathVariable String reportNo,
+                                    @RequestParam(required = false) Integer revision) {
+        if (revision == null) {
+            return recognitionService.currentReport(reportNo);
+        }
+        return recognitionService.reportRevision(reportNo, revision);
+    }
+
+    /** 申请互认绑定。 */
+    @PostMapping("/recognition/bindings")
+    public ApiResult<BindingResponse> bind(@Valid @RequestBody BindRecognitionRequest request) {
+        return recognitionService.bind(request);
+    }
+
+    /** 查询某检验的全部互认绑定（含已失效）。 */
+    @GetMapping("/recognition/bindings")
+    public List<BindingResponse> listBindings(@RequestParam long surveyId) {
+        return recognitionService.listBindingsBySurvey(surveyId);
+    }
+
+    /** 证据链查询：报告修订链 + 逐项结论 + 绑定 + 风险。 */
+    @GetMapping("/recognition/evidence/{reportNo}")
+    public EvidenceChainResponse evidenceChain(@PathVariable String reportNo) {
+        return recognitionService.evidenceChain(reportNo);
     }
 }

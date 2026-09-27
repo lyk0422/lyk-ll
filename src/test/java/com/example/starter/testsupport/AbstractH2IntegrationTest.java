@@ -16,6 +16,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -39,9 +40,16 @@ public abstract class AbstractH2IntegrationTest {
         jdbc.update("DELETE FROM defect");
         jdbc.update("DELETE FROM certificate");
         jdbc.update("DELETE FROM extension_request");
+        jdbc.update("DELETE FROM recognition_binding");
+        jdbc.update("DELETE FROM recognition_risk");
+        jdbc.update("DELETE FROM external_report_item");
+        jdbc.update("DELETE FROM external_report");
         jdbc.update("DELETE FROM survey");
         jdbc.update("DELETE FROM idempotent_record");
         jdbc.update("DELETE FROM window_ledger");
+        jdbc.update("DELETE FROM recognition_item_mapping");
+        jdbc.update("DELETE FROM recognition_flag");
+        jdbc.update("DELETE FROM recognition_rule_version");
         jdbc.update("DELETE FROM ship");
         FixedClockTestConfig.CLOCK.setUtcDate(defaultClockDate());
     }
@@ -146,4 +154,54 @@ public abstract class AbstractH2IntegrationTest {
     protected Map<String, Object> extensionApproveBody(String requestId, long extensionId) {
         return Map.of("requestId", requestId, "extensionId", extensionId);
     }
+
+    // ---- 船旗国检查报告互认 ----
+
+    protected Map<String, Object> ruleMapping(String flagItem, String surveyType,
+                                              String classItem) {
+        return Map.of("flagItemCode", flagItem, "surveyType", surveyType,
+                "classItemCode", classItem);
+    }
+
+    protected Map<String, Object> publishRuleBody(String requestId, int expectedVersion,
+                                                  int maxDays, List<String> flagCodes,
+                                                  List<Map<String, Object>> mappings) {
+        return Map.of("requestId", requestId,
+                "expectedVersion", expectedVersion,
+                "maxEvidenceValidDays", maxDays,
+                "flagCodes", flagCodes,
+                "mappings", mappings,
+                "note", "测试合成规则");
+    }
+
+    protected Map<String, Object> reportItem(String itemCode, String result) {
+        return Map.of("itemCode", itemCode, "result", result, "note", "");
+    }
+
+    protected Map<String, Object> importReportBody(String requestId, String reportNo,
+                                                   int expectedRevision, String imo,
+                                                   String flagCode, String completedAt,
+                                                   String marker,
+                                                   List<Map<String, Object>> items) {
+        return Map.of("requestId", requestId,
+                "reportNo", reportNo,
+                "expectedRevision", expectedRevision,
+                "shipImo", imo,
+                "flagCode", flagCode,
+                "completedAt", completedAt,
+                "signatureMarker", marker,
+                "items", items);
+    }
+
+    protected Map<String, Object> bindBody(String requestId, long surveyId, String reportNo,
+                                           int ruleVersion, String flagItemCode) {
+        return Map.of("requestId", requestId,
+                "surveyId", surveyId,
+                "reportNo", reportNo,
+                "ruleVersion", ruleVersion,
+                "flagItemCode", flagItemCode);
+    }
+
+    /** 合成签认标记（与生产常量一致）。 */
+    protected static final String SYNTH_MARKER = "SYNTH-FLAG-RECOGNITION/v1";
 }

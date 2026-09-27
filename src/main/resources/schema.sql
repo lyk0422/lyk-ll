@@ -127,3 +127,114 @@ CREATE TABLE IF NOT EXISTS window_ledger (
     CONSTRAINT fk_ledger_ship FOREIGN KEY (ship_id) REFERENCES ship (id)
 );
 COMMENT ON TABLE window_ledger IS '窗口台账：可由船舶基准日、检验与展期记录整体复算重建';
+
+-- ===== 船旗国检查报告互认（合成规则，仅用于演示，不访问真实机构）=====
+
+CREATE TABLE IF NOT EXISTS recognition_rule_version (
+    id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
+    version                  INT          NOT NULL,
+    max_evidence_valid_days  INT          NOT NULL,
+    status                   VARCHAR(16)  NOT NULL,
+    note                     VARCHAR(512),
+    created_at               TIMESTAMP    NOT NULL,
+    CONSTRAINT uq_rec_rule_version UNIQUE (version)
+);
+COMMENT ON COLUMN recognition_rule_version.version IS '互认规则版本号，从 1 开始；版本一经发布不可变，更新规则另发新版本';
+COMMENT ON COLUMN recognition_rule_version.max_evidence_valid_days IS '外部证据最长有效天数（自然日，UTC 瞬时比较）；now>完成时刻+该天数拒绝，恰到截止允许';
+COMMENT ON COLUMN recognition_rule_version.status IS 'ACTIVE 可引用 / FROZEN 停用（历史绑定仍冻结引用旧版本）';
+
+CREATE TABLE IF NOT EXISTS recognition_flag (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    rule_version_id  BIGINT       NOT NULL,
+    flag_code        VARCHAR(16)  NOT NULL,
+    CONSTRAINT fk_rec_flag_rule FOREIGN KEY (rule_version_id) REFERENCES recognition_rule_version (id),
+    CONSTRAINT uq_rec_flag_code UNIQUE (rule_version_id, flag_code)
+);
+COMMENT ON COLUMN recognition_flag.flag_code IS '该规则版本承认的船旗代码（合成代码，如 SYN-PA，不代表真实机构）';
+
+CREATE TABLE IF NOT EXISTS recognition_item_mapping (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    rule_version_id  BIGINT       NOT NULL,
+    flag_item_code   VARCHAR(48)  NOT NULL,
+    survey_type      VARCHAR(16)  NOT NULL,
+    class_item_code  VARCHAR(48)  NOT NULL,
+    CONSTRAINT fk_rec_map_rule FOREIGN KEY (rule_version_id) REFERENCES recognition_rule_version (id),
+    CONSTRAINT uq_rec_map_item UNIQUE (rule_version_id, flag_item_code)
+);
+COMMENT ON COLUMN recognition_item_mapping.flag_item_code IS '船旗国检查项目代码（外部报告逐项结论使用该代码）';
+COMMENT ON COLUMN recognition_item_mapping.survey_type IS '映射到的船级检验类型：ANNUAL / INTERMEDIATE / SPECIAL';
+COMMENT ON COLUMN recognition_item_mapping.class_item_code IS '映射替代的船级检验项目代码；互认只替代该项目完成证明，不替代其他门禁';
+
+CREATE TABLE IF NOT EXISTS external_report (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    report_no         VARCHAR(64)  NOT NULL,
+    revision_no       INT          NOT NULL,
+    ship_imo          VARCHAR(32)  NOT NULL,
+    flag_code         VARCHAR(16)  NOT NULL,
+    completed_at      TIMESTAMP    NOT NULL,
+    signature_marker  VARCHAR(64)  NOT NULL,
+    status            VARCHAR(16)  NOT NULL,
+    superseded_by     BIGINT,
+    request_id        VARCHAR(128) NOT NULL,
+    fingerprint       VARCHAR(128) NOT NULL,
+    created_at        TIMESTAMP    NOT NULL,
+    CONSTRAINT fk_ext_report_supersede FOREIGN KEY (superseded_by) REFERENCES external_report (id),
+    CONSTRAINT uq_ext_report_revision UNIQUE (report_no, revision_no)
+);
+COMMENT ON COLUMN external_report.report_no IS '外部检查报告编号，全局唯一；同编号更正生成新 revision_no 修订行';
+COMMENT ON COLUMN external_report.revision_no IS '报告修订号，从 1 开始；成功更正 +1，同参重复导入不新增';
+COMMENT ON COLUMN external_report.ship_imo IS '被检查船舶 IMO；绑定互认时必须与本船一致，跨船证据拒绝';
+COMMENT ON COLUMN external_report.completed_at IS '检查完成时刻（UTC 精确瞬时）；证据有效期由该时刻加规则天数判定';
+COMMENT ON COLUMN external_report.signature_marker IS '签认标记；只接受合成标记 SYNTH-FLAG-RECOGNITION/v1，不访问真实机构';
+COMMENT ON COLUMN external_report.status IS 'CURRENT 当前最新修订 / SUPERSEDED 已被新修订替代（历史行不可变）';
+
+CREATE TABLE IF NOT EXISTS external_report_item (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    report_id   BIGINT       NOT NULL,
+    item_code   VARCHAR(48)  NOT NULL,
+    result      VARCHAR(16)  NOT NULL,
+    note        VARCHAR(512),
+    CONSTRAINT fk_ext_item_report FOREIGN KEY (report_id) REFERENCES external_report (id),
+    CONSTRAINT uq_ext_item UNIQUE (report_id, item_code)
+);
+COMMENT ON COLUMN external_report_item.result IS '逐项结论：PASS 合格 / FAIL 不合格 / MAJOR_DEFECT 重大缺陷（不得当合格项目互认）';
+
+CREATE TABLE IF NOT EXISTS recognition_binding (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id          VARCHAR(128) NOT NULL,
+    survey_id           BIGINT       NOT NULL,
+    report_id           BIGINT       NOT NULL,
+    report_no           VARCHAR(64)  NOT NULL,
+    revision_no         INT          NOT NULL,
+    rule_version        INT          NOT NULL,
+    flag_item_code      VARCHAR(48)  NOT NULL,
+    survey_type         VARCHAR(16)  NOT NULL,
+    class_item_code     VARCHAR(48)  NOT NULL,
+    status              VARCHAR(16)  NOT NULL,
+    invalidated_reason  VARCHAR(64),
+    created_at          TIMESTAMP    NOT NULL,
+    invalidated_at      TIMESTAMP,
+    fingerprint         VARCHAR(128) NOT NULL,
+    active_flag         VARCHAR(1),
+    CONSTRAINT fk_rec_binding_survey FOREIGN KEY (survey_id) REFERENCES survey (id),
+    CONSTRAINT fk_rec_binding_report FOREIGN KEY (report_id) REFERENCES external_report (id)
+);
+COMMENT ON COLUMN recognition_binding.rule_version IS '绑定时冻结的互认规则版本；后续规则升级不改变本绑定';
+COMMENT ON COLUMN recognition_binding.revision_no IS '绑定时冻结的报告修订号；报告更正后旧绑定原子失效，不得以旧标志发证';
+COMMENT ON COLUMN recognition_binding.status IS 'ACTIVE 有效 / INVALIDATED 已失效（报告更正等）';
+COMMENT ON COLUMN recognition_binding.invalidated_reason IS '失效原因代码，如 REPORT_REVISED';
+COMMENT ON COLUMN recognition_binding.active_flag IS 'ACTIVE 为 Y，其余 NULL；唯一索引保证每个检验的每个船级项目至多一个有效绑定';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_rec_binding_active
+    ON recognition_binding (survey_id, class_item_code, active_flag);
+
+CREATE TABLE IF NOT EXISTS recognition_risk (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    report_no         VARCHAR(64)  NOT NULL,
+    old_revision_no   INT          NOT NULL,
+    new_revision_no   INT          NOT NULL,
+    survey_id         BIGINT,
+    reason            VARCHAR(64)  NOT NULL,
+    created_at        TIMESTAMP    NOT NULL
+);
+COMMENT ON TABLE recognition_risk IS '互认风险记录：报告更正涉已签发历史证据时，历史不改，另记风险';
+COMMENT ON COLUMN recognition_risk.survey_id IS '受影响的已签发检验（可能因清理历史数据而为空）';

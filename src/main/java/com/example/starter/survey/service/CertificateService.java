@@ -43,17 +43,20 @@ public class CertificateService {
     private final SurveyRepository surveyRepository;
     private final ShipRepository shipRepository;
     private final DefectRepository defectRepository;
+    private final RecognitionCertifyGate recognitionCertifyGate;
     private final IdempotentExecutor executor;
 
     public CertificateService(CertificateRepository certificateRepository,
                               SurveyRepository surveyRepository,
                               ShipRepository shipRepository,
                               DefectRepository defectRepository,
+                              RecognitionCertifyGate recognitionCertifyGate,
                               IdempotentExecutor executor) {
         this.certificateRepository = certificateRepository;
         this.surveyRepository = surveyRepository;
         this.shipRepository = shipRepository;
         this.defectRepository = defectRepository;
+        this.recognitionCertifyGate = recognitionCertifyGate;
         this.executor = executor;
     }
 
@@ -123,6 +126,9 @@ public class CertificateService {
             return new CertifyResponse(SurveyResponse.from(latest, ship.imo()),
                     CertificateResponse.from(produced, ship.imo()), null);
         }
+        // 互认证据冻结校验：行锁报告修订行与绑定，冻结一致修订和规则版本；
+        // 修订已被更正或证据超期当场失效绑定并拒绝发证。互认不替代上面的登轮/缺陷门禁。
+        recognitionCertifyGate.verifyFrozen(survey.id(), now);
         int version = certificateRepository.nextVersion(ship.id(), survey.type());
 
         // 新证有效期照常到下一周期窗口末日；展期只衔接旧证到期与本次发证之间的间隙，
