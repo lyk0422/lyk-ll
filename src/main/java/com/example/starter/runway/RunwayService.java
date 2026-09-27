@@ -321,7 +321,7 @@ public class RunwayService {
 
     private RunwayEvent mustFind(long eventId) {
         return eventRepository.findById(eventId)
-                .orElseThrow(() -> ApiException.notFound("跑道事件不存在: " + eventId));
+                .orElseThrow(() -> ApiException.notFound("EVENT_NOT_FOUND", "跑道事件不存在: " + eventId));
     }
 
     private void requireActive(RunwayEvent event, String operation) {
