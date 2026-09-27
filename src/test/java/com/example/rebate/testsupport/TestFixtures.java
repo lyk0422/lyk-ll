@@ -78,4 +78,32 @@ public final class TestFixtures {
         return "{\"requestId\":\"%s\",\"declarationNo\":\"%s\",\"invoiceNo\":\"%s\",\"note\":\"%s\"}"
                 .formatted(requestId, decl, inv, note);
     }
+
+    /** 冲回提交（金额为正整数分）。 */
+    public static String reversalSubmit(String requestId, String decl, String correctionNo,
+                                        String reason, long amountCents, String submittedBy) {
+        return """
+                {"requestId":"%s","declarationNo":"%s","correctionNo":"%s","reason":"%s",
+                 "amountCents":%d,"submittedBy":"%s"}
+                """.formatted(requestId, decl, correctionNo, reason, amountCents, submittedBy);
+    }
+
+    /** 冲回复核（expectedVersion 从 1 起）。 */
+    public static String reversalReview(String requestId, int expectedVersion,
+                                        String reviewedBy, boolean approved, String rejectReason) {
+        String reasonPart = rejectReason == null ? "null" : "\"" + rejectReason + "\"";
+        return """
+                {"requestId":"%s","expectedVersion":%d,"reviewedBy":"%s",
+                 "approved":%s,"rejectReason":%s}
+                """.formatted(requestId, expectedVersion, reviewedBy, approved, reasonPart);
+    }
+
+    /** 追缴回执登记。 */
+    public static String reversalReceipt(String requestId, int expectedVersion, String serial,
+                                         long amountCents, String occurredAt) {
+        return """
+                {"requestId":"%s","expectedVersion":%d,"receiptSerial":"%s",
+                 "amountCents":%d,"occurredAt":"%s"}
+                """.formatted(requestId, expectedVersion, serial, amountCents, occurredAt);
+    }
 }

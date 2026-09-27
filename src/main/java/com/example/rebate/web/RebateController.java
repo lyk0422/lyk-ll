@@ -6,9 +6,11 @@ import com.example.rebate.service.DoubtService;
 import com.example.rebate.service.IdempotencyService;
 import com.example.rebate.service.IdempotentOutcome;
 import com.example.rebate.service.QueryService;
+import com.example.rebate.service.ReversalService;
 import com.example.rebate.service.ServiceResult;
 import com.example.rebate.service.TreasuryService;
 import com.example.rebate.service.CheckService;
+import com.example.rebate.service.AtomicIdempotencyService;
 import com.example.rebate.web.dto.BatchView;
 import com.example.rebate.web.dto.CheckRequest;
 import com.example.rebate.web.dto.CheckResponse;
@@ -20,8 +22,13 @@ import com.example.rebate.web.dto.ExplainRequest;
 import com.example.rebate.web.dto.LateDocumentRequest;
 import com.example.rebate.web.dto.LateEventView;
 import com.example.rebate.web.dto.LibraryRequest;
+import com.example.rebate.web.dto.QuotaBalanceView;
 import com.example.rebate.web.dto.RecalcResponse;
 import com.example.rebate.web.dto.RequestIdRequest;
+import com.example.rebate.web.dto.ReversalReceiptRequest;
+import com.example.rebate.web.dto.ReversalReviewRequest;
+import com.example.rebate.web.dto.ReversalSubmitRequest;
+import com.example.rebate.web.dto.ReversalView;
 import com.example.rebate.web.dto.ReviewRequest;
 import com.example.rebate.web.dto.TreasuryRequest;
 import com.example.rebate.web.dto.WriteoffView;
@@ -55,6 +62,8 @@ public class RebateController {
     private final TreasuryService treasuryService;
     private final QueryService queryService;
     private final IdempotencyService idempotency;
+    private final AtomicIdempotencyService atomicIdempotency;
+    private final ReversalService reversalService;
 
     public RebateController(CollectionService collectionService,
                             CheckService checkService,
@@ -62,7 +71,9 @@ public class RebateController {
                             DeclarationService declarationService,
                             TreasuryService treasuryService,
                             QueryService queryService,
-                            IdempotencyService idempotency) {
+                            IdempotencyService idempotency,
+                            AtomicIdempotencyService atomicIdempotency,
+                            ReversalService reversalService) {
         this.collectionService = collectionService;
         this.checkService = checkService;
         this.doubtService = doubtService;
@@ -70,6 +81,8 @@ public class RebateController {
         this.treasuryService = treasuryService;
         this.queryService = queryService;
         this.idempotency = idempotency;
+        this.atomicIdempotency = atomicIdempotency;
+        this.reversalService = reversalService;
     }
 
     /**
@@ -255,6 +268,80 @@ public class RebateController {
     public Map<String, Object> recalcLibrary(@RequestParam String productCode,
                                              @RequestParam LocalDate declareDate) {
         return queryService.recalcLibrary(productCode, declareDate);
+    }
+
+    // ------------------------------------------------------------------
+    // 已结案批次分批冲回：提交 → 复核 → 追缴到账；写操作业务与幂等同事务
+    // ------------------------------------------------------------------
+
+    /**
+     * 提交冲回单（初为待复核，版本 1）。
+     */
+    @PostMapping("/api/batches/{batchNo}/reversals")
+    public ResponseEntity<?> submitReversal(@PathVariable String batchNo,
+                                            @Valid @RequestBody ReversalSubmitRequest req) {
+        Map<String, Object> payload = payload(req, "batchNo", batchNo);
+        return atomic("REVERSAL_SUBMIT", req.requestId(), payload,
+                () -> ServiceResult.ok(reversalService.submit(
+                        batchNo, req.declarationNo(), req.correctionNo(), req.reason(),
+                        req.amountCents(), req.submittedBy())));
+    }
+
+    /**
+     * 复核冲回单：批准占用剩余可冲额；驳回不占额。
+     */
+    @PostMapping("/api/batches/{batchNo}/reversals/{correctionNo}/review")
+    public ResponseEntity<?> reviewReversal(@PathVariable String batchNo,
+                                            @PathVariable String correctionNo,
+                                            @Valid @RequestBody ReversalReviewRequest req) {
+        Map<String, Object> payload = payload(req, "batchNo", batchNo, "correctionNo", correctionNo);
+        return atomic("REVERSAL_REVIEW", req.requestId(), payload,
+                () -> ServiceResult.ok(reversalService.review(
+                        batchNo, correctionNo, req.expectedVersion(), req.reviewedBy(),
+                        req.approved(), req.rejectReason())));
+    }
+
+    /**
+     * 登记追缴回执：独立流水号、实际收回金额与精确到账时刻。
+     */
+    @PostMapping("/api/batches/{batchNo}/reversals/{correctionNo}/receipts")
+    public ResponseEntity<?> reversalReceipt(@PathVariable String batchNo,
+                                             @PathVariable String correctionNo,
+                                             @Valid @RequestBody ReversalReceiptRequest req) {
+        Map<String, Object> payload = payload(req, "batchNo", batchNo, "correctionNo", correctionNo);
+        return atomic("REVERSAL_RECEIPT", req.requestId(), payload,
+                () -> ServiceResult.ok(reversalService.registerReceipt(
+                        batchNo, correctionNo, req.expectedVersion(), req.receiptSerial(),
+                        req.amountCents(), req.occurredAt())));
+    }
+
+    /**
+     * 查询冲回单详情（含余额与追缴明细）。
+     */
+    @GetMapping("/api/batches/{batchNo}/reversals/{correctionNo}")
+    public ReversalView getReversal(@PathVariable String batchNo,
+                                    @PathVariable String correctionNo) {
+        return reversalService.get(batchNo, correctionNo);
+    }
+
+    /**
+     * 逐单可冲余额查询。
+     */
+    @GetMapping("/api/batches/{batchNo}/reversals/balance/{declarationNo}")
+    public QuotaBalanceView reversalBalance(@PathVariable String batchNo,
+                                            @PathVariable String declarationNo) {
+        return reversalService.balance(batchNo, declarationNo);
+    }
+
+    private ResponseEntity<?> atomic(String opType, String requestId, Object payload,
+                                     java.util.function.Supplier<ServiceResult> action) {
+        IdempotentOutcome outcome = atomicIdempotency.run(opType, requestId, payload, action);
+        if (outcome.first()) {
+            return ResponseEntity.status(outcome.status()).body(outcome.firstBody());
+        }
+        return ResponseEntity.status(outcome.status())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(outcome.replayBody());
     }
 
     private ResponseEntity<?> idempotent(String opType, String requestId, Object payload,

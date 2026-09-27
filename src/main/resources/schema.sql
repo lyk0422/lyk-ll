@@ -169,3 +169,65 @@ CREATE TABLE t_idempotent_record (
     completed_at TIMESTAMP NULL
 );
 COMMENT ON TABLE t_idempotent_record IS 'requestId 幂等记录：指纹覆盖 requestId 与全部业务字段';
+
+-- 结案批次分批冲回：逐单可冲余额台账（单位：分），批准冲回时在同一事务内条件占用
+CREATE TABLE t_reversal_quota (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    declaration_no VARCHAR(64) NOT NULL,
+    frozen_tax_cents BIGINT NOT NULL,
+    occupied_cents BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_reversal_quota_decl UNIQUE (batch_id, declaration_no)
+);
+COMMENT ON TABLE t_reversal_quota IS '逐单可冲余额台账：结案批次内每张报关单一行，冲回批准时条件占用，不改动结案总额';
+COMMENT ON COLUMN t_reversal_quota.frozen_tax_cents IS '冻结退税额（整数分），取自结案时该校验明细的计税依据（元×100，四舍五入）';
+COMMENT ON COLUMN t_reversal_quota.occupied_cents IS '已批准冲回累计占用（整数分）；待复核与驳回不占额，恒不超过冻结额';
+
+CREATE TABLE t_reversal (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    declaration_no VARCHAR(64) NOT NULL,
+    correction_no VARCHAR(64) NOT NULL,
+    reason CLOB NOT NULL,
+    amount_cents BIGINT NOT NULL,
+    status VARCHAR(24) NOT NULL,
+    submitted_by VARCHAR(64) NOT NULL,
+    submitted_at TIMESTAMP NOT NULL,
+    reviewed_by VARCHAR(64),
+    reviewed_at TIMESTAMP NULL,
+    reject_reason CLOB,
+    approved_cents BIGINT NOT NULL DEFAULT 0,
+    collected_cents BIGINT NOT NULL DEFAULT 0,
+    completed_at TIMESTAMP NULL,
+    version_no INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_reversal_batch_correction UNIQUE (batch_id, correction_no)
+);
+COMMENT ON TABLE t_reversal IS '分批冲回单：同批次同更正编号最多一单；状态 PENDING/APPROVED/REJECTED/COMPLETED';
+COMMENT ON COLUMN t_reversal.correction_no IS '唯一外部更正编号，同一结案批次内唯一';
+COMMENT ON COLUMN t_reversal.reason IS '冲回原因（合法文本，可为任意字符）';
+COMMENT ON COLUMN t_reversal.amount_cents IS '申请冲回金额（正整数分）';
+COMMENT ON COLUMN t_reversal.status IS 'PENDING 待复核 / APPROVED 已批准追缴中 / REJECTED 已驳回 / COMPLETED 追缴收齐（只读终态）';
+COMMENT ON COLUMN t_reversal.approved_cents IS '批准金额（整数分），批准时等于申请额，追缴累计上限';
+COMMENT ON COLUMN t_reversal.collected_cents IS '已登记追缴实际到账累计（整数分），恒不超过批准额';
+COMMENT ON COLUMN t_reversal.version_no IS '乐观版本号，从 1 开始，每次成功变更加 1；写操作须携带 expectedVersion';
+
+CREATE INDEX idx_reversal_batch ON t_reversal (batch_id);
+CREATE INDEX idx_reversal_decl ON t_reversal (batch_id, declaration_no);
+
+CREATE TABLE t_reversal_receipt (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    reversal_id BIGINT NOT NULL,
+    receipt_serial VARCHAR(64) NOT NULL,
+    amount_cents BIGINT NOT NULL,
+    occurred_at TIMESTAMP NOT NULL,
+    registered_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_receipt_reversal_serial UNIQUE (reversal_id, receipt_serial)
+);
+COMMENT ON TABLE t_reversal_receipt IS '追缴回执明细：独立流水号，同冲回单内唯一；允许多笔部分到账，乱序不改变总额';
+COMMENT ON COLUMN t_reversal_receipt.receipt_serial IS '追缴回执独立流水号；同流水异金额拒绝';
+COMMENT ON COLUMN t_reversal_receipt.amount_cents IS '本笔实际收回金额（正整数分）';
+COMMENT ON COLUMN t_reversal_receipt.occurred_at IS '回执载明的精确到账时刻(UTC)，与登记时刻区分';

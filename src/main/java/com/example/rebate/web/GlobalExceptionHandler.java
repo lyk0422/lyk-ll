@@ -4,9 +4,11 @@ import java.time.OffsetDateTime;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 /**
  * 统一异常响应。
@@ -32,6 +34,22 @@ public class GlobalExceptionHandler {
                 .map(e -> e.getField() + ": " + e.getDefaultMessage())
                 .orElse("请求参数校验失败");
         return ResponseEntity.badRequest().body(body(400, msg));
+    }
+
+    /**
+     * 请求体不可读（JSON 语法错误、时间/数字格式非法）统一 400。
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<Map<String, Object>> handleUnreadable(HttpMessageNotReadableException ex) {
+        return ResponseEntity.badRequest().body(body(400, "请求体格式非法或字段类型不匹配"));
+    }
+
+    /**
+     * 路径/查询参数类型不匹配统一 400。
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<Map<String, Object>> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
+        return ResponseEntity.badRequest().body(body(400, "参数 " + ex.getName() + " 类型不匹配"));
     }
 
     /**
