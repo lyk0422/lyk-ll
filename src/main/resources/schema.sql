@@ -134,10 +134,55 @@ COMMENT ON TABLE patient_active_plan IS '患者在执行计划守卫表，主键
 
 CREATE TABLE IF NOT EXISTS idempotent_request (
     request_id    VARCHAR(64)  NOT NULL PRIMARY KEY COMMENT '业务幂等键 requestId',
-    operation     VARCHAR(32)  NOT NULL COMMENT '操作类型：AUDIT/APPROVAL/VERIFICATION/FRACTION/CLOSURE',
+    operation     VARCHAR(32)  NOT NULL COMMENT '操作类型：AUDIT/APPROVAL/VERIFICATION/FRACTION/CLOSURE/DEVICE_REGISTER/DEVICE_UPDATE/SCHEDULE_PUBLISH/SCHEDULE_CANCEL/TREATMENT',
     fingerprint   VARCHAR(64)  NOT NULL COMMENT 'SHA-256指纹，覆盖requestId与全部业务字段',
     http_status   INT          NOT NULL COMMENT '首次成功响应HTTP状态码',
     response_json CLOB         NOT NULL COMMENT '首次成功响应体JSON，重放原样返回',
     created_at    TIMESTAMP    NOT NULL COMMENT '首次请求时间'
 );
-COMMENT ON TABLE idempotent_request IS '审核/批准/验证/分次/结案幂等记录';
+COMMENT ON TABLE idempotent_request IS '审核/批准/验证/分次/结案/设备/排程/治疗幂等记录';
+
+CREATE TABLE IF NOT EXISTS device (
+    device_id   VARCHAR(32) NOT NULL PRIMARY KEY COMMENT '设备ID（合成，DEV开头）',
+    device_name VARCHAR(64) NOT NULL COMMENT '设备名称（合成）',
+    max_level   INT         NOT NULL COMMENT '可执行复杂度等级上限：1-3；下调只阻断尚未开始项，不影响已执行实绩',
+    version     INT         NOT NULL COMMENT '乐观锁版本：从1开始，每次成功变更加1',
+    created_at  TIMESTAMP   NOT NULL COMMENT '登记时间（Asia/Shanghai）',
+    updated_at  TIMESTAMP   NOT NULL COMMENT '最近变更时间（Asia/Shanghai）'
+);
+COMMENT ON TABLE device IS '合成放疗设备登记表：复杂度等级能力1-3';
+
+CREATE TABLE IF NOT EXISTS plan_schedule (
+    id              BIGINT      NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '排程批次ID',
+    patient_id      VARCHAR(32) NOT NULL COMMENT '患者ID',
+    plan_code       VARCHAR(32) NOT NULL COMMENT '计划业务编码',
+    plan_version_id BIGINT      NOT NULL COMMENT '发布时冻结的计划版本ID',
+    level           INT         NOT NULL COMMENT '复杂度等级1-3，对应每分次10/20/30分钟',
+    device_id       VARCHAR(32) NOT NULL COMMENT '发布时冻结的设备ID',
+    version         INT         NOT NULL COMMENT '排程版本：从1开始，成功变更（取消）加1',
+    status          VARCHAR(16) NOT NULL COMMENT '状态：ACTIVE生效中/CANCELLED已取消',
+    request_id      VARCHAR(64) NOT NULL COMMENT '发布幂等 requestId',
+    created_at      TIMESTAMP   NOT NULL COMMENT '发布时间（Asia/Shanghai）',
+    updated_at      TIMESTAMP   NOT NULL COMMENT '最近变更时间（Asia/Shanghai）'
+);
+COMMENT ON TABLE plan_schedule IS '分次排程批次：发布即冻结计划版本/等级/设备/窗口，单次批量最多10个连续分次';
+
+CREATE TABLE IF NOT EXISTS schedule_item (
+    id                    BIGINT      NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '排程项ID',
+    schedule_id           BIGINT      NOT NULL COMMENT '所属排程批次ID',
+    patient_id            VARCHAR(32) NOT NULL COMMENT '患者ID',
+    plan_code             VARCHAR(32) NOT NULL COMMENT '计划业务编码',
+    plan_version_id       BIGINT      NOT NULL COMMENT '发布时冻结的计划版本ID',
+    fraction_no           INT         NOT NULL COMMENT '分次号，批次内连续',
+    device_id             VARCHAR(32) NOT NULL COMMENT '占用设备ID',
+    level                 INT         NOT NULL COMMENT '发布时冻结的复杂度等级',
+    window_start_utc      TIMESTAMP   NOT NULL COMMENT '占用窗口开始（UTC，半开区间含起点）',
+    window_end_utc        TIMESTAMP   NOT NULL COMMENT '占用窗口结束（UTC，半开区间不含终点），长度=等级对应分钟数',
+    status                VARCHAR(16) NOT NULL COMMENT '状态：SCHEDULED占用中/CANCELLED已取消释放/COMPLETED已完成释放',
+    delivered_dose_cgy    BIGINT      NULL COMMENT '实绩投递剂量(cGy)，未完成为空',
+    executed_at           TIMESTAMP   NULL COMMENT '实绩执行时间（UTC），未完成为空',
+    fraction_execution_id BIGINT      NULL COMMENT '关联分次台账ID，未完成为空',
+    created_at            TIMESTAMP   NOT NULL COMMENT '创建时间（Asia/Shanghai）',
+    updated_at            TIMESTAMP   NOT NULL COMMENT '最近变更时间（Asia/Shanghai）'
+);
+COMMENT ON TABLE schedule_item IS '排程占用明细：同设备窗口重叠或同分次双占拒绝；完成/取消即释放占用';

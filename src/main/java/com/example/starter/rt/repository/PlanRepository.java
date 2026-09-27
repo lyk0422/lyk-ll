@@ -326,6 +326,9 @@ public class PlanRepository {
     /** 仅用于测试清理：清空全部业务表并重置自增。 */
     public void deleteAllForTest() {
         jdbc.execute("DELETE FROM idempotent_request");
+        jdbc.execute("DELETE FROM schedule_item");
+        jdbc.execute("DELETE FROM plan_schedule");
+        jdbc.execute("DELETE FROM device");
         jdbc.execute("DELETE FROM late_fraction_event");
         jdbc.execute("DELETE FROM fraction_execution");
         jdbc.execute("DELETE FROM verification");
@@ -344,5 +347,7 @@ public class PlanRepository {
         jdbc.execute("ALTER TABLE verification ALTER COLUMN id RESTART WITH 1");
         jdbc.execute("ALTER TABLE fraction_execution ALTER COLUMN id RESTART WITH 1");
         jdbc.execute("ALTER TABLE late_fraction_event ALTER COLUMN id RESTART WITH 1");
+        jdbc.execute("ALTER TABLE plan_schedule ALTER COLUMN id RESTART WITH 1");
+        jdbc.execute("ALTER TABLE schedule_item ALTER COLUMN id RESTART WITH 1");
     }
 }

@@ -18,17 +18,25 @@ import com.example.starter.rt.dto.ConstraintCheckItem;
 import com.example.starter.rt.dto.CreatePatientRequest;
 import com.example.starter.rt.dto.CreatePlanRequest;
 import com.example.starter.rt.dto.CreateTemplateRequest;
+import com.example.starter.rt.dto.DeviceOccupancyItem;
+import com.example.starter.rt.dto.DeviceRegisterRequest;
+import com.example.starter.rt.dto.DeviceUpdateRequest;
 import com.example.starter.rt.dto.FractionLedgerItem;
 import com.example.starter.rt.dto.FractionRequest;
 import com.example.starter.rt.dto.LateFractionItem;
 import com.example.starter.rt.dto.PlanVersionResponse;
 import com.example.starter.rt.dto.RecordedResponse;
+import com.example.starter.rt.dto.ScheduleCancelRequest;
+import com.example.starter.rt.dto.SchedulePublishRequest;
+import com.example.starter.rt.dto.ScheduleResponse;
+import com.example.starter.rt.dto.TreatmentRequest;
 import com.example.starter.rt.dto.VerificationRequest;
 import com.example.starter.rt.repository.WorkflowRepository.FractionRow;
 import com.example.starter.rt.repository.WorkflowRepository.LateFractionRow;
 import com.example.starter.rt.repository.WorkflowRepository.VerificationRow;
 import com.example.starter.rt.service.PlanAdminService;
 import com.example.starter.rt.service.Responses;
+import com.example.starter.rt.service.SchedulingService;
 import com.example.starter.rt.service.WorkflowService;
 
 import jakarta.validation.Valid;
@@ -42,10 +50,13 @@ public class RadiotherapyController {
 
     private final PlanAdminService adminService;
     private final WorkflowService workflowService;
+    private final SchedulingService schedulingService;
 
-    public RadiotherapyController(PlanAdminService adminService, WorkflowService workflowService) {
+    public RadiotherapyController(PlanAdminService adminService, WorkflowService workflowService,
+                                  SchedulingService schedulingService) {
         this.adminService = adminService;
         this.workflowService = workflowService;
+        this.schedulingService = schedulingService;
     }
 
     // ---------------- 合成目录与计划设计 ----------------
@@ -104,6 +115,53 @@ public class RadiotherapyController {
     public ResponseEntity<Object> close(@Valid @RequestBody ClosureRequest request) {
         return toEntity(workflowService.close(request.patientId(), request.planCode(),
                 request.requestId()));
+    }
+
+    // ---------------- 设备时长配额与排程门禁 ----------------
+
+    /** 合成设备登记（版本从 1 开始）。 */
+    @PostMapping("/devices")
+    public ResponseEntity<Object> registerDevice(@Valid @RequestBody DeviceRegisterRequest request) {
+        return toEntity(schedulingService.registerDevice(request));
+    }
+
+    /** 设备能力变更（携带 expectedVersion；下调只阻断尚未开始项）。 */
+    @PostMapping("/devices/{deviceId}/capability")
+    public ResponseEntity<Object> updateDevice(@PathVariable String deviceId,
+                                               @Valid @RequestBody DeviceUpdateRequest request) {
+        return toEntity(schedulingService.updateDevice(deviceId, request));
+    }
+
+    /** 设备当前占用查询（占用中的排程项）。 */
+    @GetMapping("/devices/{deviceId}/occupancy")
+    public List<DeviceOccupancyItem> occupancy(@PathVariable String deviceId) {
+        return schedulingService.occupancy(deviceId);
+    }
+
+    /** 排程批量发布：冻结计划版本/等级/设备/窗口，任一冲突整批零占用。 */
+    @PostMapping("/schedules")
+    public ResponseEntity<Object> publishSchedule(@Valid @RequestBody SchedulePublishRequest request) {
+        return toEntity(schedulingService.publish(request));
+    }
+
+    /** 排程取消：未开始项释放占用，已完成项保留实绩。 */
+    @PostMapping("/schedules/{scheduleId}/cancellation")
+    public ResponseEntity<Object> cancelSchedule(@PathVariable long scheduleId,
+                                                 @Valid @RequestBody ScheduleCancelRequest request) {
+        return toEntity(schedulingService.cancel(scheduleId, request));
+    }
+
+    /** 患者+计划的排程批次查询。 */
+    @GetMapping("/patients/{patientId}/plans/{planCode}/schedules")
+    public List<ScheduleResponse> schedules(@PathVariable String patientId,
+                                            @PathVariable String planCode) {
+        return schedulingService.schedules(patientId, planCode);
+    }
+
+    /** 受控治疗记录：须在排程窗口内、匹配排程/计划版本、遵守顺序分次规则。 */
+    @PostMapping("/treatments")
+    public ResponseEntity<Object> treat(@Valid @RequestBody TreatmentRequest request) {
+        return toEntity(schedulingService.treat(request));
     }
 
     // ---------------- 复算与台账 ----------------

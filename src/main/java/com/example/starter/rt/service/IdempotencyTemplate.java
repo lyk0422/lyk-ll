@@ -66,6 +66,32 @@ public class IdempotencyTemplate {
         return result;
     }
 
+    /**
+     * 新增写操作的幂等执行：指纹为结构化规范 JSON（覆盖版本、集合与精确时刻），
+     * 仅首次成功（2xx）结果占键留痕；业务拒绝（4xx）不占键、可修正后重试。
+     * 同键同参重放首次冻结结果，同键异参 409。
+     */
+    public RecordedResponse executeOnSuccess(OperationType operation, String requestId,
+                                             Object structure, Supplier<RecordedResponse> action) {
+        String fingerprint = Fingerprint.structured(operation, requestId, structure);
+        Optional<IdempotentRow> existing = workflow.findIdempotent(requestId);
+        if (existing.isPresent()) {
+            return replayOrConflict(existing.get(), fingerprint);
+        }
+
+        RecordedResponse result = action.get();
+        if (result.httpStatus() >= 200 && result.httpStatus() < 300) {
+            try {
+                workflow.insertIdempotent(requestId, operation.name(), fingerprint,
+                        result.httpStatus(), writeJson(result.body()), LocalDateTime.now(clock));
+            } catch (DuplicateKeyException concurrent) {
+                throw ApiException.conflict("IDEMPOTENCY_RACE",
+                        "requestId=" + requestId + " 并发冲突，仅一个请求生效");
+            }
+        }
+        return result;
+    }
+
     private RecordedResponse replayOrConflict(IdempotentRow row, String fingerprint) {
         if (!row.fingerprint().equals(fingerprint)) {
             throw ApiException.conflict("IDEMPOTENCY_FINGERPRINT_CONFLICT",
