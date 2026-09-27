@@ -2,6 +2,8 @@ package com.example.starter.survey.service;
 
 import com.example.starter.survey.data.CertificateRepository;
 import com.example.starter.survey.data.DefectRepository;
+import com.example.starter.survey.data.FlagRecognitionRepository;
+import com.example.starter.survey.data.FlagReportRepository;
 import com.example.starter.survey.data.ShipRepository;
 import com.example.starter.survey.data.SurveyRepository;
 import com.example.starter.survey.domain.Certificate;
@@ -9,6 +11,8 @@ import com.example.starter.survey.domain.CertificateStatus;
 import com.example.starter.survey.domain.Defect;
 import com.example.starter.survey.domain.DefectSeverity;
 import com.example.starter.survey.domain.DefectStatus;
+import com.example.starter.survey.domain.FlagRecognition;
+import com.example.starter.survey.domain.FlagReport;
 import com.example.starter.survey.domain.Ship;
 import com.example.starter.survey.domain.Survey;
 import com.example.starter.survey.domain.SurveyStatus;
@@ -43,17 +47,23 @@ public class CertificateService {
     private final SurveyRepository surveyRepository;
     private final ShipRepository shipRepository;
     private final DefectRepository defectRepository;
+    private final FlagRecognitionRepository flagRecognitionRepository;
+    private final FlagReportRepository flagReportRepository;
     private final IdempotentExecutor executor;
 
     public CertificateService(CertificateRepository certificateRepository,
                               SurveyRepository surveyRepository,
                               ShipRepository shipRepository,
                               DefectRepository defectRepository,
+                              FlagRecognitionRepository flagRecognitionRepository,
+                              FlagReportRepository flagReportRepository,
                               IdempotentExecutor executor) {
         this.certificateRepository = certificateRepository;
         this.surveyRepository = surveyRepository;
         this.shipRepository = shipRepository;
         this.defectRepository = defectRepository;
+        this.flagRecognitionRepository = flagRecognitionRepository;
+        this.flagReportRepository = flagReportRepository;
         this.executor = executor;
     }
 
@@ -106,6 +116,10 @@ public class CertificateService {
                     throw new BusinessRuleException("DEFECT_OVERDUE",
                             "存在逾期未合格复查的缺陷，不得发证: defectId=" + d.id());
                 });
+
+        // 互认一致性：有效绑定冻结的报告修订须与报告当前修订一致（行锁报告，与更正事务互斥），
+        // 不得以旧互认可用标志发证；已失效绑定不再作为证据，不阻断正常门禁。
+        verifyRecognitionsConsistent(survey);
 
         // 行锁旧有效证书，随后“挂起插入新证 -> 旧证失效 -> 新证生效”同事务完成。
         Certificate old = certificateRepository.findValidForUpdate(ship.id(), survey.type())
@@ -163,5 +177,27 @@ public class CertificateService {
             case SPECIAL ->
                     survey.cycleAnchor().plusYears(5).plusMonths(3);
         };
+    }
+
+    /**
+     * 互认一致性校验：对该检验每个有效互认绑定行锁对应报告，
+     * 冻结修订视图后要求绑定修订号仍等于报告当前修订号；
+     * 与报告更正事务在同一报告行锁上互斥，保证不以旧互认可用标志发证。
+     */
+    private void verifyRecognitionsConsistent(Survey survey) {
+        List<FlagRecognition> recognitions =
+                flagRecognitionRepository.findActiveBySurvey(survey.id());
+        for (FlagRecognition recognition : recognitions) {
+            FlagReport report = flagReportRepository
+                    .findByIdForUpdate(recognition.reportId())
+                    .orElseThrow(() -> new ConflictException("REPORT_MISSING",
+                            "互认绑定引用的报告不存在: reportId=" + recognition.reportId()));
+            if (!report.currentRevision().equals(recognition.revision())) {
+                throw new BusinessRuleException("EVIDENCE_STALE",
+                        "互认绑定冻结的报告修订 " + recognition.revision()
+                                + " 已过期（当前修订 " + report.currentRevision()
+                                + "），不能以旧互认可用标志发证: recognitionId=" + recognition.id());
+            }
+        }
     }
 }

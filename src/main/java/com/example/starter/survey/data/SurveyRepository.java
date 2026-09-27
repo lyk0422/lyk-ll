@@ -131,4 +131,10 @@ public class SurveyRepository {
     public List<Survey> findAll() {
         return jdbc.query("SELECT * FROM survey ORDER BY id", MAPPER);
     }
+
+    /** 按主键查找并加行锁（报告更正与发证互斥用）。 */
+    public Optional<Survey> findByIdForUpdate(long id) {
+        return jdbc.query("SELECT * FROM survey WHERE id = ? FOR UPDATE", MAPPER, id)
+                .stream().findFirst();
+    }
 }

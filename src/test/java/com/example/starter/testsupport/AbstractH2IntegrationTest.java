@@ -35,6 +35,11 @@ public abstract class AbstractH2IntegrationTest {
 
     @BeforeEach
     void cleanDatabase() {
+        jdbc.update("DELETE FROM flag_risk_note");
+        jdbc.update("DELETE FROM flag_recognition");
+        jdbc.update("DELETE FROM flag_report_item");
+        jdbc.update("DELETE FROM flag_report_revision");
+        jdbc.update("DELETE FROM flag_report");
         jdbc.update("DELETE FROM survey_event");
         jdbc.update("DELETE FROM defect");
         jdbc.update("DELETE FROM certificate");
@@ -43,6 +48,7 @@ public abstract class AbstractH2IntegrationTest {
         jdbc.update("DELETE FROM idempotent_record");
         jdbc.update("DELETE FROM window_ledger");
         jdbc.update("DELETE FROM ship");
+        // flag_rule / flag_rule_item 为初始化基准规则数据，场景间保留。
         FixedClockTestConfig.CLOCK.setUtcDate(defaultClockDate());
     }
 
