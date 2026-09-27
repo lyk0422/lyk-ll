@@ -8,6 +8,9 @@ import com.example.starter.fermentation.api.BatchDtos.JudgeRequest;
 import com.example.starter.fermentation.api.BatchDtos.StartPhaseRequest;
 import com.example.starter.fermentation.api.BatchDtos.TemperatureReadingRequest;
 import com.example.starter.fermentation.api.BatchDtos.TransferRequest;
+import com.example.starter.fermentation.api.YeastDtos.PitchYeastRequest;
+import com.example.starter.fermentation.api.YeastDtos.RecoverYeastRequest;
+import com.example.starter.fermentation.api.YeastDtos.RegisterYeastRequest;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -51,6 +54,8 @@ public abstract class BaseFermentationTest {
         jdbc.update("DELETE FROM late_event");
         jdbc.update("DELETE FROM temperature_reading");
         jdbc.update("DELETE FROM diacetyl_test");
+        jdbc.update("DELETE FROM yeast_recovery");
+        jdbc.update("DELETE FROM yeast_unit");
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM fermentation_batch");
         jdbc.update("DELETE FROM curve_segment WHERE curve_id IN"
@@ -121,6 +126,35 @@ public abstract class BaseFermentationTest {
 
     MvcResult transfer(long batchId, String requestId, LocalDateTime at) throws Exception {
         return doPost("/api/batches/" + batchId + "/transfer", new TransferRequest(requestId, at));
+    }
+
+    /** 登记合成酵母单元，断言 201。 */
+    void registerYeast(String requestId, String unitCode) throws Exception {
+        MvcResult result = doPost("/api/yeast-units",
+                new RegisterYeastRequest(requestId, unitCode));
+        assertEquals(201, result.getResponse().getStatus(), "登记酵母单元应返回 201");
+    }
+
+    /** 受控投酵。 */
+    MvcResult pitch(long batchId, String requestId, String unitCode, int expectedVersion,
+                    LocalDateTime at) throws Exception {
+        return doPost("/api/batches/" + batchId + "/yeast-pitch",
+                new PitchYeastRequest(requestId, unitCode, expectedVersion, at));
+    }
+
+    /** 酵母回收。 */
+    MvcResult recoverYeast(long batchId, String requestId, int expectedVersion, LocalDateTime at,
+                           String viabilityPercent, boolean contaminated) throws Exception {
+        return doPost("/api/batches/" + batchId + "/yeast-recovery",
+                new RecoverYeastRequest(requestId, expectedVersion, at,
+                        new java.math.BigDecimal(viabilityPercent), contaminated));
+    }
+
+    /** 直接查询酵母单元 JSON。 */
+    JsonNode yeastUnit(String unitCode) throws Exception {
+        return json(mockMvc.perform(
+                org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .get("/api/yeast-units/" + unitCode)).andReturn());
     }
 
     /**

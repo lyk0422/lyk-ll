@@ -72,6 +72,33 @@ CREATE TABLE IF NOT EXISTS diacetyl_test (
     CONSTRAINT fk_diacetyl_batch FOREIGN KEY (batch_id) REFERENCES fermentation_batch (id)
 ) COMMENT '双乙酰检测记录（检测链按检测时间排序可复算）';
 
+CREATE TABLE IF NOT EXISTS yeast_unit (
+    unit_code VARCHAR(64) NOT NULL COMMENT '合成酵母单元唯一编号',
+    generation INT NOT NULL COMMENT '当前代次：登记初始 0，每次合格回收加 1；代次 6 不可启动新主酵，最大可用代次恰 5',
+    status VARCHAR(16) NOT NULL COMMENT '单元状态：AVAILABLE 可用 / IN_USE 使用中（已绑定主酵批次）/ SCRAPPED 已报废不可再投酵',
+    last_recovered_at TIMESTAMP NULL COMMENT '最近一次合格回收时刻；首次单元从未回收为 NULL，不受 72 小时时限约束',
+    occupied_by_batch_id BIGINT NULL COMMENT '当前占用该单元的主酵批次 ID，未占用为 NULL；一单元同时刻仅供一个主酵批次',
+    version INT NOT NULL COMMENT '乐观版本号，从 1 开始，每次成功变更更加 1',
+    PRIMARY KEY (unit_code),
+    CONSTRAINT fk_yeast_occupied_batch FOREIGN KEY (occupied_by_batch_id) REFERENCES fermentation_batch (id)
+) COMMENT '合成酵母单元：代次限用、状态与最近回收时刻';
+
+CREATE TABLE IF NOT EXISTS yeast_recovery (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    unit_code VARCHAR(64) NOT NULL COMMENT '回收的酵母单元编号',
+    batch_id BIGINT NOT NULL COMMENT '发起回收的批次 ID；同批次（含失败批次）仅允许回收一次',
+    recovered_at TIMESTAMP NOT NULL COMMENT '回收受理时刻（业务时间）',
+    viability_percent DECIMAL(5,2) NOT NULL COMMENT '回收活率百分数，单位 %；恰 90.00 合格，低于 90.00 报废',
+    contaminated TINYINT NOT NULL COMMENT '是否检出污染：0 无污染 / 1 污染（污染即报废）',
+    qualified TINYINT NOT NULL COMMENT '回收判定：活率 ≥ 90% 且无污染为 1，否则 0',
+    generation_after INT NOT NULL COMMENT '回收后代次：合格时代次加 1，报废时代次不变',
+    status_after VARCHAR(16) NOT NULL COMMENT '回收后单元状态：合格 AVAILABLE / 不合格 SCRAPPED',
+    created_at TIMESTAMP NOT NULL COMMENT '回收记录创建时间',
+    CONSTRAINT uk_yeast_recovery_batch UNIQUE (batch_id),
+    CONSTRAINT fk_recovery_yeast FOREIGN KEY (unit_code) REFERENCES yeast_unit (unit_code),
+    CONSTRAINT fk_recovery_batch FOREIGN KEY (batch_id) REFERENCES fermentation_batch (id)
+) COMMENT '酵母回收追溯记录（每批次最多一条，与解除批次占用同事务提交）';
+
 CREATE TABLE IF NOT EXISTS idempotency_record (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     request_id VARCHAR(128) NOT NULL COMMENT '幂等请求键，全局唯一',

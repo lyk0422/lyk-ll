@@ -93,6 +93,19 @@ public class BatchRepository {
     }
 
     /**
+     * 受控投酵使用的条件更新：仅当批次仍为 FILLED 时启动主酵。
+     * 与酵母单元原子绑定处于同一事务，若批次已被历史入口或并发请求启动则返回 0，整体回滚。
+     *
+     * @return 受影响行数；0 表示批次已不在 FILLED 状态
+     */
+    public int tryStartMainFerment(long id, LocalDateTime startedAt) {
+        return jdbc.update("UPDATE fermentation_batch SET status = ?, main_ferment_started_at = ?"
+                        + " WHERE id = ? AND status = ?",
+                BatchStatus.MAIN_FERMENT.name(), Timestamp.valueOf(startedAt), id,
+                BatchStatus.FILLED.name());
+    }
+
+    /**
      * 降温指令与曲线版本切换同事务更新：MAIN_FERMENT → COOLING，并切换到新曲线版本。
      */
     public void applyCooling(long id, int newCurveVersion, LocalDateTime instructedAt) {

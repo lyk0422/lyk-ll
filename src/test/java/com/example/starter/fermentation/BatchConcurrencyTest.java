@@ -45,6 +45,8 @@ class BatchConcurrencyTest {
         jdbc.update("DELETE FROM late_event");
         jdbc.update("DELETE FROM temperature_reading");
         jdbc.update("DELETE FROM diacetyl_test");
+        jdbc.update("DELETE FROM yeast_recovery");
+        jdbc.update("DELETE FROM yeast_unit");
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM fermentation_batch");
 
