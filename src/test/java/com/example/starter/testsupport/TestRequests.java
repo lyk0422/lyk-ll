@@ -1,9 +1,13 @@
 package com.example.starter.testsupport;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
 
+import com.example.starter.api.dto.AcquisitionBatchRequest;
+import com.example.starter.api.dto.AcquisitionSessionCloseRequest;
+import com.example.starter.api.dto.AcquisitionSessionCreateRequest;
 import com.example.starter.api.dto.CoverageRequest;
 import com.example.starter.api.dto.DispatchRequest;
 import com.example.starter.api.dto.InspectionRequest;
@@ -64,5 +68,27 @@ public final class TestRequests {
 
     public static ReleaseRequest release(String requestId, String cardNo, String releasedBy) {
         return new ReleaseRequest(requestId, cardNo, releasedBy);
+    }
+
+    /** 采集会话创建：绑定工序卡全部默认紧固点 P1、P2。 */
+    public static AcquisitionSessionCreateRequest acqSession(String requestId, String sessionNo,
+                                                             String cardNo, String toolCode) {
+        return new AcquisitionSessionCreateRequest(requestId, sessionNo, cardNo, toolCode,
+                List.of("P1", "P2"));
+    }
+
+    public static AcquisitionBatchRequest.Packet packet(int seq, String pointCode,
+                                                        String measuredAt, String torque) {
+        return new AcquisitionBatchRequest.Packet(seq, pointCode, Instant.parse(measuredAt),
+                new BigDecimal(torque));
+    }
+
+    public static AcquisitionBatchRequest batch(String requestId, long expectedVersion,
+                                                AcquisitionBatchRequest.Packet... packets) {
+        return new AcquisitionBatchRequest(requestId, expectedVersion, List.of(packets));
+    }
+
+    public static AcquisitionSessionCloseRequest close(String requestId, long expectedVersion) {
+        return new AcquisitionSessionCloseRequest(requestId, expectedVersion);
     }
 }

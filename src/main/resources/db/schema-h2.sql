@@ -128,6 +128,64 @@ CREATE TABLE IF NOT EXISTS late_measurement_event (
 );
 CREATE INDEX IF NOT EXISTS idx_late_card ON late_measurement_event (card_id);
 
+-- 本地力矩采集会话：绑定工序卡、力矩工具及其日校验版本（创建时快照），
+-- 维护连续水位线（只推进到连续完整前缀）与乐观版本（从 1 开始，成功变更加 1）。
+CREATE TABLE IF NOT EXISTS acquisition_session (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    session_no       VARCHAR(64)  NOT NULL COMMENT '采集会话号（全库唯一）',
+    card_no          VARCHAR(64)  NOT NULL COMMENT '绑定工序卡编号',
+    tool_code        VARCHAR(64)  NOT NULL COMMENT '绑定力矩工具编号',
+    calibration_date DATE         NOT NULL COMMENT '绑定工具日校验版本(UTC日期快照)，前缀入账时按测量时刻校验当日有效',
+    watermark        INT          NOT NULL DEFAULT 0 COMMENT '连续水位线：已入账的最大连续序号，0=尚未入账',
+    status           VARCHAR(16)  NOT NULL COMMENT '会话状态：OPEN=采集中/CLOSED=已关闭(终态)',
+    version          INT          NOT NULL DEFAULT 1 COMMENT '乐观锁版本，从1开始，每次成功变更加1',
+    created_at       TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    closed_at        TIMESTAMP(6) NULL     COMMENT '关会话时间(UTC)，NULL=未关闭',
+    CONSTRAINT uk_acquisition_session_no UNIQUE (session_no)
+);
+CREATE INDEX IF NOT EXISTS idx_acquisition_card ON acquisition_session (card_no);
+
+-- 采集会话绑定的紧固点清单：上传包点号必须落在清单内，否则整批拒绝。
+CREATE TABLE IF NOT EXISTS acquisition_session_point (
+    id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+    session_id BIGINT      NOT NULL COMMENT '所属采集会话',
+    point_code VARCHAR(64) NOT NULL COMMENT '绑定紧固点编号',
+    CONSTRAINT uk_acquisition_session_point UNIQUE (session_id, point_code)
+);
+
+-- 采集批次证据：每次成功上传一批（含全重放批与归档后迟到批）；校验失败的批次整批回滚不入账。
+CREATE TABLE IF NOT EXISTS acquisition_batch (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_no        VARCHAR(64)  NOT NULL COMMENT '批次号（上传请求 requestId）',
+    session_id      BIGINT       NOT NULL COMMENT '所属采集会话',
+    packet_count    INT          NOT NULL COMMENT '本批包数',
+    accepted_count  INT          NOT NULL COMMENT '新接受包数（不含同内容重放）',
+    replayed_count  INT          NOT NULL COMMENT '同内容重放跳过包数',
+    committed_count INT          NOT NULL COMMENT '本批触发前缀入账包数',
+    late_count      INT          NOT NULL COMMENT '归档后迟到登记包数',
+    watermark_after INT          NOT NULL COMMENT '本批处理后的水位线',
+    created_at      TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    CONSTRAINT uk_acquisition_batch_no UNIQUE (batch_no)
+);
+CREATE INDEX IF NOT EXISTS idx_acquisition_batch_session ON acquisition_batch (session_id);
+
+-- 原始采集包：同会话同序号唯一；同内容重放不追加，异内容 409。
+-- 仅缓冲水位线之后第 1~20 号的乱序包；缺号包保持 BUFFERED，不参与自检互检与见证放行。
+CREATE TABLE IF NOT EXISTS acquisition_packet (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    session_id      BIGINT        NOT NULL COMMENT '所属采集会话',
+    seq             INT           NOT NULL COMMENT '会话内序号，从1开始连续',
+    point_code      VARCHAR(64)   NOT NULL COMMENT '紧固点编号',
+    measured_torque DECIMAL(12,3) NOT NULL COMMENT '实测力矩(N·m)，有限正数',
+    measured_at     TIMESTAMP(6)  NOT NULL COMMENT '测量时刻(UTC)',
+    status          VARCHAR(16)   NOT NULL COMMENT 'BUFFERED=已缓冲待补缺口/COMMITTED=已入账/LATE=归档后迟到仅记录',
+    content_hash    CHAR(64)      NOT NULL COMMENT '包内容指纹(SHA-256)，同序号异内容判 409',
+    batch_no        VARCHAR(64)   NOT NULL COMMENT '接受该包的批次号',
+    created_at      TIMESTAMP(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    CONSTRAINT uk_acquisition_packet_seq UNIQUE (session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_acquisition_packet_session ON acquisition_packet (session_id);
+
 -- 幂等请求台账：指纹覆盖 requestId 与全部业务字段，同键异参冲突 (409)。
 CREATE TABLE IF NOT EXISTS idempotent_request (
     request_id    VARCHAR(64)  NOT NULL COMMENT '幂等请求号（主键）',

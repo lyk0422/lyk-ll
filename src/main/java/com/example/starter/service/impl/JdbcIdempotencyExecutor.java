@@ -58,6 +58,28 @@ public class JdbcIdempotencyExecutor implements IdempotencyExecutor {
         }
     }
 
+    @Override
+    public Outcome executeTransient(String requestId, String operation, Object businessFields,
+                                    Supplier<Outcome> action) {
+        String fingerprint = fingerprint(requestId, operation, businessFields);
+        try {
+            return transactionTemplate.execute(status -> doInTransaction(requestId, operation, fingerprint, action));
+        } catch (LostIdempotencyRaceException lostRace) {
+            // 并发同键落败：本事务已回滚，转读获胜方首次结果。
+            return resolveExisting(requireEntry(requestId), fingerprint);
+        } catch (ApiException businessFailure) {
+            // 失败不占键：业务事务已回滚。但并发同键场景下，本请求可能因等待胜方行锁
+            // 而在胜方提交后才执行业务校验（如版本冲突）；此时胜方结果已可见，应重放之。
+            LedgerEntry winner = findEntry(requestId);
+            if (winner != null) {
+                return resolveExisting(winner, fingerprint);
+            }
+            // 真正的首次失败：直接返回错误，不登记台账。
+            return Outcome.of(businessFailure.getStatus(),
+                    Map.of("errorCode", businessFailure.getErrorCode(), "message", businessFailure.getMessage()));
+        }
+    }
+
     private Outcome doInTransaction(String requestId, String operation, String fingerprint,
                                     Supplier<Outcome> action) {
         LedgerEntry existing = findEntry(requestId);

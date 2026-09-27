@@ -18,4 +18,12 @@ public interface IdempotencyExecutor {
      * @return 首次结果或重放结果
      */
     Outcome execute(String requestId, String operation, Object businessFields, Supplier<Outcome> action);
+
+    /**
+     * 失败不占键的幂等执行：同键同参重放首次冻结结果、同键异参 409；
+     * 业务拒绝（{@link com.example.starter.support.ApiException}）仅回滚并返回错误，
+     * 不登记台账，调用方修正参数后可复用同一 requestId。
+     */
+    Outcome executeTransient(String requestId, String operation, Object businessFields,
+                             Supplier<Outcome> action);
 }

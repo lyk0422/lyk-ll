@@ -40,6 +40,10 @@ class OperationHttpFlowTest {
 
     @BeforeEach
     void clean() {
+        jdbcTemplate.update("DELETE FROM acquisition_packet");
+        jdbcTemplate.update("DELETE FROM acquisition_batch");
+        jdbcTemplate.update("DELETE FROM acquisition_session_point");
+        jdbcTemplate.update("DELETE FROM acquisition_session");
         jdbcTemplate.update("DELETE FROM late_measurement_event");
         jdbcTemplate.update("DELETE FROM release_record");
         jdbcTemplate.update("DELETE FROM witness_record");

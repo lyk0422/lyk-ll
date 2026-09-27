@@ -29,6 +29,7 @@ import com.example.starter.api.dto.WitnessResult;
 import com.example.starter.domain.CardStatus;
 import com.example.starter.domain.TorqueMath;
 import com.example.starter.domain.WitnessStatus;
+import com.example.starter.persistence.AcquisitionRepository;
 import com.example.starter.persistence.CardRepository;
 import com.example.starter.persistence.CardRow;
 import com.example.starter.persistence.FastenerRow;
@@ -65,6 +66,7 @@ public class OperationServiceImpl implements OperationService {
     private final WitnessRepository witnessRepository;
     private final ReleaseRepository releaseRepository;
     private final ToolRepository toolRepository;
+    private final AcquisitionRepository acquisitionRepository;
 
     public OperationServiceImpl(Clock clock,
                                 IdempotencyExecutor idempotencyExecutor,
@@ -73,7 +75,8 @@ public class OperationServiceImpl implements OperationService {
                                 InspectionRepository inspectionRepository,
                                 WitnessRepository witnessRepository,
                                 ReleaseRepository releaseRepository,
-                                ToolRepository toolRepository) {
+                                ToolRepository toolRepository,
+                                AcquisitionRepository acquisitionRepository) {
         this.clock = clock;
         this.idempotencyExecutor = idempotencyExecutor;
         this.cardRepository = cardRepository;
@@ -82,6 +85,7 @@ public class OperationServiceImpl implements OperationService {
         this.witnessRepository = witnessRepository;
         this.releaseRepository = releaseRepository;
         this.toolRepository = toolRepository;
+        this.acquisitionRepository = acquisitionRepository;
     }
 
     // ------------------------------------------------------------------
@@ -402,6 +406,12 @@ public class OperationServiceImpl implements OperationService {
             }
             if (card.status() == CardStatus.QUARANTINED) {
                 throw ApiException.unprocessable("CARD_QUARANTINED", "整批隔离评审中，不得放行归档");
+            }
+            // 工序归档前全部采集会话必须已关闭。
+            int openSessions = acquisitionRepository.countOpenByCard(card.cardNo());
+            if (openSessions > 0) {
+                throw ApiException.unprocessable("ACQUISITION_SESSION_OPEN",
+                        "存在 " + openSessions + " 个未关闭的采集会话，不得放行归档");
             }
             if ("H".equals(card.witnessPoint())) {
                 if (card.status() != CardStatus.WITNESSED) {
