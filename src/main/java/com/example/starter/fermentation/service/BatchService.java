@@ -13,15 +13,20 @@ import com.example.starter.fermentation.api.BatchDtos.ReadingResponse;
 import com.example.starter.fermentation.api.BatchDtos.StartPhaseRequest;
 import com.example.starter.fermentation.api.BatchDtos.TemperatureReadingRequest;
 import com.example.starter.fermentation.api.BatchDtos.TransferRequest;
+import com.example.starter.fermentation.api.YeastDtos.ControlledStartRequest;
+import com.example.starter.fermentation.api.YeastDtos.ControlledStartResponse;
 import com.example.starter.fermentation.domain.BatchStatus;
 import com.example.starter.fermentation.domain.CurvePhase;
 import com.example.starter.fermentation.domain.DiacetylTest;
 import com.example.starter.fermentation.domain.FermentationBatch;
 import com.example.starter.fermentation.domain.TemperatureReading;
+import com.example.starter.fermentation.domain.YeastUnit;
+import com.example.starter.fermentation.domain.YeastUnitStatus;
 import com.example.starter.fermentation.error.ApiException;
 import com.example.starter.fermentation.repository.BatchRepository;
 import com.example.starter.fermentation.repository.CurveRepository;
 import com.example.starter.fermentation.repository.ReadingRepository;
+import com.example.starter.fermentation.repository.YeastRepository;
 import com.example.starter.fermentation.service.IdempotencyService.ConcurrentReplayException;
 import com.example.starter.fermentation.service.IdempotencyService.StoredResponse;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -66,15 +71,17 @@ public class BatchService {
     private final BatchRepository batchRepository;
     private final CurveRepository curveRepository;
     private final ReadingRepository readingRepository;
+    private final YeastRepository yeastRepository;
     private final IdempotencyService idempotencyService;
     private final ObjectMapper objectMapper;
 
     public BatchService(BatchRepository batchRepository, CurveRepository curveRepository,
-                        ReadingRepository readingRepository, IdempotencyService idempotencyService,
-                        ObjectMapper objectMapper) {
+                        ReadingRepository readingRepository, YeastRepository yeastRepository,
+                        IdempotencyService idempotencyService, ObjectMapper objectMapper) {
         this.batchRepository = batchRepository;
         this.curveRepository = curveRepository;
         this.readingRepository = readingRepository;
+        this.yeastRepository = yeastRepository;
         this.idempotencyService = idempotencyService;
         this.objectMapper = objectMapper;
     }
@@ -117,6 +124,57 @@ public class BatchService {
             requireStatus(batch, BatchStatus.FILLED, "仅满罐批次可开始主酵");
             batchRepository.startMainFerment(batchId, req.startedAt());
             return new StoredResponse(200, toJson(toResponse(mustFind(batchId))));
+        });
+    }
+
+    /**
+     * 受控启动主酵：FILLED → MAIN_FERMENT，必须指定酵母并原子绑定。
+     * 酵母当前代次 ≤ 5（恰 5 允许本次投酵）且状态可用、未失效（距最近回收超过 72 小时
+     * 失效，恰 72 小时仍可用，首次登记无回收时刻不受限）；绑定与批次状态流转同事务，
+     * 重复启动（同键重放或状态校验）不重复增加投酵绑定。
+     */
+    @Transactional
+    public StoredResponse startMainFermentControlled(long batchId, ControlledStartRequest req) {
+        String endpoint = "POST /api/batches/" + batchId + "/main-ferment/start-controlled";
+        String fingerprint = idempotencyService.fingerprint(endpoint, req.requestId(),
+                req.yeastCode(), req.expectedVersion().toString(), req.startedAt().toString());
+        return idempotent(req.requestId(), endpoint, fingerprint, () -> {
+            FermentationBatch batch = mustFind(batchId);
+            requireStatus(batch, BatchStatus.FILLED, "仅满罐批次可开始主酵");
+            YeastUnit unit = yeastRepository.findByCode(req.yeastCode())
+                    .orElseThrow(() -> ApiException.notFound("酵母单元不存在: " + req.yeastCode()));
+            if (unit.version() != req.expectedVersion()) {
+                throw ApiException.conflict("酵母单元版本不匹配：期望 " + req.expectedVersion()
+                        + "，当前 " + unit.version() + "，请刷新后重试");
+            }
+            if (unit.status() != YeastUnitStatus.AVAILABLE) {
+                throw ApiException.unprocessable("酵母单元当前状态 " + unit.status()
+                        + " 不可投酵（仅 AVAILABLE 可投酵）");
+            }
+            if (unit.generation() > YeastService.MAX_PITCH_GENERATION) {
+                throw ApiException.unprocessable("酵母单元代次 " + unit.generation()
+                        + " 已超出限用代次 " + YeastService.MAX_PITCH_GENERATION + "，不可投酵");
+            }
+            if (unit.lastRecoveredAt() != null && req.startedAt()
+                    .isAfter(unit.lastRecoveredAt().plusHours(YeastService.EXPIRY_HOURS))) {
+                throw ApiException.unprocessable("酵母单元距最近回收已超过 "
+                        + YeastService.EXPIRY_HOURS + " 小时，已失效不可投酵");
+            }
+            int updated = yeastRepository.bindToBatch(unit.id(), batchId, req.expectedVersion());
+            if (updated == 0) {
+                // 并发下状态或版本已变化：重读最新状态，按提交顺序裁决
+                YeastUnit latest = yeastRepository.findByCode(req.yeastCode()).orElseThrow();
+                if (latest.status() != YeastUnitStatus.AVAILABLE) {
+                    throw ApiException.unprocessable("酵母单元已并发绑定其他批次（当前状态 "
+                            + latest.status() + "），本次投酵不予受理");
+                }
+                throw ApiException.conflict("酵母单元版本已并发变更：期望 " + req.expectedVersion()
+                        + "，当前 " + latest.version());
+            }
+            batchRepository.startMainFerment(batchId, req.startedAt());
+            return new StoredResponse(200, toJson(new ControlledStartResponse(batchId,
+                    BatchStatus.MAIN_FERMENT, unit.yeastCode(), unit.generation(),
+                    req.expectedVersion() + 1, req.startedAt())));
         });
     }
 

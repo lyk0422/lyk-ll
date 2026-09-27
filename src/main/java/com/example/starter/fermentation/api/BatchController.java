@@ -8,6 +8,7 @@ import com.example.starter.fermentation.api.BatchDtos.JudgeRequest;
 import com.example.starter.fermentation.api.BatchDtos.StartPhaseRequest;
 import com.example.starter.fermentation.api.BatchDtos.TemperatureReadingRequest;
 import com.example.starter.fermentation.api.BatchDtos.TransferRequest;
+import com.example.starter.fermentation.api.YeastDtos.ControlledStartRequest;
 import com.example.starter.fermentation.domain.CurvePhase;
 import com.example.starter.fermentation.service.BatchService;
 import com.example.starter.fermentation.service.IdempotencyService.StoredResponse;
@@ -45,6 +46,12 @@ public class BatchController {
     public ResponseEntity<String> startMainFerment(@PathVariable long id,
                                                    @Valid @RequestBody StartPhaseRequest request) {
         return respond(batchService.startMainFerment(id, request));
+    }
+
+    @PostMapping("/{id}/main-ferment/start-controlled")
+    public ResponseEntity<String> startMainFermentControlled(
+            @PathVariable long id, @Valid @RequestBody ControlledStartRequest request) {
+        return respond(batchService.startMainFermentControlled(id, request));
     }
 
     @PostMapping("/{id}/temperature-readings")

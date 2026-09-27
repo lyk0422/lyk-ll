@@ -8,6 +8,9 @@ import com.example.starter.fermentation.api.BatchDtos.JudgeRequest;
 import com.example.starter.fermentation.api.BatchDtos.StartPhaseRequest;
 import com.example.starter.fermentation.api.BatchDtos.TemperatureReadingRequest;
 import com.example.starter.fermentation.api.BatchDtos.TransferRequest;
+import com.example.starter.fermentation.api.YeastDtos.ControlledStartRequest;
+import com.example.starter.fermentation.api.YeastDtos.RecycleRequest;
+import com.example.starter.fermentation.api.YeastDtos.RegisterYeastRequest;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -52,6 +55,8 @@ public abstract class BaseFermentationTest {
         jdbc.update("DELETE FROM temperature_reading");
         jdbc.update("DELETE FROM diacetyl_test");
         jdbc.update("DELETE FROM idempotency_record");
+        jdbc.update("DELETE FROM yeast_recycle_record");
+        jdbc.update("DELETE FROM yeast_unit");
         jdbc.update("DELETE FROM fermentation_batch");
         jdbc.update("DELETE FROM curve_segment WHERE curve_id IN"
                 + " (SELECT id FROM process_curve WHERE version > 1)");
@@ -145,5 +150,52 @@ public abstract class BaseFermentationTest {
     /** 后熟开始时间（与 {@link #driveToMaturation} 保持一致）。 */
     LocalDateTime maturationStart() {
         return T0.plusHours(15);
+    }
+
+    /** 登记酵母单元。 */
+    MvcResult registerYeast(String requestId, String yeastCode) throws Exception {
+        return doPost("/api/yeast-units", new RegisterYeastRequest(requestId, yeastCode));
+    }
+
+    /** 查询酵母单元详情。 */
+    JsonNode getYeast(String yeastCode) throws Exception {
+        MvcResult result = mockMvc.perform(
+                org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .get("/api/yeast-units/" + yeastCode)).andReturn();
+        assertEquals(200, result.getResponse().getStatus(), "查询酵母单元应返回 200");
+        return json(result);
+    }
+
+    /** 受控启动主酵（指定酵母与版本）。 */
+    MvcResult controlledStart(long batchId, String requestId, String yeastCode,
+                              int expectedVersion, LocalDateTime at) throws Exception {
+        return doPost("/api/batches/" + batchId + "/main-ferment/start-controlled",
+                new ControlledStartRequest(requestId, yeastCode, expectedVersion, at));
+    }
+
+    /** 回收酵母。 */
+    MvcResult recycle(String yeastCode, String requestId, long batchId, int expectedVersion,
+                      String viabilityPercent, boolean contaminated, LocalDateTime at)
+            throws Exception {
+        return doPost("/api/yeast-units/" + yeastCode + "/recycle",
+                new RecycleRequest(requestId, batchId, expectedVersion,
+                        new BigDecimal(viabilityPercent), contaminated, at));
+    }
+
+    /**
+     * 驱动批次完成主酵进入降温：满罐 → 主酵 → 两次合格双乙酰（间隔 13h）→ 降温。
+     *
+     * @return 批次 ID；降温指令时间为 {@code T0 + 14h}
+     */
+    long driveToCooling(String batchNo, String tankCode) throws Exception {
+        long id = createBatch(newRequestId(), batchNo, tankCode);
+        startMainFerment(id, newRequestId(), T0);
+        assertEquals(201, addDiacetyl(id, newRequestId(), T0.plusHours(1), "0.09")
+                .getResponse().getStatus());
+        assertEquals(201, addDiacetyl(id, newRequestId(), T0.plusHours(14), "0.08")
+                .getResponse().getStatus());
+        assertEquals(200, cooling(id, newRequestId(), T0.plusHours(14))
+                .getResponse().getStatus());
+        return id;
     }
 }

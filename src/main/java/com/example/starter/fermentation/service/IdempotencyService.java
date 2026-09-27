@@ -40,12 +40,16 @@ public class IdempotencyService {
     }
 
     /**
-     * 计算请求指纹：SHA-256(endpoint | requestId | 业务字段...)。
+     * 计算请求指纹：SHA-256(长度前缀编码(endpoint, requestId, 业务字段...))。
+     * 每个字段以 "长度:内容;" 编码，自描述无歧义：字段内容含 '|'、':'、';' 等
+     * 分隔符时仍能与相邻字段严格区分。
      */
     public String fingerprint(String endpoint, String requestId, String... businessFields) {
-        StringBuilder canonical = new StringBuilder(endpoint).append('|').append(requestId);
+        StringBuilder canonical = new StringBuilder();
+        appendField(canonical, endpoint);
+        appendField(canonical, requestId);
         for (String field : businessFields) {
-            canonical.append('|').append(field);
+            appendField(canonical, field);
         }
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -54,6 +58,10 @@ public class IdempotencyService {
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 不可用", e);
         }
+    }
+
+    private static void appendField(StringBuilder canonical, String field) {
+        canonical.append(field.length()).append(':').append(field).append(';');
     }
 
     /**
