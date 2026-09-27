@@ -81,6 +81,15 @@ public class CardRepository {
         return rows.isEmpty() ? null : rows.get(0);
     }
 
+    /** 按主键查询工序卡。 */
+    public CardRow findById(long cardId) {
+        List<CardRow> rows = jdbcTemplate.query(
+                "SELECT id, card_no, station, product_sn, witness_point, status, operator, dispatched_at, "
+                        + "quarantined_at, archived_at FROM operation_card WHERE id = ?",
+                CARD_MAPPER, cardId);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
     public void updateStatus(long cardId, CardStatus status) {
         int updated = jdbcTemplate.update(
                 "UPDATE operation_card SET status = ? WHERE id = ?", status.name(), cardId);

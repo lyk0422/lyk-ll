@@ -46,6 +46,9 @@ class OperationHttpFlowTest {
         jdbcTemplate.update("DELETE FROM inspection_record");
         jdbcTemplate.update("DELETE FROM rework_record");
         jdbcTemplate.update("DELETE FROM torque_record");
+        jdbcTemplate.update("DELETE FROM collection_packet");
+        jdbcTemplate.update("DELETE FROM collection_session_point");
+        jdbcTemplate.update("DELETE FROM collection_session");
         jdbcTemplate.update("DELETE FROM torque_tool");
         jdbcTemplate.update("DELETE FROM fastener");
         jdbcTemplate.update("DELETE FROM station_guard");

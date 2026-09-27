@@ -58,6 +58,75 @@ public class JdbcIdempotencyExecutor implements IdempotencyExecutor {
         }
     }
 
+    @Override
+    public Outcome executeSuccessOnly(String requestId, String operation, Object businessFields,
+                                      Supplier<Outcome> action) {
+        String fingerprint = fingerprint(requestId, operation, businessFields);
+        try {
+            return transactionTemplate.execute(status -> doSuccessOnlyInTransaction(
+                    requestId, operation, fingerprint, action));
+        } catch (LostIdempotencyRaceException lostRace) {
+            // 并发同键落败：本事务（含全部业务写入）已回滚，转读获胜方冻结结果。
+            return resolveExisting(requireEntry(requestId), fingerprint);
+        } catch (ApiException businessFailure) {
+            // 业务失败：事务已回滚且未登记台账，原键不被占用。若并发获胜方已落键则重放获胜结果。
+            LedgerEntry winner = findEntry(requestId);
+            if (winner != null) {
+                return resolveExisting(winner, fingerprint);
+            }
+            return Outcome.of(businessFailure.getStatus(), java.util.Map.of(
+                    "errorCode", businessFailure.getErrorCode(), "message", businessFailure.getMessage()));
+        } catch (BusinessFailureNoKeyException businessFailure) {
+            // 以 4xx Outcome 返回的失败：事务已回滚，不占键，失败 Outcome 原样返回。
+            return businessFailure.outcome;
+        }
+    }
+
+    private Outcome doSuccessOnlyInTransaction(String requestId, String operation, String fingerprint,
+                                               Supplier<Outcome> action) {
+        LedgerEntry existing = findEntry(requestId);
+        if (existing != null) {
+            return resolveExisting(existing, fingerprint);
+        }
+        Outcome outcome;
+        try {
+            outcome = action.get();
+        } catch (ApiException businessFailure) {
+            // 会话行锁把同键并发串行化：落败方执行到此处时获胜方已提交台账行，转重放获胜结果；
+            // 否则为真实业务失败，重新抛出使整事务回滚且不占键。
+            if (findEntry(requestId) != null) {
+                throw new LostIdempotencyRaceException();
+            }
+            throw businessFailure;
+        } catch (DuplicateKeyException uniqueViolation) {
+            if (findEntry(requestId) != null) {
+                throw new LostIdempotencyRaceException();
+            }
+            // 业务唯一约束冲突（服务层已在锁内预检，兜底）：回滚且不占键，按冲突拒绝。
+            throw ApiException.conflict("BATCH_REJECTED", "并发唯一约束冲突，整批拒绝");
+        }
+        if (outcome.status() >= 400) {
+            // 以响应体形式返回的失败：整事务回滚且不占键。
+            throw new BusinessFailureNoKeyException(outcome);
+        }
+        try {
+            insertEntry(requestId, operation, fingerprint, outcome);
+        } catch (DuplicateKeyException lostRace) {
+            throw new LostIdempotencyRaceException();
+        }
+        return outcome;
+    }
+
+    /** 业务以失败 Outcome（非 2xx）返回时触发回滚且不占键，失败结果原样抛给调用方。 */
+    private static class BusinessFailureNoKeyException extends RuntimeException {
+        private final Outcome outcome;
+
+        BusinessFailureNoKeyException(Outcome outcome) {
+            super("business outcome " + outcome.status());
+            this.outcome = outcome;
+        }
+    }
+
     private Outcome doInTransaction(String requestId, String operation, String fingerprint,
                                     Supplier<Outcome> action) {
         LedgerEntry existing = findEntry(requestId);

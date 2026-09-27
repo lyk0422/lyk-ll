@@ -128,6 +128,52 @@ CREATE TABLE IF NOT EXISTS late_measurement_event (
 );
 CREATE INDEX IF NOT EXISTS idx_late_card ON late_measurement_event (card_id);
 
+-- 本地力矩采集会话：绑定工具日校验版本（工具编号 + 绑定当日校验日期快照）、工序卡与紧固点清单。
+-- 设备不联网，原始包仅经本地 HTTP 提交；version 为乐观版本（从 1 开始，每次成功变更加 1），
+-- watermark 为已连续入账前缀长度（从 0 开始，只推进到连续完整前缀）。
+CREATE TABLE IF NOT EXISTS collection_session (
+    id                 BIGINT AUTO_INCREMENT PRIMARY KEY,
+    session_no         VARCHAR(64)  NOT NULL COMMENT '采集会话号（全库唯一）',
+    card_id            BIGINT       NOT NULL COMMENT '绑定的工序卡',
+    tool_code          VARCHAR(64)  NOT NULL COMMENT '绑定的力矩工具编号',
+    calibration_date   DATE         NOT NULL COMMENT '绑定时工具日校验日期(UTC)快照；入账时另按测量时刻复核',
+    status             VARCHAR(16)  NOT NULL COMMENT '会话状态：OPEN=采集中，CLOSED=已关闭（终态）',
+    version            INT          NOT NULL COMMENT '乐观版本号：创建为 1，每次成功变更加 1',
+    watermark          INT          NOT NULL COMMENT '连续入账水位线：1..watermark 均已入账，缺号不推进',
+    expected_count     INT          NOT NULL COMMENT '计划采集包总数（序号 1..expected_count）',
+    created_at         TIMESTAMP(6) NOT NULL COMMENT '会话创建时间(UTC)',
+    closed_at          TIMESTAMP(6) NULL     COMMENT '会话关闭时间(UTC)，NULL=未关闭',
+    CONSTRAINT uk_collection_session_no UNIQUE (session_no)
+);
+CREATE INDEX IF NOT EXISTS idx_collection_session_card ON collection_session (card_id);
+
+-- 会话绑定的紧固点清单：仅清单内点号合法，未知点整批拒绝。
+CREATE TABLE IF NOT EXISTS collection_session_point (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    session_id  BIGINT      NOT NULL COMMENT '所属采集会话',
+    point_code  VARCHAR(64) NOT NULL COMMENT '紧固点编号（须存在于绑定工序卡）',
+    CONSTRAINT uk_collection_session_point UNIQUE (session_id, point_code)
+);
+
+-- 采集原始包证据（追加链）：同会话同序号在非迟到状态下唯一；ADMITTED=已入前缀（有力矩记录），
+-- BUFFERED=水位线后第 1～20 号乱序缓冲（无力矩记录，不参与自检/互检/见证），
+-- LATE=工序卡归档后迟到（只记迟到，不复活卡片；允许与已入账序号并存为迟到证据）。
+CREATE TABLE IF NOT EXISTS collection_packet (
+    id              BIGINT        AUTO_INCREMENT PRIMARY KEY,
+    session_id      BIGINT        NOT NULL COMMENT '所属采集会话',
+    seq             INT           NOT NULL COMMENT '会话内连续序号，从 1 开始',
+    point_code      VARCHAR(64)   NOT NULL COMMENT '紧固点编号',
+    measured_torque DECIMAL(12,3) NOT NULL COMMENT '实测力矩(N·m)，有限正数',
+    measured_at     TIMESTAMP(6)  NOT NULL COMMENT 'UTC 测量时刻（设备产生，非提交时刻）',
+    state           VARCHAR(16)   NOT NULL COMMENT '包状态：ADMITTED/BUFFERED/LATE',
+    attempt_no      INT           NULL     COMMENT '入账后对应紧固点力矩测量序号；缓冲/迟到为 NULL',
+    request_id      VARCHAR(64)   NOT NULL COMMENT '首次提交该包的幂等请求号',
+    received_at     TIMESTAMP(6)  NOT NULL COMMENT '服务端接收时间(UTC)',
+    admitted_at     TIMESTAMP(6)  NULL     COMMENT '前缀入账时间(UTC)，缓冲/迟到为 NULL',
+    CONSTRAINT uk_collection_packet_seq UNIQUE (session_id, seq, state)
+);
+CREATE INDEX IF NOT EXISTS idx_collection_packet_session ON collection_packet (session_id);
+
 -- 幂等请求台账：指纹覆盖 requestId 与全部业务字段，同键异参冲突 (409)。
 CREATE TABLE IF NOT EXISTS idempotent_request (
     request_id    VARCHAR(64)  NOT NULL COMMENT '幂等请求号（主键）',

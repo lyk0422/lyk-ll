@@ -31,6 +31,7 @@ import com.example.starter.domain.TorqueMath;
 import com.example.starter.domain.WitnessStatus;
 import com.example.starter.persistence.CardRepository;
 import com.example.starter.persistence.CardRow;
+import com.example.starter.persistence.CollectionRepository;
 import com.example.starter.persistence.FastenerRow;
 import com.example.starter.persistence.InspectionRepository;
 import com.example.starter.persistence.ReleaseRepository;
@@ -65,6 +66,7 @@ public class OperationServiceImpl implements OperationService {
     private final WitnessRepository witnessRepository;
     private final ReleaseRepository releaseRepository;
     private final ToolRepository toolRepository;
+    private final CollectionRepository collectionRepository;
 
     public OperationServiceImpl(Clock clock,
                                 IdempotencyExecutor idempotencyExecutor,
@@ -73,7 +75,8 @@ public class OperationServiceImpl implements OperationService {
                                 InspectionRepository inspectionRepository,
                                 WitnessRepository witnessRepository,
                                 ReleaseRepository releaseRepository,
-                                ToolRepository toolRepository) {
+                                ToolRepository toolRepository,
+                                CollectionRepository collectionRepository) {
         this.clock = clock;
         this.idempotencyExecutor = idempotencyExecutor;
         this.cardRepository = cardRepository;
@@ -82,6 +85,7 @@ public class OperationServiceImpl implements OperationService {
         this.witnessRepository = witnessRepository;
         this.releaseRepository = releaseRepository;
         this.toolRepository = toolRepository;
+        this.collectionRepository = collectionRepository;
     }
 
     // ------------------------------------------------------------------
@@ -411,6 +415,11 @@ public class OperationServiceImpl implements OperationService {
             } else if (card.status() != CardStatus.INSPECTED) {
                 throw ApiException.unprocessable("INSPECTION_REQUIRED",
                         "自检互检未完成（当前 " + card.status() + "），不得放行");
+            }
+            // 工序归档前还须该卡全部本地力矩采集会话均已关闭（无缺号、缓冲全部消费）。
+            if (collectionRepository.existsOpenByCard(card.id())) {
+                throw ApiException.unprocessable("COLLECTION_SESSION_OPEN",
+                        "工序卡存在未关闭的力矩采集会话，归档前必须全部关闭");
             }
             Instant now = clock.instant();
             releaseRepository.insert(card.id(), request.releasedBy(), request.requestId(), now);

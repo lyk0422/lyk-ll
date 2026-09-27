@@ -18,4 +18,12 @@ public interface IdempotencyExecutor {
      * @return 首次结果或重放结果
      */
     Outcome execute(String requestId, String operation, Object businessFields, Supplier<Outcome> action);
+
+    /**
+     * 成功才占键的幂等执行：业务成功时业务变更、版本推进与台账同事务提交；
+     * 业务失败（含 400/404/422）整体回滚且<b>不登记台账</b>，原 requestId 可改参或原参重试，
+     * 失败以携带原 HTTP 状态码的 {@link Outcome} 返回；
+     * 已被成功结果占用的键，同参重放首次冻结结果，异参返回 409。
+     */
+    Outcome executeSuccessOnly(String requestId, String operation, Object businessFields, Supplier<Outcome> action);
 }
