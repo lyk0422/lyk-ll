@@ -37,6 +37,8 @@ public abstract class AbstractIntegrationTest {
     @AfterEach
     void cleanUp() {
         clock.reset();
+        jdbc.update("DELETE FROM customs_binding");
+        jdbc.update("DELETE FROM customs_declaration");
         jdbc.update("DELETE FROM review_event");
         jdbc.update("DELETE FROM publicity_record");
         jdbc.update("DELETE FROM inspection_record");

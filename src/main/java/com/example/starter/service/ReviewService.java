@@ -22,6 +22,7 @@ import com.example.starter.dto.ReviewView;
 import com.example.starter.dto.ServiceResult;
 import com.example.starter.idempotency.Fingerprints;
 import com.example.starter.json.JsonSupport;
+import com.example.starter.repo.CustomsRepository;
 import com.example.starter.repo.EnterpriseProductStatusRepository;
 import com.example.starter.repo.IdempotencyRepository;
 import com.example.starter.repo.ReviewRepository;
@@ -60,6 +61,7 @@ public class ReviewService {
     private final ReviewRepository reviewRepository;
     private final EnterpriseProductStatusRepository statusRepository;
     private final IdempotencyRepository idempotencyRepository;
+    private final CustomsRepository customsRepository;
     private final ReviewViewAssembler assembler;
     private final JsonSupport jsonSupport;
     private final BusinessClock clock;
@@ -68,6 +70,7 @@ public class ReviewService {
     public ReviewService(ReviewRepository reviewRepository,
                          EnterpriseProductStatusRepository statusRepository,
                          IdempotencyRepository idempotencyRepository,
+                         CustomsRepository customsRepository,
                          ReviewViewAssembler assembler,
                          JsonSupport jsonSupport,
                          BusinessClock clock,
@@ -75,6 +78,7 @@ public class ReviewService {
         this.reviewRepository = reviewRepository;
         this.statusRepository = statusRepository;
         this.idempotencyRepository = idempotencyRepository;
+        this.customsRepository = customsRepository;
         this.assembler = assembler;
         this.jsonSupport = jsonSupport;
         this.clock = clock;
@@ -444,12 +448,73 @@ public class ReviewService {
             return ServiceResult.status(409, new ErrorResponse("NOT_ISSUEABLE",
                     "仅公示期满生效的批次可签发归档，当前状态: " + review.getStatus()));
         }
+        ServiceResult customsBlock = applyCustomsGate(review, now);
+        if (customsBlock != null) {
+            return customsBlock;
+        }
         review.setStatus(ReviewStatus.ISSUED);
         review.setIssuedAt(now);
         review.setUpdatedAt(now);
         reviewRepository.update(review);
         reviewRepository.insertEvent(new ReviewEvent(review.getId(), "ISSUED_ARCHIVED", null, now));
         return ServiceResult.ok(assembler.assemble(review));
+    }
+
+    /**
+     * 进口批次通关门禁：事务内重查通关单有效且未撤销（now<截止，恰截止拒绝），
+     * 原子把本子批预占转已核销；国内批次（无绑定或签发前已撤回）无此门禁。
+     * 锁序：审查行 → 通关单行 → 绑定行，与绑定/撤回/撤销一致，撤销与签发按提交顺序唯一。
+     */
+    private ServiceResult applyCustomsGate(Review review, Instant now) {
+        com.example.starter.domain.CustomsBinding binding =
+                customsRepository.findBindingByReviewId(review.getId());
+        if (binding == null) {
+            return null;
+        }
+        if (binding.getStatus() == com.example.starter.domain.BindingStatus.RELEASED) {
+            if (binding.getReleaseReason() == com.example.starter.domain.ReleaseReason.DECLARATION_REVOKED) {
+                return ServiceResult.status(422, new ErrorResponse("CUSTOMS_ISSUE_BLOCKED",
+                        "该子批通关单已撤销，签发被阻断，不能以先前公示通过绕过新失效"));
+            }
+            // 签发前已撤回：按国内批次处理。
+            return null;
+        }
+        if (binding.getStatus() != com.example.starter.domain.BindingStatus.RESERVED) {
+            return ServiceResult.status(422, new ErrorResponse("CUSTOMS_BINDING_STATE_INVALID",
+                    "子批绑定状态异常: " + binding.getStatus()));
+        }
+        com.example.starter.domain.CustomsDeclaration declaration =
+                customsRepository.lockDeclarationById(binding.getDeclarationId());
+        // 持通关单行锁后重读绑定：撤销可能已在等待期间释放预占。
+        com.example.starter.domain.CustomsBinding locked =
+                customsRepository.lockBindingByReviewId(review.getId());
+        if (locked.getStatus() != com.example.starter.domain.BindingStatus.RESERVED) {
+            return ServiceResult.status(422, new ErrorResponse("CUSTOMS_ISSUE_BLOCKED",
+                    "该子批预占已释放（通关单撤销或撤回），签发被阻断"));
+        }
+        if (declaration.getStatus() == com.example.starter.domain.CustomsDeclarationStatus.REVOKED) {
+            return ServiceResult.status(422, new ErrorResponse("CUSTOMS_ISSUE_BLOCKED",
+                    "该子批通关单已撤销，签发被阻断"));
+        }
+        if (!now.isBefore(declaration.getValidUntil())) {
+            return ServiceResult.status(422, new ErrorResponse("CUSTOMS_DECLARATION_EXPIRED",
+                    "通关单已于 " + declaration.getValidUntil() + " 截止，恰截止拒绝签发"));
+        }
+        // 原子核销：预占转已核销，不能已发证而余量未扣。
+        locked.setStatus(com.example.starter.domain.BindingStatus.CONSUMED);
+        locked.setConsumedAt(now);
+        locked.setUpdatedAt(now);
+        customsRepository.updateBinding(locked);
+        declaration.setReservedDoses(declaration.getReservedDoses() - locked.getDeclaredDoses());
+        declaration.setConsumedDoses(declaration.getConsumedDoses() + locked.getDeclaredDoses());
+        declaration.setVersion(declaration.getVersion() + 1);
+        declaration.setUpdatedAt(now);
+        customsRepository.updateDeclaration(declaration);
+        reviewRepository.insertEvent(new ReviewEvent(review.getId(), "CUSTOMS_CONSUMED",
+                jsonSupport.write(java.util.Map.of(
+                        "declarationNo", declaration.getDeclarationNo(),
+                        "consumedDoses", locked.getDeclaredDoses())), now));
+        return null;
     }
 
     /**

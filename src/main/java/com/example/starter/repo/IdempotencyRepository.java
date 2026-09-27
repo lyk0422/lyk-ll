@@ -63,4 +63,11 @@ public class IdempotencyRepository {
                         """,
                 httpStatus, responseJson, requestId);
     }
+
+    /**
+     * 删除占位记录：新写操作业务失败不占键，同事务移除占位使后续同键请求可重新执行。
+     */
+    public void delete(String requestId) {
+        jdbc.update("DELETE FROM idempotency_record WHERE request_id = ?", requestId);
+    }
 }

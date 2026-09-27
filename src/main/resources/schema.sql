@@ -74,11 +74,45 @@ CREATE TABLE IF NOT EXISTS idempotency_record (
     CONSTRAINT pk_idempotency PRIMARY KEY (request_id)
 );
 
+-- 进口通关单：合成通关登记与数量核销台账（版本从 1 开始，成功变更加 1）
+CREATE TABLE IF NOT EXISTS customs_declaration (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '通关单主键',
+    declaration_no  VARCHAR(64)  NOT NULL COMMENT '合成通关单号（全局唯一）',
+    enterprise_name VARCHAR(128) NOT NULL COMMENT '进口企业名称（与绑定子批企业必须一致，修订不可改）',
+    product_name    VARCHAR(128) NOT NULL COMMENT '疫苗品种名称（与绑定子批品种必须一致，修订不可改）',
+    valid_until     TIMESTAMP    NOT NULL COMMENT '通关有效截止时刻（业务时刻 now<截止 有效，恰截止拒绝）',
+    total_doses     INT          NOT NULL COMMENT '可核销总支数（正整数，修订仅允许调增）',
+    reserved_doses  INT          NOT NULL DEFAULT 0 COMMENT '当前预占支数（绑定子批累计，签发核销或释放时扣减）',
+    consumed_doses  INT          NOT NULL DEFAULT 0 COMMENT '已核销支数（签发归档原子由预占转入）',
+    status          VARCHAR(16)  NOT NULL COMMENT '通关单状态：ACTIVE/REVOKED（撤销后阻断签发并释放未签发预占）',
+    version         INT          NOT NULL COMMENT '乐观锁版本：从 1 开始，每次成功变更加 1',
+    created_at      TIMESTAMP    NOT NULL COMMENT '登记时刻',
+    updated_at      TIMESTAMP    NOT NULL COMMENT '最近变更时刻',
+    CONSTRAINT uk_customs_declaration_no UNIQUE (declaration_no)
+);
+
+-- 包装子批绑定：每个子批（审查批次）至多一行，唯一约束保证只能绑定一张通关单
+CREATE TABLE IF NOT EXISTS customs_binding (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '绑定记录主键',
+    declaration_id  BIGINT       NOT NULL COMMENT '所属通关单 ID',
+    review_id       BIGINT       NOT NULL COMMENT '绑定子批对应的审查流程 ID（唯一，一个子批只能绑定一张单）',
+    declared_doses  INT          NOT NULL COMMENT '本子批申报预占支数（正整数）',
+    status          VARCHAR(16)  NOT NULL COMMENT '绑定状态：RESERVED 预占中/CONSUMED 已核销/RELEASED 已释放',
+    release_reason  VARCHAR(24)  NULL COMMENT '释放原因：WITHDRAWN 签发前撤回/DECLARATION_REVOKED 通关单撤销；空值表示未释放',
+    created_at      TIMESTAMP    NOT NULL COMMENT '绑定时刻',
+    updated_at      TIMESTAMP    NOT NULL COMMENT '最近变更时刻',
+    consumed_at     TIMESTAMP    NULL COMMENT '签发核销时刻，空值表示未核销',
+    released_at     TIMESTAMP    NULL COMMENT '预占释放时刻，空值表示未释放',
+    CONSTRAINT fk_binding_declaration FOREIGN KEY (declaration_id) REFERENCES customs_declaration (id),
+    CONSTRAINT fk_binding_review FOREIGN KEY (review_id) REFERENCES batch_review (id),
+    CONSTRAINT uk_binding_review UNIQUE (review_id)
+);
+
 -- 审查事件流水（含补正、撤回、暂停、迟到资料等事件）
 CREATE TABLE IF NOT EXISTS review_event (
     id         BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '事件主键',
     review_id  BIGINT       NOT NULL COMMENT '所属审查流程 ID',
-    event_type VARCHAR(48)  NOT NULL COMMENT '事件类型：DECLARED/CORRECTION_NOTICED/CORRECTION_ACCEPTED/WITHDRAWN/DOCUMENT_REVIEWED/INSPECTION_CHECKED/EVALUATION_PASSED/EVALUATION_FAILED/PUBLICITY_STARTED/OBJECTION_ACCEPTED/ISSUED_ARCHIVED/LATE_DOCUMENT/SUSPENSION_TRIGGERED',
+    event_type VARCHAR(48)  NOT NULL COMMENT '事件类型：DECLARED/CORRECTION_NOTICED/CORRECTION_ACCEPTED/WITHDRAWN/DOCUMENT_REVIEWED/INSPECTION_CHECKED/EVALUATION_PASSED/EVALUATION_FAILED/PUBLICITY_STARTED/OBJECTION_ACCEPTED/ISSUED_ARCHIVED/LATE_DOCUMENT/SUSPENSION_TRIGGERED/CUSTOMS_BOUND/CUSTOMS_RELEASED/CUSTOMS_CONSUMED/CUSTOMS_RISK_ISSUED_UNDER_REVOKED',
     payload    CLOB         NULL COMMENT '事件附加信息 JSON',
     event_at   TIMESTAMP    NOT NULL COMMENT '事件发生的业务时刻',
     created_at TIMESTAMP    NOT NULL COMMENT '事件落库时刻',
