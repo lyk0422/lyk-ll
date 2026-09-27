@@ -14,6 +14,8 @@ import java.time.LocalDate;
  * @param reopenCount 当日复开次数，恰2次合法
  * @param checkDate   最近一次日检合格日期，NULL 表示未日检
  * @param reopenDate  最近一次复开日期，用于跨日重置复开计数
+ * @param inspectionRequired 受检标志：true 表示开放/复开须同时满足有效年度证书与当前大修版本监督检验
+ * @param overhaulVersion 检验周期版本（大修版本），登记大修时原子递增，旧监督检验随之失效
  * @param version     乐观锁版本号
  */
 public record Ride(
@@ -26,6 +28,8 @@ public record Ride(
         int reopenCount,
         LocalDate checkDate,
         LocalDate reopenDate,
+        boolean inspectionRequired,
+        long overhaulVersion,
         long version) {
 
     /** 安全装置检查项名称，任一失效整机立即停运。 */
@@ -36,4 +40,7 @@ public record Ride(
 
     /** 同日复开上限：恰2次合法，超出当日禁开。 */
     public static final int MAX_DAILY_REOPEN = 2;
+
+    /** 年度证书默认有效期：合格时刻加365×24小时（合成规则，不引用真实法定周期）。 */
+    public static final java.time.Duration CERT_DEFAULT_VALIDITY = java.time.Duration.ofHours(365L * 24);
 }

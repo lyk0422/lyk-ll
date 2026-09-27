@@ -19,11 +19,15 @@ import com.example.starter.ride.Idempotency.ApiResult;
 import com.example.starter.ride.dto.RideDtos.ArchiveRequest;
 import com.example.starter.ride.dto.RideDtos.CreateRideRequest;
 import com.example.starter.ride.dto.RideDtos.DailyCheckRequest;
+import com.example.starter.ride.dto.RideDtos.IssueCertificateRequest;
 import com.example.starter.ride.dto.RideDtos.OpenRequest;
+import com.example.starter.ride.dto.RideDtos.OverhaulRequest;
 import com.example.starter.ride.dto.RideDtos.ReadingRequest;
 import com.example.starter.ride.dto.RideDtos.RecheckRequest;
 import com.example.starter.ride.dto.RideDtos.ReopenRequest;
+import com.example.starter.ride.dto.RideDtos.RevokeCertificateRequest;
 import com.example.starter.ride.dto.RideDtos.SafetyFaultRequest;
+import com.example.starter.ride.dto.RideDtos.SupervisionConfirmRequest;
 import com.example.starter.ride.dto.RideDtos.TrialRunRequest;
 
 /**
@@ -116,6 +120,60 @@ public class RideController {
     @GetMapping("/{rideId}/readings")
     public List<Map<String, Object>> readings(@PathVariable long rideId) {
         return service.listReadings(rideId);
+    }
+
+    @PostMapping("/{rideId}/certificates")
+    public ResponseEntity<String> issueCertificate(@PathVariable long rideId,
+            @Valid @RequestBody IssueCertificateRequest request) {
+        return render(service.issueCertificate(rideId, request));
+    }
+
+    @GetMapping("/{rideId}/certificates")
+    public List<Map<String, Object>> certificates(@PathVariable long rideId) {
+        return service.listCertificates(rideId);
+    }
+
+    @GetMapping("/{rideId}/certificates/current")
+    public Map<String, Object> currentCertificate(@PathVariable long rideId) {
+        return service.getCurrentCertificate(rideId);
+    }
+
+    @PostMapping("/{rideId}/certificates/revoke")
+    public ResponseEntity<String> revokeCertificate(@PathVariable long rideId,
+            @Valid @RequestBody RevokeCertificateRequest request) {
+        return render(service.revokeCertificate(rideId, request));
+    }
+
+    @GetMapping("/{rideId}/revocations")
+    public List<Map<String, Object>> revocations(@PathVariable long rideId) {
+        return service.listRevocations(rideId);
+    }
+
+    @PostMapping("/{rideId}/overhauls")
+    public ResponseEntity<String> registerOverhaul(@PathVariable long rideId,
+            @Valid @RequestBody OverhaulRequest request) {
+        return render(service.registerOverhaul(rideId, request));
+    }
+
+    @GetMapping("/{rideId}/overhauls")
+    public List<Map<String, Object>> overhauls(@PathVariable long rideId) {
+        return service.listOverhauls(rideId);
+    }
+
+    @PostMapping("/{rideId}/supervisions")
+    public ResponseEntity<String> confirmSupervision(@PathVariable long rideId,
+            @Valid @RequestBody SupervisionConfirmRequest request) {
+        return render(service.confirmSupervision(rideId, request));
+    }
+
+    @GetMapping("/{rideId}/supervisions")
+    public List<Map<String, Object>> supervisions(@PathVariable long rideId) {
+        return service.listSupervisions(rideId);
+    }
+
+    @GetMapping("/{rideId}/eligibility")
+    public Map<String, Object> eligibility(@PathVariable long rideId) {
+        return service.getEligibility(rideId);
     }
 
     private ResponseEntity<String> render(ApiResult result) {

@@ -120,13 +120,19 @@ public final class Idempotency {
             return Optional.of(stored.result());
         }
 
-        /** 指纹 = SHA-256(requestId + 业务字段规范化JSON)。 */
+        /**
+         * 指纹 = SHA-256(结构化信封JSON)。
+         * 信封将 requestId 作为JSON字符串独立编码、业务字段作为规范化JSON负载，
+         * 键与负载边界无歧义：合法文本含分隔符（如 |、,、引号）也须区分为不同指纹。
+         */
         public String fingerprint(String requestId, Object businessFields) {
             try {
-                String json = objectMapper.writeValueAsString(businessFields);
+                String payload = objectMapper.writeValueAsString(businessFields);
+                String envelope = "{\"requestId\":"
+                        + objectMapper.writeValueAsString(requestId)
+                        + ",\"payload\":" + payload + "}";
                 MessageDigest digest = MessageDigest.getInstance("SHA-256");
-                byte[] hash = digest.digest(
-                        (requestId + "|" + json).getBytes(StandardCharsets.UTF_8));
+                byte[] hash = digest.digest(envelope.getBytes(StandardCharsets.UTF_8));
                 return HexFormat.of().formatHex(hash);
             } catch (NoSuchAlgorithmException e) {
                 throw new IllegalStateException(e);

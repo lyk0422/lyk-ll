@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS ride (
     reopen_count INT NOT NULL DEFAULT 0 COMMENT '当日复开次数，恰2次合法，超出当日禁开',
     check_date DATE NULL COMMENT '最近一次日检合格日期（Asia/Shanghai），NULL表示未日检',
     reopen_date DATE NULL COMMENT '最近一次复开日期，用于跨日重置复开计数，NULL表示从未复开',
+    inspection_required BOOLEAN NOT NULL DEFAULT FALSE COMMENT '受检标志：TRUE表示开放/复开须同时满足有效年度证书与当前大修版本监督检验；FALSE为旧设备，行为不变',
+    overhaul_version BIGINT NOT NULL DEFAULT 0 COMMENT '检验周期版本（大修版本），登记大修时原子递增，旧监督检验随之失效',
     version BIGINT NOT NULL DEFAULT 0 COMMENT '乐观锁版本号，保证同一设备同时刻只有一条状态链',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间（Asia/Shanghai）'
 ) COMMENT='游乐设施主表';
@@ -52,7 +54,7 @@ CREATE TABLE IF NOT EXISTS runtime_reading (
 CREATE TABLE IF NOT EXISTS ride_event (
     id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '事件主键',
     ride_id BIGINT NOT NULL COMMENT '设备ID，关联ride.id',
-    event_type VARCHAR(32) NOT NULL COMMENT '事件类型：DAILY_CHECK/TRIAL_RUN/OPEN/READING/SLOW_STOP/FAULT_STOP/RECHECK/REOPEN/ARCHIVE/LATE_READING',
+    event_type VARCHAR(32) NOT NULL COMMENT '事件类型：DAILY_CHECK/TRIAL_RUN/OPEN/READING/SLOW_STOP/FAULT_STOP/RECHECK/REOPEN/ARCHIVE/LATE_READING/CERT_ISSUE/CERT_REVOKE/OVERHAUL/SUPERVISION/CERT_EXPIRED_ALARM',
     detail VARCHAR(512) NULL COMMENT '事件详情（合成描述），NULL表示无补充说明',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '事件时间（Asia/Shanghai）'
 ) COMMENT='设备启停链事件表，可复算';
@@ -60,9 +62,55 @@ CREATE TABLE IF NOT EXISTS ride_event (
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id VARCHAR(64) PRIMARY KEY COMMENT '幂等请求ID，全局唯一',
     ride_id BIGINT NOT NULL COMMENT '设备ID，关联ride.id',
-    operation VARCHAR(32) NOT NULL COMMENT '操作类型：DAILY_CHECK/TRIAL_RUN/OPEN/SAFETY_FAULT/RECHECK/REOPEN/ARCHIVE',
+    operation VARCHAR(32) NOT NULL COMMENT '操作类型：DAILY_CHECK/TRIAL_RUN/OPEN/SAFETY_FAULT/RECHECK/REOPEN/ARCHIVE/CERT_ISSUE/CERT_REVOKE/OVERHAUL/SUPERVISION',
     fingerprint VARCHAR(64) NOT NULL COMMENT '请求指纹，覆盖requestId与全部业务字段的SHA-256',
     response_status INT NOT NULL COMMENT '首次执行的HTTP状态码',
     response_body CLOB NOT NULL COMMENT '首次执行的响应体JSON快照',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录时间（Asia/Shanghai）'
 ) COMMENT='幂等记录表：同键同参返回首次结果，同键异参返回409';
+
+CREATE TABLE IF NOT EXISTS annual_certificate (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '年度证书主键',
+    ride_id BIGINT NOT NULL COMMENT '设备ID，关联ride.id，证书固定设备编号不可变更',
+    request_id VARCHAR(64) NOT NULL COMMENT '幂等请求ID',
+    passed_at TIMESTAMP NOT NULL COMMENT '检验合格时刻（UTC），合成规则不引用真实法定周期',
+    valid_until TIMESTAMP NOT NULL COMMENT '有效截止（UTC），默认合格时刻+365×24小时；now<截止有效，恰截止失效',
+    revoked BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否已撤销，撤销后不再作为当前证书',
+    revoked_at TIMESTAMP NULL COMMENT '撤销时刻（UTC），NULL表示未撤销',
+    revoke_reason VARCHAR(256) NULL COMMENT '撤销原因（合成描述），NULL表示未撤销',
+    version BIGINT NOT NULL DEFAULT 1 COMMENT '证书版本号，从1开始，每次成功变更（如撤销）加1，修改须携带expectedVersion',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录时间（Asia/Shanghai）'
+) COMMENT='年度检验证书表：历史证书不可覆盖，仅可追加与指针切换';
+
+CREATE TABLE IF NOT EXISTS current_certificate (
+    ride_id BIGINT PRIMARY KEY COMMENT '设备ID，关联ride.id，每设备最多一条当前指针',
+    certificate_id BIGINT NOT NULL COMMENT '当前年度证书ID，关联annual_certificate.id，换证时原子切换',
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '指针最近切换时间（Asia/Shanghai）'
+) COMMENT='当前证书唯一指针表：换证原子切换，撤销后删除指针';
+
+CREATE TABLE IF NOT EXISTS overhaul_record (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '大修记录主键',
+    ride_id BIGINT NOT NULL COMMENT '设备ID，关联ride.id',
+    request_id VARCHAR(64) NOT NULL COMMENT '幂等请求ID',
+    overhaul_version BIGINT NOT NULL COMMENT '本次大修递增后的检验周期版本（大修版本）',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '登记时间（Asia/Shanghai）'
+) COMMENT='大修登记记录表：登记即原子递增设备大修版本并暂停开放';
+
+CREATE TABLE IF NOT EXISTS supervision_inspection (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '监督检验主键',
+    ride_id BIGINT NOT NULL COMMENT '设备ID，关联ride.id',
+    request_id VARCHAR(64) NOT NULL COMMENT '幂等请求ID',
+    overhaul_version BIGINT NOT NULL COMMENT '绑定的检验周期版本（大修版本），须等于登记时设备当前大修版本',
+    inspector_one VARCHAR(64) NOT NULL COMMENT '检验人一，两名检验人必须不同',
+    inspector_two VARCHAR(64) NOT NULL COMMENT '检验人二，两名检验人必须不同',
+    all_passed BOOLEAN NOT NULL COMMENT '全清单是否合格，仅全合格才确认',
+    version BIGINT NOT NULL DEFAULT 1 COMMENT '记录版本号，从1开始',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '确认时间（Asia/Shanghai）'
+) COMMENT='监督检验确认表：两名不同检验人共同确认全清单合格，仅恢复开放资格不自动开放';
+
+CREATE TABLE IF NOT EXISTS supervision_inspection_item (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '监督检验清单项主键',
+    inspection_id BIGINT NOT NULL COMMENT '监督检验ID，关联supervision_inspection.id',
+    item_name VARCHAR(64) NOT NULL COMMENT '检验项名称（合成数据）',
+    passed BOOLEAN NOT NULL COMMENT '该项是否合格'
+) COMMENT='监督检验清单明细表，可复算';

@@ -40,20 +40,24 @@ public class RideRepository {
                 rs.getInt("reopen_count"),
                 checkDate == null ? null : checkDate.toLocalDate(),
                 reopenDate == null ? null : reopenDate.toLocalDate(),
+                rs.getBoolean("inspection_required"),
+                rs.getLong("overhaul_version"),
                 rs.getLong("version"));
     }
 
-    /** 插入新设备，初始状态为待日检。 */
-    public Ride insert(String name, int maxLoad, int maxSpeed) {
+    /** 插入新设备，初始状态为待日检；inspectionRequired 为受检标志，旧设备传 false 行为不变。 */
+    public Ride insert(String name, int maxLoad, int maxSpeed, boolean inspectionRequired) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(con -> {
             PreparedStatement ps = con.prepareStatement(
-                    "INSERT INTO ride (name, status, max_load, max_speed) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO ride (name, status, max_load, max_speed, inspection_required)"
+                            + " VALUES (?, ?, ?, ?, ?)",
                     new String[]{"id"});
             ps.setString(1, name);
             ps.setString(2, RideStatus.PENDING_CHECK.name());
             ps.setInt(3, maxLoad);
             ps.setInt(4, maxSpeed);
+            ps.setBoolean(5, inspectionRequired);
             return ps;
         }, keyHolder);
         long id = keyHolder.getKey().longValue();
@@ -85,6 +89,18 @@ public class RideRepository {
                 checkDate == null ? null : Date.valueOf(checkDate),
                 reopenDate == null ? null : Date.valueOf(reopenDate),
                 ride.id(), ride.version());
+        return rows == 1;
+    }
+
+    /**
+     * 登记大修：原子递增检验周期版本（大修版本）并同步状态（开放中则暂停开放），
+     * 仅当设备乐观锁版本匹配时写入，保证大修与开放竞态下资格不失效仍新开放。
+     */
+    public boolean registerOverhaul(Ride ride, RideStatus newStatus, long newOverhaulVersion) {
+        int rows = jdbc.update(
+                "UPDATE ride SET status = ?, overhaul_version = ?, version = version + 1"
+                        + " WHERE id = ? AND version = ?",
+                newStatus.name(), newOverhaulVersion, ride.id(), ride.version());
         return rows == 1;
     }
 }
