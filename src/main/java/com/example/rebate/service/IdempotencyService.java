@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
  * requestId 幂等编排。
@@ -17,6 +18,9 @@ import org.springframework.stereotype.Service;
  * <p>占坑与结果回写经 {@link IdempotentTxBoundary} 在独立提交事务中完成，业务动作在
  * RebateService 自身事务中执行：业务失败只回滚业务数据，首次结果（含错误码）仍被存档；
  * 同键同参永远返回首次结果，同键异参返回 409 且不改变任何批次状态。</p>
+ *
+ * <p>新增写操作走 {@link #runAtomic}：占坑、业务变更（含版本）与结果回写处于同一事务，
+ * 业务失败整体回滚（失败不占键），同键同参重放首次冻结结果，同键异参 409。</p>
  */
 @Service
 public class IdempotencyService {
@@ -72,6 +76,35 @@ public class IdempotencyService {
             txBoundary.complete(requestId, 500, fingerprints.toJson(errorBody(500, "服务内部错误")));
             throw e;
         }
+    }
+
+    /**
+     * 新增写操作使用的原子幂等：占坑、业务变更（含版本）与结果回写处于同一事务。
+     *
+     * <p>业务失败整体回滚（含占坑行），即“失败不占键”；同键同参重放首次冻结结果，
+     * 同键异参返回 409。同键并发时第二次会读到已提交的首次结果（原子模式下占坑与结果同时提交）。</p>
+     */
+    @Transactional
+    public IdempotentOutcome runAtomic(String opType, String requestId, Object payload,
+                                       Supplier<ServiceResult> action) {
+        String fp = fingerprints.fingerprint(opType, requestId, payload);
+        boolean acquired = records.tryAcquire(requestId, opType, fp,
+                java.time.Instant.now());
+        if (!acquired) {
+            IdempotentRecord existing = mustFind(requestId);
+            if (!fp.equals(existing.fingerprint())) {
+                throw new ConflictException("requestId=" + requestId + " 已用于不同业务参数");
+            }
+            IdempotentRecord rec = awaitCompletion(requestId);
+            if (rec == null) {
+                throw new ConflictException("requestId=" + requestId + " 的首次请求处理超时");
+            }
+            return IdempotentOutcome.replay(rec.responseStatus(), rec.responseBody());
+        }
+        ServiceResult result = action.get();
+        records.complete(requestId, result.status(), fingerprints.toJson(result.body()),
+                java.time.Instant.now());
+        return IdempotentOutcome.first(result.status(), result.body());
     }
 
     /**

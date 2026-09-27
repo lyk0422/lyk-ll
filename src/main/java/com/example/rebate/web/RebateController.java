@@ -1,6 +1,7 @@
 package com.example.rebate.web;
 
 import com.example.rebate.service.CollectionService;
+import com.example.rebate.service.ClawbackService;
 import com.example.rebate.service.DeclarationService;
 import com.example.rebate.service.DoubtService;
 import com.example.rebate.service.IdempotencyService;
@@ -10,6 +11,12 @@ import com.example.rebate.service.ServiceResult;
 import com.example.rebate.service.TreasuryService;
 import com.example.rebate.service.CheckService;
 import com.example.rebate.web.dto.BatchView;
+import com.example.rebate.web.dto.ClawbackBalanceView;
+import com.example.rebate.web.dto.ClawbackDetailView;
+import com.example.rebate.web.dto.ClawbackReceiptRequest;
+import com.example.rebate.web.dto.ClawbackResultView;
+import com.example.rebate.web.dto.ClawbackReviewRequest;
+import com.example.rebate.web.dto.ClawbackSubmitRequest;
 import com.example.rebate.web.dto.CheckRequest;
 import com.example.rebate.web.dto.CheckResponse;
 import com.example.rebate.web.dto.CollectCustomsRequest;
@@ -53,6 +60,7 @@ public class RebateController {
     private final DoubtService doubtService;
     private final DeclarationService declarationService;
     private final TreasuryService treasuryService;
+    private final ClawbackService clawbackService;
     private final QueryService queryService;
     private final IdempotencyService idempotency;
 
@@ -61,6 +69,7 @@ public class RebateController {
                             DoubtService doubtService,
                             DeclarationService declarationService,
                             TreasuryService treasuryService,
+                            ClawbackService clawbackService,
                             QueryService queryService,
                             IdempotencyService idempotency) {
         this.collectionService = collectionService;
@@ -68,6 +77,7 @@ public class RebateController {
         this.doubtService = doubtService;
         this.declarationService = declarationService;
         this.treasuryService = treasuryService;
+        this.clawbackService = clawbackService;
         this.queryService = queryService;
         this.idempotency = idempotency;
     }
@@ -209,6 +219,59 @@ public class RebateController {
     }
 
     /**
+     * 结案后提交冲回单（待复核，不占额）。
+     */
+    @PostMapping("/api/batches/{batchNo}/clawbacks")
+    public ResponseEntity<?> submitClawback(@PathVariable String batchNo,
+                                            @Valid @RequestBody ClawbackSubmitRequest req) {
+        Map<String, Object> payload = payload(req, "batchNo", batchNo);
+        return idempotentAtomic("CLAWBACK_SUBMIT", req.requestId(), payload,
+                () -> ServiceResult.ok(clawbackService.submit(batchNo, req)));
+    }
+
+    /**
+     * 复核冲回单：批准占用额度并产生追缴明细，驳回不占额。
+     */
+    @PostMapping("/api/batches/{batchNo}/clawbacks/{clawbackId}/review")
+    public ResponseEntity<?> reviewClawback(@PathVariable String batchNo,
+                                            @PathVariable long clawbackId,
+                                            @Valid @RequestBody ClawbackReviewRequest req) {
+        Map<String, Object> payload = payload(req, "batchNo", batchNo, "clawbackId", clawbackId);
+        return idempotentAtomic("CLAWBACK_REVIEW", req.requestId(), payload,
+                () -> ServiceResult.ok(clawbackService.review(batchNo, clawbackId, req)));
+    }
+
+    /**
+     * 登记追缴回执（独立流水号，多笔部分到账）。
+     */
+    @PostMapping("/api/batches/{batchNo}/clawbacks/{clawbackId}/receipts")
+    public ResponseEntity<?> receiveClawback(@PathVariable String batchNo,
+                                             @PathVariable long clawbackId,
+                                             @Valid @RequestBody ClawbackReceiptRequest req) {
+        Map<String, Object> payload = payload(req, "batchNo", batchNo, "clawbackId", clawbackId);
+        return idempotentAtomic("CLAWBACK_RECEIVE", req.requestId(), payload,
+                () -> ServiceResult.ok(clawbackService.receive(batchNo, clawbackId, req)));
+    }
+
+    /**
+     * 查询冲回单详情（含追缴明细与回执）。
+     */
+    @GetMapping("/api/batches/{batchNo}/clawbacks/{clawbackId}")
+    public ClawbackDetailView getClawback(@PathVariable String batchNo,
+                                          @PathVariable long clawbackId) {
+        return clawbackService.getDetail(batchNo, clawbackId);
+    }
+
+    /**
+     * 逐单余额查询：冻结退税额、累计占用、剩余可冲额。
+     */
+    @GetMapping("/api/batches/{batchNo}/clawbacks/balance/{declarationNo}")
+    public ClawbackBalanceView getClawbackBalance(@PathVariable String batchNo,
+                                                  @PathVariable String declarationNo) {
+        return clawbackService.getBalance(batchNo, declarationNo);
+    }
+
+    /**
      * 查询批次校验明细与疑点。
      */
     @GetMapping("/api/batches/{batchNo}/check")
@@ -260,6 +323,20 @@ public class RebateController {
     private ResponseEntity<?> idempotent(String opType, String requestId, Object payload,
                                          java.util.function.Supplier<ServiceResult> action) {
         IdempotentOutcome outcome = idempotency.run(opType, requestId, payload, action);
+        if (outcome.first()) {
+            return ResponseEntity.status(outcome.status()).body(outcome.firstBody());
+        }
+        return ResponseEntity.status(outcome.status())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(outcome.replayBody());
+    }
+
+    /**
+     * 新增写操作：占坑、业务变更（含版本）与幂等结果同事务（失败不占键）。
+     */
+    private ResponseEntity<?> idempotentAtomic(String opType, String requestId, Object payload,
+                                               java.util.function.Supplier<ServiceResult> action) {
+        IdempotentOutcome outcome = idempotency.runAtomic(opType, requestId, payload, action);
         if (outcome.first()) {
             return ResponseEntity.status(outcome.status()).body(outcome.firstBody());
         }

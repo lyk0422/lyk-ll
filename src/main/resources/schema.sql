@@ -169,3 +169,77 @@ CREATE TABLE t_idempotent_record (
     completed_at TIMESTAMP NULL
 );
 COMMENT ON TABLE t_idempotent_record IS 'requestId 幂等记录：指纹覆盖 requestId 与全部业务字段';
+
+-- 结案后分批冲回（合成规则）：只引用已结案批次内的报关单及其冻结退税额，不改原文库版本、核销流水与结案总额
+CREATE TABLE t_clawback_quota (
+    batch_id BIGINT NOT NULL,
+    declaration_no VARCHAR(64) NOT NULL,
+    frozen_tax_cents BIGINT NOT NULL,
+    occupied_cents BIGINT NOT NULL DEFAULT 0,
+    version_no INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    CONSTRAINT pk_clawback_quota PRIMARY KEY (batch_id, declaration_no)
+);
+COMMENT ON TABLE t_clawback_quota IS '逐单（批次+报关单）可冲额度；批准冲回时对该行 SELECT ... FOR UPDATE 串行化，防止并发超冲';
+COMMENT ON COLUMN t_clawback_quota.frozen_tax_cents IS '该报关单冻结退税额快照，单位：分（由结案明细计税依据元×100 四舍五入），不随后续冲回改变';
+COMMENT ON COLUMN t_clawback_quota.occupied_cents IS '已批准（含已收齐完成）冲回累计占用额，单位：分；恰等于冻结额合法，驳回与待复核不占额';
+
+CREATE TABLE t_clawback (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    batch_no VARCHAR(64) NOT NULL,
+    declaration_no VARCHAR(64) NOT NULL,
+    external_correction_no VARCHAR(64) NOT NULL,
+    reason CLOB NOT NULL,
+    amount_cents BIGINT NOT NULL,
+    frozen_tax_cents BIGINT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    submitted_by VARCHAR(64) NOT NULL,
+    reviewer VARCHAR(64),
+    reviewed_at TIMESTAMP NULL,
+    version_no INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_clawback_batch_correction UNIQUE (batch_id, external_correction_no)
+);
+COMMENT ON TABLE t_clawback IS '冲回单：仅引用已结案批次内一张报关单；状态 PENDING 待复核 / APPROVED 已批准 / REJECTED 已驳回 / COMPLETED 已收齐';
+COMMENT ON COLUMN t_clawback.external_correction_no IS '唯一外部更正编号；同批次同编号最多一单';
+COMMENT ON COLUMN t_clawback.amount_cents IS '冲回金额，单位：分，正整数；同报关单累计批准不得超过冻结退税额，恰归零合法';
+COMMENT ON COLUMN t_clawback.frozen_tax_cents IS '提交时该报关单冻结退税额快照，单位：分';
+COMMENT ON COLUMN t_clawback.status IS 'PENDING 待复核；APPROVED 批准并占用额度；REJECTED 驳回不占额；COMPLETED 追缴已收齐（终态只读）';
+COMMENT ON COLUMN t_clawback.version_no IS '乐观版本号，从 1 开始，每次成功变更（复核/到账）加 1';
+
+CREATE INDEX idx_clawback_batch_decl ON t_clawback (batch_id, declaration_no);
+
+CREATE TABLE t_clawback_recovery (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    clawback_id BIGINT NOT NULL,
+    approved_amount_cents BIGINT NOT NULL,
+    received_amount_cents BIGINT NOT NULL DEFAULT 0,
+    status VARCHAR(16) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_recovery_clawback UNIQUE (clawback_id)
+);
+COMMENT ON TABLE t_clawback_recovery IS '追缴明细：冲回批准的同一事务内产生一单，独立于原退库核销流水';
+COMMENT ON COLUMN t_clawback_recovery.approved_amount_cents IS '批准追缴金额，单位：分，等于冲回单金额';
+COMMENT ON COLUMN t_clawback_recovery.received_amount_cents IS '累计实际收回，单位：分；允许多笔部分到账，不得超过批准金额，恰收齐转 COMPLETED';
+COMMENT ON COLUMN t_clawback_recovery.status IS 'RECOVERING 追缴中 / COMPLETED 已收齐';
+
+CREATE TABLE t_clawback_receipt (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    recovery_id BIGINT NOT NULL,
+    clawback_id BIGINT NOT NULL,
+    serial_no VARCHAR(64) NOT NULL,
+    received_amount_cents BIGINT NOT NULL,
+    received_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_receipt_serial UNIQUE (serial_no)
+);
+COMMENT ON TABLE t_clawback_receipt IS '追缴回执：独立流水号，支持多笔部分到账；同流水异金额拒绝，乱序到账不改变累计总额';
+COMMENT ON COLUMN t_clawback_receipt.serial_no IS '追缴回执独立流水号，全局唯一';
+COMMENT ON COLUMN t_clawback_receipt.received_amount_cents IS '本笔实际收回金额，单位：分，正整数';
+COMMENT ON COLUMN t_clawback_receipt.received_at IS '回执登记的精确时刻(UTC)';
+
+CREATE INDEX idx_receipt_recovery ON t_clawback_receipt (recovery_id);

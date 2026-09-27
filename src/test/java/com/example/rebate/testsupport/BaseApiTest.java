@@ -24,6 +24,10 @@ public abstract class BaseApiTest {
 
     private static final List<String> TABLES = List.of(
             "t_idempotent_record",
+            "t_clawback_receipt",
+            "t_clawback_recovery",
+            "t_clawback",
+            "t_clawback_quota",
             "t_late_event",
             "t_treasury_writeoff",
             "t_doubt",

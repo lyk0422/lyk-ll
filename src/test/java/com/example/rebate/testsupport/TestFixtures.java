@@ -78,4 +78,29 @@ public final class TestFixtures {
         return "{\"requestId\":\"%s\",\"declarationNo\":\"%s\",\"invoiceNo\":\"%s\",\"note\":\"%s\"}"
                 .formatted(requestId, decl, inv, note);
     }
+
+    public static String clawbackSubmit(String requestId, String declarationNo,
+                                        String correctionNo, String reason,
+                                        long amountCents, String submittedBy) {
+        String escapedReason = reason.replace("\\", "\\\\").replace("\"", "\\\"");
+        return """
+                {"requestId":"%s","declarationNo":"%s","externalCorrectionNo":"%s",
+                 "reason":"%s","amountCents":%d,"submittedBy":"%s"}
+                """.formatted(requestId, declarationNo, correctionNo,
+                escapedReason, amountCents, submittedBy);
+    }
+
+    public static String clawbackReview(String requestId, int expectedVersion,
+                                        boolean approved, String reviewer) {
+        return "{\"requestId\":\"%s\",\"expectedVersion\":%d,\"approved\":%s,\"reviewer\":\"%s\"}"
+                .formatted(requestId, expectedVersion, approved, reviewer);
+    }
+
+    public static String clawbackReceipt(String requestId, String serial, long amountCents,
+                                         String receivedAt, int expectedVersion) {
+        return """
+                {"requestId":"%s","serialNo":"%s","amountCents":%d,
+                 "receivedAt":"%s","expectedVersion":%d}
+                """.formatted(requestId, serial, amountCents, receivedAt, expectedVersion);
+    }
 }
