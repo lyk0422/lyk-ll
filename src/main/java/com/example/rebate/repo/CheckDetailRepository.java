@@ -8,6 +8,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.List;
+import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
@@ -67,6 +68,16 @@ public class CheckDetailRepository {
      */
     public List<CheckDetail> findByBatchId(long batchId) {
         return jdbc.query(BASE_SELECT + " WHERE batch_id = ? ORDER BY id", MAPPER, batchId);
+    }
+
+    /**
+     * 查询某批次下指定报关单的校验明细（冲回冻结退税额取值依据）。
+     */
+    public Optional<CheckDetail> findByBatchAndDeclaration(long batchId, String declarationNo) {
+        return jdbc.query(
+                        BASE_SELECT + " WHERE batch_id = ? AND declaration_no = ? ORDER BY id LIMIT 1",
+                        MAPPER, batchId, declarationNo).stream()
+                .findFirst();
     }
 
     /**

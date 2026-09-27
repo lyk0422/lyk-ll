@@ -24,6 +24,10 @@ public abstract class BaseApiTest {
 
     private static final List<String> TABLES = List.of(
             "t_idempotent_record",
+            "t_clawback_receipt",
+            "t_clawback_detail",
+            "t_reversal_order",
+            "t_reversal_ledger",
             "t_late_event",
             "t_treasury_writeoff",
             "t_doubt",
@@ -97,5 +101,30 @@ public abstract class BaseApiTest {
     protected void seedLibrary() throws Exception {
         postJson("/api/library", TestFixtures.libraryV2025("req-lib-2025"), 200);
         postJson("/api/library", TestFixtures.libraryV2026("req-lib-2026"), 200);
+    }
+
+    /**
+     * 走通 采集→校验→申报→审核→退库（恰一致）→结案，返回结案批次冻结退税额（元，4 位小数文本）。
+     * 默认 FOB 1000、FOB 美元 20，申报日命中 V2026(13%)，冻结退税 130.0000 元=13000 分。
+     */
+    protected String closedSingleBatch(String batchNo, String declNo) throws Exception {
+        seedLibrary();
+        postJson("/api/collect/customs",
+                TestFixtures.customs("c-" + batchNo, declNo, TestFixtures.P1, "1000", "20"), 200);
+        postJson("/api/collect/invoices",
+                TestFixtures.invoice("i-" + batchNo, "INV-" + declNo, declNo, TestFixtures.P1, "1"),
+                200);
+        JsonNode check = postJson("/api/batches/check",
+                TestFixtures.check("chk-" + batchNo, batchNo, "2026-02-01", declNo), 200);
+        String tax = check.get("totalDeclaredTax").asText();
+        postJson("/api/batches/" + batchNo + "/declare",
+                TestFixtures.declare("d-" + batchNo, false), 200);
+        postJson("/api/batches/" + batchNo + "/approve",
+                TestFixtures.requestId("a-" + batchNo), 200);
+        postJson("/api/batches/" + batchNo + "/treasury",
+                TestFixtures.treasury("t-" + batchNo, "GK-" + batchNo, tax), 200);
+        postJson("/api/batches/" + batchNo + "/close",
+                TestFixtures.requestId("cl-" + batchNo), 200);
+        return tax;
     }
 }

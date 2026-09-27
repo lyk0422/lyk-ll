@@ -9,9 +9,11 @@ import com.example.rebate.service.QueryService;
 import com.example.rebate.service.ServiceResult;
 import com.example.rebate.service.TreasuryService;
 import com.example.rebate.service.CheckService;
+import com.example.rebate.service.ReversalService;
 import com.example.rebate.web.dto.BatchView;
 import com.example.rebate.web.dto.CheckRequest;
 import com.example.rebate.web.dto.CheckResponse;
+import com.example.rebate.web.dto.ClawbackReceiptRequest;
 import com.example.rebate.web.dto.CollectCustomsRequest;
 import com.example.rebate.web.dto.CollectInvoiceRequest;
 import com.example.rebate.web.dto.CollectResponse;
@@ -22,6 +24,10 @@ import com.example.rebate.web.dto.LateEventView;
 import com.example.rebate.web.dto.LibraryRequest;
 import com.example.rebate.web.dto.RecalcResponse;
 import com.example.rebate.web.dto.RequestIdRequest;
+import com.example.rebate.web.dto.ReversalBalanceView;
+import com.example.rebate.web.dto.ReversalReviewRequest;
+import com.example.rebate.web.dto.ReversalSubmitRequest;
+import com.example.rebate.web.dto.ReversalView;
 import com.example.rebate.web.dto.ReviewRequest;
 import com.example.rebate.web.dto.TreasuryRequest;
 import com.example.rebate.web.dto.WriteoffView;
@@ -55,6 +61,7 @@ public class RebateController {
     private final TreasuryService treasuryService;
     private final QueryService queryService;
     private final IdempotencyService idempotency;
+    private final ReversalService reversalService;
 
     public RebateController(CollectionService collectionService,
                             CheckService checkService,
@@ -62,7 +69,8 @@ public class RebateController {
                             DeclarationService declarationService,
                             TreasuryService treasuryService,
                             QueryService queryService,
-                            IdempotencyService idempotency) {
+                            IdempotencyService idempotency,
+                            ReversalService reversalService) {
         this.collectionService = collectionService;
         this.checkService = checkService;
         this.doubtService = doubtService;
@@ -70,6 +78,7 @@ public class RebateController {
         this.treasuryService = treasuryService;
         this.queryService = queryService;
         this.idempotency = idempotency;
+        this.reversalService = reversalService;
     }
 
     /**
@@ -230,6 +239,66 @@ public class RebateController {
     @GetMapping("/api/batches/{batchNo}/late-documents")
     public List<LateEventView> listLate(@PathVariable String batchNo) {
         return declarationService.listLateEvents(batchNo);
+    }
+
+    // ------------------------------------------------------------------
+    // 结案批次分批冲回（金额为正数整数分；写操作携带 expectedVersion，版本从 1 开始）
+    // ------------------------------------------------------------------
+
+    /**
+     * 提交分批冲回单：仅引用结案批次内一张报关单及其冻结退税额，初为 PENDING。
+     */
+    @PostMapping("/api/batches/{batchNo}/reversals")
+    public ReversalView submitReversal(@PathVariable String batchNo,
+                                       @Valid @RequestBody ReversalSubmitRequest req) {
+        return reversalService.submit(batchNo, req);
+    }
+
+    /**
+     * 复核冲回单：由不同于提交人的复核人 APPROVE/REJECT；批准占用可冲额并产生追缴明细。
+     */
+    @PostMapping("/api/batches/{batchNo}/reversals/{reversalId}/review")
+    public ReversalView reviewReversal(@PathVariable String batchNo,
+                                       @PathVariable long reversalId,
+                                       @Valid @RequestBody ReversalReviewRequest req) {
+        return reversalService.review(batchNo, reversalId, req);
+    }
+
+    /**
+     * 登记追缴到账回执：允许多笔部分到账，恰收齐转 COMPLETED。
+     */
+    @PostMapping("/api/batches/{batchNo}/reversals/{reversalId}/receipts")
+    public ReversalView registerClawbackReceipt(@PathVariable String batchNo,
+                                                @PathVariable long reversalId,
+                                                @Valid @RequestBody ClawbackReceiptRequest req) {
+        return reversalService.registerReceipt(batchNo, reversalId, req);
+    }
+
+    /**
+     * 查询冲回单（含追缴流水号与逐笔回执、当前逐单余额快照）。
+     */
+    @GetMapping("/api/batches/{batchNo}/reversals/{reversalId}")
+    public ReversalView getReversal(@PathVariable String batchNo,
+                                    @PathVariable long reversalId) {
+        return reversalService.getOrder(batchNo, reversalId);
+    }
+
+    /**
+     * 查询冲回单全部追缴到账回执。
+     */
+    @GetMapping("/api/batches/{batchNo}/reversals/{reversalId}/receipts")
+    public List<ReversalView.ReceiptView> listClawbackReceipts(@PathVariable String batchNo,
+                                                               @PathVariable long reversalId) {
+        return reversalService.listReceipts(batchNo, reversalId);
+    }
+
+    /**
+     * 逐单可退余额台账查询（冻结/已占用/剩余可冲/已到账，金额单位：整数分）。
+     */
+    @GetMapping("/api/batches/{batchNo}/declarations/{declarationNo}/reversal-balance")
+    public ReversalBalanceView reversalBalance(@PathVariable String batchNo,
+                                               @PathVariable String declarationNo) {
+        return reversalService.getBalance(batchNo, declarationNo);
     }
 
     /**

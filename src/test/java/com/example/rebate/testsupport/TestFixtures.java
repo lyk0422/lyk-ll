@@ -78,4 +78,56 @@ public final class TestFixtures {
         return "{\"requestId\":\"%s\",\"declarationNo\":\"%s\",\"invoiceNo\":\"%s\",\"note\":\"%s\"}"
                 .formatted(requestId, decl, inv, note);
     }
+
+    /**
+     * 冲回提交（金额为正数整数分，occurredAt 为 UTC 精确时刻，如 2026-03-01T10:00:00Z）。
+     */
+    public static String reversalSubmit(String requestId, String declarationNo, String correctionNo,
+                                        String reason, long amountCents, String submitter,
+                                        int expectedVersion, String occurredAt) {
+        return """
+                {"requestId":"%s","declarationNo":"%s","correctionNo":"%s","reason":%s,
+                 "amountCents":%d,"submitter":"%s","expectedVersion":%d,"occurredAt":"%s"}
+                """.formatted(requestId, declarationNo, correctionNo, jsonText(reason),
+                amountCents, submitter, expectedVersion, occurredAt);
+    }
+
+    /**
+     * 冲回复核：action=APPROVE/REJECT。
+     */
+    public static String reversalReview(String requestId, String reviewer, String action,
+                                        int expectedVersion, String occurredAt) {
+        return """
+                {"requestId":"%s","reviewer":"%s","action":"%s","expectedVersion":%d,
+                 "occurredAt":"%s"}
+                """.formatted(requestId, reviewer, action, expectedVersion, occurredAt);
+    }
+
+    /**
+     * 追缴到账回执。
+     */
+    public static String clawbackReceipt(String requestId, String receiptSerial, long amountCents,
+                                         int expectedVersion, String occurredAt) {
+        return """
+                {"requestId":"%s","receiptSerial":"%s","amountCents":%d,"expectedVersion":%d,
+                 "occurredAt":"%s"}
+                """.formatted(requestId, receiptSerial, amountCents, expectedVersion, occurredAt);
+    }
+
+    /** 把任意字符串编码为 JSON 文本字面量（含分隔符/引号的合法文本）。 */
+    public static String jsonText(String raw) {
+        StringBuilder sb = new StringBuilder("\"");
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            switch (c) {
+                case '"' -> sb.append("\\\"");
+                case '\\' -> sb.append("\\\\");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> sb.append(c);
+            }
+        }
+        return sb.append('"').toString();
+    }
 }
