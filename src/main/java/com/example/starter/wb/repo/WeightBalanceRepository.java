@@ -1,6 +1,10 @@
 package com.example.starter.wb.repo;
 
 import com.example.starter.wb.domain.Aircraft;
+import com.example.starter.wb.domain.CargoItemRow;
+import com.example.starter.wb.domain.CargoOccupancyRow;
+import com.example.starter.wb.domain.CargoPlanRow;
+import com.example.starter.wb.domain.CompartmentRow;
 import com.example.starter.wb.domain.Flight;
 import com.example.starter.wb.domain.IdempotentRow;
 import com.example.starter.wb.domain.LateEventRow;
@@ -66,4 +70,31 @@ public interface WeightBalanceRepository {
     Optional<IdempotentRow> findIdempotent(String requestId);
 
     void insertIdempotent(IdempotentRow row);
+
+    // ----------------------------------------------------- 集装器装配图
+
+    /** 飞机的集装器舱位主数据（整数毫米力臂、整数公斤限额、允许类型）。 */
+    List<CompartmentRow> findCompartments(long aircraftId);
+
+    /** 航班下全部装配图（含各舱单版本），按图版本升序；历史图只读。 */
+    List<CargoPlanRow> findPlansByFlight(long flightId);
+
+    Optional<CargoPlanRow> findPlanById(long planId);
+
+    List<CargoItemRow> findPlanItems(long planId);
+
+    /** 给定器号集合中仍被占用（未关闭航班）的实物占用行。 */
+    List<CargoOccupancyRow> findActiveOccupanciesByUldNos(java.util.Collection<String> uldNos);
+
+    long insertPlan(CargoPlanRow row);
+
+    void insertPlanItems(long planId, List<CargoItemRow> items);
+
+    long insertOccupancy(CargoOccupancyRow row);
+
+    /** 释放该航班全部未关闭占用（改图迁移或关闭放行原子调用）。 */
+    int releaseOccupanciesByFlight(long flightId, java.time.LocalDateTime releasedAt);
+
+    /** 装配提交作废旧双岗复核，使复核必须对应最新舱单/图。 */
+    int deleteReviewsByManifest(long manifestId);
 }

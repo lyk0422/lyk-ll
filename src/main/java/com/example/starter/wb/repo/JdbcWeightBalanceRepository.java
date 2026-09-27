@@ -1,6 +1,10 @@
 package com.example.starter.wb.repo;
 
 import com.example.starter.wb.domain.Aircraft;
+import com.example.starter.wb.domain.CargoItemRow;
+import com.example.starter.wb.domain.CargoOccupancyRow;
+import com.example.starter.wb.domain.CargoPlanRow;
+import com.example.starter.wb.domain.CompartmentRow;
 import com.example.starter.wb.domain.EnvelopePoint;
 import com.example.starter.wb.domain.Flight;
 import com.example.starter.wb.domain.IdempotentRow;
@@ -21,6 +25,8 @@ import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -406,6 +412,197 @@ public class JdbcWeightBalanceRepository implements WeightBalanceRepository {
                         r.resultJson(), Timestamp.valueOf(r.createdAt())))
                 .update();
     }
+
+    // ------------------------------------------------------------- 集装器装配图
+
+    @Override
+    public List<CompartmentRow> findCompartments(long aircraftId) {
+        return jdbc.sql("""
+                        SELECT id, aircraft_id, compartment_code, arm_mm, max_load_kg, allowed_uld_types
+                        FROM cargo_compartment WHERE aircraft_id = :id ORDER BY id
+                        """)
+                .param("id", aircraftId)
+                .query((rs, n) -> new CompartmentRow(
+                        rs.getLong("id"), rs.getLong("aircraft_id"),
+                        rs.getString("compartment_code"), rs.getInt("arm_mm"),
+                        rs.getInt("max_load_kg"),
+                        Arrays.stream(rs.getString("allowed_uld_types").split(","))
+                                .map(String::trim).filter(s -> !s.isEmpty()).toList()))
+                .list();
+    }
+
+    @Override
+    public List<CargoPlanRow> findPlansByFlight(long flightId) {
+        return jdbc.sql("""
+                        SELECT p.* FROM cargo_loading_plan p
+                        WHERE p.flight_id = :fid
+                        ORDER BY p.plan_version
+                        """)
+                .param("fid", flightId).query(PLAN_MAPPER).list();
+    }
+
+    @Override
+    public Optional<CargoPlanRow> findPlanById(long planId) {
+        return jdbc.sql("SELECT * FROM cargo_loading_plan WHERE id = :id")
+                .param("id", planId).query(PLAN_MAPPER).optional();
+    }
+
+    @Override
+    public List<CargoItemRow> findPlanItems(long planId) {
+        return jdbc.sql("""
+                        SELECT id, plan_id, seq_no, uld_no, compartment_code, arm_mm, tare_kg, net_kg, gross_kg
+                        FROM cargo_loading_item WHERE plan_id = :id ORDER BY seq_no, id
+                        """)
+                .param("id", planId)
+                .query((rs, n) -> new CargoItemRow(
+                        rs.getLong("id"), rs.getLong("plan_id"), rs.getInt("seq_no"),
+                        rs.getString("uld_no"), rs.getString("compartment_code"),
+                        rs.getInt("arm_mm"), rs.getInt("tare_kg"), rs.getInt("net_kg"),
+                        rs.getInt("gross_kg")))
+                .list();
+    }
+
+    @Override
+    public List<CargoOccupancyRow> findActiveOccupanciesByUldNos(Collection<String> uldNos) {
+        if (uldNos.isEmpty()) {
+            return List.of();
+        }
+        return jdbc.sql("""
+                        SELECT * FROM cargo_uld_occupancy
+                        WHERE active_flag = 1 AND uld_no IN (:uldNos)
+                        """)
+                .param("uldNos", List.copyOf(uldNos))
+                .query(OCCUPANCY_MAPPER).list();
+    }
+
+    @Override
+    public long insertPlan(CargoPlanRow r) {
+        KeyHolder kh = new GeneratedKeyHolder();
+        String sql = """
+                INSERT INTO cargo_loading_plan
+                  (flight_id, manifest_id, manifest_version_no, plan_version, request_id, fingerprint,
+                   cargo_net_kg, cargo_gross_kg, total_moment_kg_mm, fuel_kg, lmc_pax_delta,
+                   lmc_weight_delta, cg_zfw_pct, cg_tow_pct, within_limits, created_by,
+                   occurred_at, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """;
+        jdbcTemplate.update(con -> {
+            PreparedStatement ps = con.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
+            int i = 1;
+            ps.setLong(i++, r.flightId());
+            ps.setLong(i++, r.manifestId());
+            ps.setInt(i++, r.manifestVersionNo());
+            ps.setInt(i++, r.planVersion());
+            ps.setString(i++, r.requestId());
+            ps.setString(i++, r.fingerprint());
+            ps.setInt(i++, r.cargoNetKg());
+            ps.setInt(i++, r.cargoGrossKg());
+            ps.setLong(i++, r.totalMomentKgMm());
+            ps.setBigDecimal(i++, r.fuelKg());
+            ps.setInt(i++, r.lmcPaxDelta());
+            ps.setBigDecimal(i++, r.lmcWeightDelta());
+            ps.setBigDecimal(i++, r.cgZfwPct());
+            ps.setBigDecimal(i++, r.cgTowPct());
+            ps.setBoolean(i++, r.withinLimits());
+            ps.setString(i++, r.createdBy());
+            ps.setTimestamp(i++, Timestamp.valueOf(r.occurredAt()));
+            ps.setTimestamp(i, Timestamp.valueOf(r.createdAt()));
+            return ps;
+        }, kh);
+        return kh.getKey() == null ? 0L : kh.getKey().longValue();
+    }
+
+    @Override
+    public void insertPlanItems(long planId, List<CargoItemRow> items) {
+        String sql = """
+                INSERT INTO cargo_loading_item
+                  (plan_id, seq_no, uld_no, compartment_code, arm_mm, tare_kg, net_kg, gross_kg)
+                VALUES (?,?,?,?,?,?,?,?)
+                """;
+        for (CargoItemRow it : items) {
+            jdbc.sql(sql).params(List.of(planId, it.seqNo(), it.uldNo(), it.compartmentCode(),
+                    it.armMm(), it.tareKg(), it.netKg(), it.grossKg())).update();
+        }
+    }
+
+    @Override
+    public long insertOccupancy(CargoOccupancyRow r) {
+        KeyHolder kh = new GeneratedKeyHolder();
+        String sql = """
+                INSERT INTO cargo_uld_occupancy
+                  (uld_no, flight_id, manifest_id, plan_id, active_flag, occupied_at, released_at)
+                VALUES (?,?,?,?,1,?,?)
+                """;
+        jdbcTemplate.update(con -> {
+            PreparedStatement ps = con.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
+            int i = 1;
+            ps.setString(i++, r.uldNo());
+            ps.setLong(i++, r.flightId());
+            ps.setLong(i++, r.manifestId());
+            ps.setLong(i++, r.planId());
+            ps.setTimestamp(i++, Timestamp.valueOf(r.occupiedAt()));
+            if (r.releasedAt() == null) {
+                ps.setNull(i, Types.TIMESTAMP);
+            } else {
+                ps.setTimestamp(i, Timestamp.valueOf(r.releasedAt()));
+            }
+            return ps;
+        }, kh);
+        return kh.getKey() == null ? 0L : kh.getKey().longValue();
+    }
+
+    @Override
+    public int releaseOccupanciesByFlight(long flightId, java.time.LocalDateTime releasedAt) {
+        return jdbc.sql("""
+                UPDATE cargo_uld_occupancy
+                SET active_flag = NULL, released_at = :ts
+                WHERE flight_id = :fid AND active_flag = 1
+                """)
+                .param("fid", flightId)
+                .param("ts", Timestamp.valueOf(releasedAt))
+                .update();
+    }
+
+    @Override
+    public int deleteReviewsByManifest(long manifestId) {
+        return jdbc.sql("DELETE FROM review_confirmation WHERE manifest_id = :id")
+                .param("id", manifestId).update();
+    }
+
+    private static final RowMapper<CargoPlanRow> PLAN_MAPPER = (rs, n) -> new CargoPlanRow(
+            rs.getLong("id"),
+            rs.getLong("flight_id"),
+            rs.getLong("manifest_id"),
+            rs.getInt("manifest_version_no"),
+            rs.getInt("plan_version"),
+            rs.getString("request_id"),
+            rs.getString("fingerprint"),
+            rs.getInt("cargo_net_kg"),
+            rs.getInt("cargo_gross_kg"),
+            rs.getLong("total_moment_kg_mm"),
+            rs.getBigDecimal("fuel_kg"),
+            rs.getInt("lmc_pax_delta"),
+            rs.getBigDecimal("lmc_weight_delta"),
+            rs.getBigDecimal("cg_zfw_pct"),
+            rs.getBigDecimal("cg_tow_pct"),
+            rs.getBoolean("within_limits"),
+            rs.getString("created_by"),
+            rs.getTimestamp("occurred_at").toLocalDateTime(),
+            rs.getTimestamp("created_at").toLocalDateTime()
+    );
+
+    private static final RowMapper<CargoOccupancyRow> OCCUPANCY_MAPPER = (rs, n) ->
+            new CargoOccupancyRow(
+                    rs.getLong("id"),
+                    rs.getString("uld_no"),
+                    rs.getLong("flight_id"),
+                    rs.getLong("manifest_id"),
+                    rs.getLong("plan_id"),
+                    (Long) rs.getObject("active_flag"),
+                    rs.getTimestamp("occupied_at").toLocalDateTime(),
+                    rs.getTimestamp("released_at") == null ? null
+                            : rs.getTimestamp("released_at").toLocalDateTime()
+            );
 
     private static void setNullableLong(PreparedStatement ps, int idx, Long value) throws java.sql.SQLException {
         if (value == null) {

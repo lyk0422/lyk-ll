@@ -146,3 +146,74 @@ CREATE TABLE IF NOT EXISTS idempotent_request (
     result_json  CLOB        NOT NULL COMMENT '首次响应体快照',
     created_at   TIMESTAMP   NOT NULL COMMENT '首次请求时间'
 );
+
+-- 集装器舱位主数据（合成）：整数毫米力臂、最大整数公斤载荷（含皮重，恰达合法）
+CREATE TABLE IF NOT EXISTS cargo_compartment (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    aircraft_id       BIGINT       NOT NULL COMMENT '所属飞机 ID',
+    compartment_code  VARCHAR(20)  NOT NULL COMMENT '舱位代码，如 11P/22P',
+    arm_mm            INT          NOT NULL COMMENT '舱位力臂，整数毫米（站位基准）',
+    max_load_kg       INT          NOT NULL COMMENT '最大载荷，整数公斤（含皮重，恰达合法）',
+    allowed_uld_types VARCHAR(100) NOT NULL COMMENT '允许集装器类型代码（器号前 3 位），逗号分隔',
+    CONSTRAINT fk_compartment_aircraft FOREIGN KEY (aircraft_id) REFERENCES aircraft (id),
+    CONSTRAINT uk_compartment_code UNIQUE (aircraft_id, compartment_code)
+);
+
+-- 受控舱单的装配图：每次提交写一张新图（版本自 1 起），历史图只读
+CREATE TABLE IF NOT EXISTS cargo_loading_plan (
+    id                 BIGINT AUTO_INCREMENT PRIMARY KEY,
+    flight_id          BIGINT      NOT NULL COMMENT '所属航班 ID（图版本在航班范围内自 1 起单调递增）',
+    manifest_id        BIGINT      NOT NULL COMMENT '所属舱单版本 ID（图挂具体版本，重打后旧图只读）',
+    manifest_version_no INT        NOT NULL COMMENT '提交时舱单版本号快照，用于关闭前核对',
+    plan_version       INT         NOT NULL COMMENT '装配图版本号，自 1 起，每次成功提交 +1',
+    request_id         VARCHAR(64) NOT NULL COMMENT '创建该图的幂等请求 ID',
+    fingerprint        CHAR(64)    NOT NULL COMMENT 'SHA-256 指纹，覆盖 requestId、版本、集合与精确时刻',
+    cargo_net_kg       INT         NOT NULL COMMENT '净重合计，kg（Σ 逐项净重）',
+    cargo_gross_kg     INT         NOT NULL COMMENT '总货重，kg（Σ(皮重+净重)，含皮重）',
+    total_moment_kg_mm BIGINT      NOT NULL COMMENT '货运力矩合计，kg·mm（Σ 含皮重总重×整数毫米力臂，精确求和）',
+    fuel_kg            DECIMAL(10,2) NOT NULL COMMENT '提交时舱单加油量快照，kg；加油/LMC 后不一致须重提',
+    lmc_pax_delta      INT         NOT NULL COMMENT '提交时舱单累计 LMC 旅客增量快照，人',
+    lmc_weight_delta   DECIMAL(10,2) NOT NULL COMMENT '提交时舱单累计 LMC 货物增量快照，kg',
+    cg_zfw_pct         DECIMAL(8,4)  NOT NULL COMMENT '按图力矩重算的无油重心，%MAC',
+    cg_tow_pct         DECIMAL(8,4)  NOT NULL COMMENT '按图力矩重算的起飞重心，%MAC',
+    within_limits      BOOLEAN     NOT NULL COMMENT '按图重算后重量与包线是否全部合法',
+    created_by         VARCHAR(64) NOT NULL COMMENT '提交人岗位账号',
+    occurred_at        TIMESTAMP   NOT NULL COMMENT '请求声明的精确业务时刻',
+    created_at         TIMESTAMP   NOT NULL COMMENT '落库时间',
+    CONSTRAINT uk_plan_request UNIQUE (request_id),
+    CONSTRAINT uk_plan_version UNIQUE (flight_id, plan_version),
+    CONSTRAINT fk_plan_manifest FOREIGN KEY (manifest_id) REFERENCES manifest_version (id)
+);
+CREATE INDEX IF NOT EXISTS idx_plan_manifest ON cargo_loading_plan (manifest_id);
+
+-- 装配图逐项：唯一集装器编号、舱位、非负皮重（kg）、正净重（kg）；同图器号与舱位均唯一
+CREATE TABLE IF NOT EXISTS cargo_loading_item (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    plan_id          BIGINT      NOT NULL COMMENT '所属装配图 ID',
+    seq_no           INT         NOT NULL COMMENT '提交集合中的顺序，自 0 起',
+    uld_no           VARCHAR(20) NOT NULL COMMENT '集装器唯一编号（前 3 位为类型代码）',
+    compartment_code VARCHAR(20) NOT NULL COMMENT '装载舱位代码',
+    arm_mm           INT         NOT NULL COMMENT '提交时舱位力臂快照，整数毫米',
+    tare_kg          INT         NOT NULL COMMENT '皮重，非负整数公斤',
+    net_kg           INT         NOT NULL COMMENT '净重，正整数公斤',
+    gross_kg         INT         NOT NULL COMMENT '含皮重总重=皮重+净重，整数公斤',
+    CONSTRAINT fk_item_plan FOREIGN KEY (plan_id) REFERENCES cargo_loading_plan (id),
+    CONSTRAINT uk_item_uld UNIQUE (plan_id, uld_no),
+    CONSTRAINT uk_item_compartment UNIQUE (plan_id, compartment_code)
+);
+CREATE INDEX IF NOT EXISTS idx_item_uld ON cargo_loading_item (uld_no);
+
+-- 实物占用：同一集装器在未关闭航班间唯一；关闭放行原子释放（active_flag 置 NULL）
+CREATE TABLE IF NOT EXISTS cargo_uld_occupancy (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    uld_no      VARCHAR(20) NOT NULL COMMENT '集装器唯一编号',
+    flight_id   BIGINT      NOT NULL COMMENT '占用航班 ID',
+    manifest_id BIGINT      NOT NULL COMMENT '占用时舱单版本 ID',
+    plan_id     BIGINT      NOT NULL COMMENT '占用时装配图 ID',
+    active_flag BIGINT      NULL COMMENT '占用哨兵：占用=1，已释放=NULL',
+    occupied_at TIMESTAMP   NOT NULL COMMENT '占用时间',
+    released_at TIMESTAMP   NULL COMMENT '释放时间；NULL 为仍占用',
+    CONSTRAINT fk_occ_plan FOREIGN KEY (plan_id) REFERENCES cargo_loading_plan (id),
+    CONSTRAINT uk_uld_active UNIQUE (uld_no, active_flag)
+);
+CREATE INDEX IF NOT EXISTS idx_occ_flight ON cargo_uld_occupancy (flight_id, active_flag);

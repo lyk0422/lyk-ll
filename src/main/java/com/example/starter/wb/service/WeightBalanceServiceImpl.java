@@ -70,13 +70,16 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
     private final IdempotencyStore idempotencyStore;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final CargoPlanService cargoPlanService;
 
     public WeightBalanceServiceImpl(WeightBalanceRepository repo, IdempotencyStore idempotencyStore,
-                                    ObjectMapper objectMapper, Clock clock) {
+                                    ObjectMapper objectMapper, Clock clock,
+                                    CargoPlanService cargoPlanService) {
         this.repo = repo;
         this.idempotencyStore = idempotencyStore;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.cargoPlanService = cargoPlanService;
     }
 
     // ------------------------------------------------------------------ 预配
@@ -238,6 +241,8 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
                     && !ManifestStatus.REVIEWED.name().equals(row.status())) {
                 throw new ConflictException("仅装载确认后的舱单可提交复核，当前状态 " + row.status());
             }
+            // 启用装配控制时：复核必须对应最新舱单且装配图仍匹配（LMC/加油后须重新提交图）。
+            cargoPlanService.assertReviewable(ctx.aircraft(), row);
             List<ReviewRow> existing = repo.findReviews(row.id());
             Optional<ReviewRow> sameRole = existing.stream()
                     .filter(r -> r.roleCode().equals(role.name())).findFirst();
@@ -280,6 +285,8 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
                 throw new ConflictException("双岗复核通过后方可放行关闭，当前状态 " + row.status());
             }
             LocalDateTime now = LocalDateTime.now(clock);
+            // 启用装配控制：再核对图与舱单版本匹配、总货重/重心一致，并原子释放实物占用。
+            cargoPlanService.verifyAndReleaseOnClose(ctx.aircraft(), row, now);
             repo.updateStatus(row.id(), ManifestStatus.CLOSED.name(), now);
             return toResponse(repo.findManifestById(row.id()).orElseThrow());
         });
@@ -612,7 +619,11 @@ public class WeightBalanceServiceImpl implements WeightBalanceService {
         Flight flight = requireFlight(row.flightId());
         Aircraft ac = requireAircraft(flight.aircraftId());
         List<LoadDetailRow> details = repo.findDetails(row.id());
-        WeightBalanceResult recomputed = WeightBalanceCalculator.calculate(ac, toCalcItems(details, ac), row.fuelKg());
+        // 启用装配控制且图仍匹配时，按装配图物理力矩复算（实物占用与货运力矩对得上）；
+        // 未启用装配控制或图已过期则回退到明细站位复算（旧入口行为不变）。
+        WeightBalanceResult recomputed = cargoPlanService
+                .physicalResultIfPlanMatches(ac, row)
+                .orElseGet(() -> WeightBalanceCalculator.calculate(ac, toCalcItems(details, ac), row.fuelKg()));
         List<ReviewRow> reviews = repo.findReviews(row.id());
         List<LateEventRow> lateEvents = repo.findLateEvents(row.flightId());
         Long supersededBy = null;

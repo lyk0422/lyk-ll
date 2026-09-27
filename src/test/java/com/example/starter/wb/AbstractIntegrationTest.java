@@ -17,6 +17,9 @@ public abstract class AbstractIntegrationTest {
 
     @BeforeEach
     void cleanBusinessTables() {
+        jdbc.execute("DELETE FROM cargo_uld_occupancy");
+        jdbc.execute("DELETE FROM cargo_loading_item");
+        jdbc.execute("DELETE FROM cargo_loading_plan");
         jdbc.execute("DELETE FROM load_detail");
         jdbc.execute("DELETE FROM review_confirmation");
         jdbc.execute("DELETE FROM lmc_log");

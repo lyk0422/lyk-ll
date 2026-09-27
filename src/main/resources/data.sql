@@ -26,4 +26,14 @@ KEY (id) VALUES
 
 MERGE INTO flight (id, flight_no, origin, destination, aircraft_id, scheduled_time, created_at)
 KEY (id) VALUES
-(1, 'CA1234', 'PEK', 'SHA', 1, TIMESTAMP '2026-09-26 10:00:00', TIMESTAMP '2026-09-26 06:00:00');
+(1, 'CA1234', 'PEK', 'SHA', 1, TIMESTAMP '2026-09-26 10:00:00', TIMESTAMP '2026-09-26 06:00:00'),
+(2, 'CA5678', 'PEK', 'CAN', 1, TIMESTAMP '2026-09-26 14:00:00', TIMESTAMP '2026-09-26 08:00:00');
+
+-- 集装器舱位（合成）：整数毫米力臂（12700mm=500in、13716mm=540in、20320mm=800in、20828mm=820in），
+-- 最大整数公斤载荷（含皮重，恰达合法），allowed_uld_types 为器号前 3 位类型代码白名单。
+MERGE INTO cargo_compartment (id, aircraft_id, compartment_code, arm_mm, max_load_kg, allowed_uld_types)
+KEY (id) VALUES
+(1, 1, '11P', 12700, 5000, 'AKE,AKH'),
+(2, 1, '12P', 13716, 3000, 'AKH'),
+(3, 1, '21A', 20828, 5000, 'AKE,PAG'),
+(4, 1, '22A', 20320, 3000, 'PAG');
