@@ -10,6 +10,7 @@ import com.example.starter.dto.GrainDtos.FanView;
 import com.example.starter.dto.GrainDtos.ReadingRequest;
 import com.example.starter.dto.GrainDtos.SiloView;
 import com.example.starter.model.VentilationPurpose;
+import com.example.starter.service.FumigationService;
 import com.example.starter.service.SiloService;
 import com.example.starter.service.VentilationService;
 
@@ -37,9 +38,16 @@ public abstract class AbstractIntegrationTest {
     @Autowired
     protected VentilationService ventilationService;
 
+    @Autowired
+    protected FumigationService fumigationService;
+
     @BeforeEach
     void cleanDatabase() {
         jdbc.update("DELETE FROM late_event");
+        jdbc.update("DELETE FROM fumigation_confirmation");
+        jdbc.update("DELETE FROM gas_reading");
+        jdbc.update("DELETE FROM fumigation_approval");
+        jdbc.update("DELETE FROM fumigation_order");
         jdbc.update("DELETE FROM recheck");
         jdbc.update("DELETE FROM ventilation_job");
         jdbc.update("DELETE FROM alarm");

@@ -14,6 +14,10 @@ public enum SiloStatus {
     RECHECKING,
     /** 两轮通风仍超标，转人工处置 */
     MANUAL_HANDLING,
+    /** 熏蒸锁仓：禁止人员进入与普通通风 */
+    FUMIGATING,
+    /** 熏蒸后散气中：占用一台风机，等待气体读数达标 */
+    AERATING,
     /** 已归档（终态），此后迟到温湿度数据只记迟到事件 */
     ARCHIVED
 }

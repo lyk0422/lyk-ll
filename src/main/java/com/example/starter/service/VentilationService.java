@@ -106,6 +106,14 @@ public class VentilationService {
             throw ApiException.conflict("WINDOW_CONFLICT", "作业窗与既有作业重叠（半开区间端点相接不冲突）");
         }
 
+        // 与同仓熏蒸窗口互斥（半开区间，端点相接不冲突）：熏蒸与普通通风不能各自放行
+        Integer fumigationConflicts = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM fumigation_order WHERE silo_id = ? AND window_start < ? AND ? < window_end",
+                Integer.class, siloId, request.windowEnd(), request.windowStart());
+        if (fumigationConflicts != null && fumigationConflicts > 0) {
+            throw ApiException.conflict("WINDOW_CONFLICT", "作业窗与熏蒸窗口重叠（半开区间端点相接不冲突）");
+        }
+
         // 风机存在性校验
         siloService.getFan(request.fanId());
 
