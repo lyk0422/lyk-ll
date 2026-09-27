@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS dive (
     surfaced_at_utc     DATETIME(3)  COMMENT '出水时刻（UTC），观察期起点；空值表示尚未出水',
     symptomatic         BOOLEAN      NOT NULL DEFAULT FALSE COMMENT '观察期是否出现症状：TRUE 即启动加压舱预案并冻结结案',
     closed_at_utc       DATETIME(3)  COMMENT '结案时刻（UTC），终态时间戳；空值表示未结案',
+    points_controlled   BOOLEAN      NOT NULL DEFAULT FALSE COMMENT '是否启用反复潜水积分控制：TRUE 为虚构积分模型受控潜次，FALSE 为旧语义潜次；不用于实际减压',
+    controlled_started_at_utc DATETIME(3) COMMENT '受控潜次实际下潜时刻（UTC），积分消减/间隔门禁仅认已确认出水时刻；空值表示未实际下潜',
     created_at_utc      DATETIME(3)  NOT NULL COMMENT '申请受理时刻（UTC）',
     updated_at_utc      DATETIME(3)  NOT NULL,
     CONSTRAINT pk_dive PRIMARY KEY (request_id),
@@ -116,4 +118,59 @@ CREATE TABLE IF NOT EXISTS idempotency_record (
     response_json       TEXT        NOT NULL COMMENT '首次响应体，重放原样返回',
     created_at_utc      DATETIME(3) NOT NULL,
     CONSTRAINT pk_idempotency PRIMARY KEY (request_id)
+);
+
+-- ======================================================================
+-- 反复潜水积分控制（虚构软件验证模型，不用于实际减压）
+-- ======================================================================
+
+-- 潜水员积分账（每名潜水员一行；首次积分 0；出水原子更新；仅按已确认出水时刻消减）
+CREATE TABLE IF NOT EXISTS diver_points_account (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    diver_code          VARCHAR(32) NOT NULL COMMENT '潜水员工号',
+    points              INT         NOT NULL DEFAULT 0 COMMENT '出水残留积分（虚构单位）：本次整数水下分钟加下潜前积分，上限 100；水面每满 30 分钟消减 5，最低 0',
+    anchor_surfaced_at_utc DATETIME(3) COMMENT '积分基数对应的最近一次已确认出水时刻（UTC）；空值表示尚无受控出水（积分按 0 计）',
+    last_dive_request_id VARCHAR(64) COMMENT '产生当前积分的最近受控潜次 requestId（消费防护来源标记）',
+    updated_at_utc      DATETIME(3) NOT NULL,
+    CONSTRAINT uk_points_diver UNIQUE (diver_code)
+);
+
+-- 受控方案冻结快照常：冻结每名组员最近潜次版本、出水时刻、积分；实际下潜前重查来源未变
+CREATE TABLE IF NOT EXISTS controlled_plan_freeze (
+    id                      BIGINT AUTO_INCREMENT PRIMARY KEY,
+    dive_request_id         VARCHAR(64) NOT NULL COMMENT '所属受控潜次 requestId',
+    version                 INT         NOT NULL COMMENT '冻结时的方案版本，从 1 递增',
+    diver_code              VARCHAR(32) NOT NULL COMMENT '被冻结的组员工号',
+    source_dive_request_id  VARCHAR(64) COMMENT '冻结时该组员最近受控潜次 requestId；无则为空（首次）',
+    source_version          INT         NOT NULL DEFAULT 0 COMMENT '冻结时最近潜次方案版本；无则为 0',
+    source_surfaced_at_utc  DATETIME(3) COMMENT '冻结时该组员最近已确认出水时刻（UTC）；无则为空',
+    points_at_freeze        INT         NOT NULL COMMENT '冻结时按计划下潜时刻与水面消减复算的当前积分（虚构单位）',
+    planned_descent_at_utc  DATETIME(3) NOT NULL COMMENT '方案声明的精确计划下潜时刻（UTC）',
+    points_at_start         INT         COMMENT '实际下潜重查通过后，按实际下潜时刻复算的下潜前积分；未实际下潜为空',
+    started                 BOOLEAN     NOT NULL DEFAULT FALSE COMMENT '是否已实际下潜（重查通过并占用潜水员槽）',
+    created_at_utc          DATETIME(3) NOT NULL,
+    CONSTRAINT uk_freeze_diver UNIQUE (dive_request_id, diver_code)
+);
+
+-- 潜水员级别潜水占用槽：两组共享同一潜水员并发实际下潜最多一组成功（行存在=占用）
+CREATE TABLE IF NOT EXISTS diver_dive_slot (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    diver_code          VARCHAR(32) NOT NULL COMMENT '被占用的潜水员工号',
+    dive_request_id     VARCHAR(64) NOT NULL COMMENT '占用该潜水员的受控潜次 requestId',
+    created_at_utc      DATETIME(3) NOT NULL,
+    CONSTRAINT uk_slot_diver UNIQUE (diver_code)
+);
+
+-- 历史水下记录更正：不追改已关闭潜次，另记独立差异
+CREATE TABLE IF NOT EXISTS dive_record_correction (
+    request_id          VARCHAR(64) NOT NULL COMMENT '本次更正操作的幂等键 requestId',
+    dive_request_id     VARCHAR(64) NOT NULL COMMENT '被更正的（已关闭、旧语义）潜次 requestId',
+    diver_code          VARCHAR(32) NOT NULL COMMENT '被更正记录的潜水员工号',
+    phase               VARCHAR(16) NOT NULL COMMENT '被更正阶段 DESCENT/BOTTOM/ASCENT',
+    recorded_duration_min INT       NOT NULL COMMENT '原记录该段历时，分钟',
+    corrected_duration_min INT      NOT NULL COMMENT '更正后该段历时，分钟',
+    delta_min           INT         NOT NULL COMMENT '独立差异（更正-原记录），分钟；不回写已关闭潜次与积分账',
+    fingerprint         VARCHAR(64) NOT NULL COMMENT '更正请求指纹（含 requestId 与全部业务字段）',
+    created_at_utc      DATETIME(3) NOT NULL,
+    CONSTRAINT pk_correction PRIMARY KEY (request_id)
 );

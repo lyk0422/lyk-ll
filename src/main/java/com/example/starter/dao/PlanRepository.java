@@ -79,4 +79,15 @@ public class PlanRepository {
                         + "updated_at_utc = ? WHERE request_id = ?",
                 version, Timestamp.from(now), requestId);
     }
+
+    /**
+     * 乐观并发的版本提升：仅当当前版本恰为 expectedVersion 时更新为 newVersion。
+     * @return 受影响行数；0 表示期间版本已被并发变更
+     */
+    public int bumpDiveVersionIfMatch(String requestId, int expectedVersion, int newVersion,
+                                      java.time.Instant now) {
+        return jdbc.update("UPDATE dive SET current_plan_version = ?, status = 'PLANNED', "
+                        + "updated_at_utc = ? WHERE request_id = ? AND current_plan_version = ?",
+                newVersion, Timestamp.from(now), requestId, expectedVersion);
+    }
 }

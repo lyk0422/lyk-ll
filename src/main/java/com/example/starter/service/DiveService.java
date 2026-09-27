@@ -97,7 +97,7 @@ public class DiveService {
                     }});
             DiveRow row = new DiveRow(req.requestId(), fingerprint, teamKey, teamKey,
                     req.diverACode(), req.diverBCode(), req.plannedDepthM(), req.plannedBottomMin(),
-                    "APPLIED", 0, null, false, null, now, now);
+                    "APPLIED", 0, null, false, null, false, null, now, now);
             // 唯一冲突（同 requestId 并发，或同组 active_team_slot 占用）原样抛出，
             // 由幂等层在胜方事务提交后区分：等到同 requestId 台账则重放/409，等不到则同组 409
             dives.insert(row);

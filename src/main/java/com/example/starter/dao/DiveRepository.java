@@ -33,6 +33,9 @@ public class DiveRepository {
             rs.getBoolean("symptomatic"),
             rs.getTimestamp("closed_at_utc") == null ? null
                     : rs.getTimestamp("closed_at_utc").toInstant(),
+            rs.getBoolean("points_controlled"),
+            rs.getTimestamp("controlled_started_at_utc") == null ? null
+                    : rs.getTimestamp("controlled_started_at_utc").toInstant(),
             rs.getTimestamp("created_at_utc").toInstant(),
             rs.getTimestamp("updated_at_utc").toInstant());
 
@@ -47,12 +50,14 @@ public class DiveRepository {
                         + "(request_id, apply_fingerprint, team_key, active_team_slot, "
                         + "diver_a_code, diver_b_code, planned_depth_m, planned_bottom_min, "
                         + "status, current_plan_version, surfaced_at_utc, symptomatic, "
-                        + "closed_at_utc, created_at_utc, updated_at_utc) "
-                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        + "closed_at_utc, points_controlled, controlled_started_at_utc, "
+                        + "created_at_utc, updated_at_utc) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 row.requestId(), row.applyFingerprint(), row.teamKey(), row.activeTeamSlot(),
                 row.diverACode(), row.diverBCode(), row.plannedDepthM(), row.plannedBottomMin(),
                 row.status(), row.currentPlanVersion(), ts(row.surfacedAtUtc()),
-                row.symptomatic(), ts(row.closedAtUtc()), ts(row.createdAtUtc()),
+                row.symptomatic(), ts(row.closedAtUtc()), row.pointsControlled(),
+                ts(row.controlledStartedAtUtc()), ts(row.createdAtUtc()),
                 ts(row.updatedAtUtc()));
     }
 
@@ -66,9 +71,28 @@ public class DiveRepository {
                 new IllegalArgumentException("潜次不存在: " + requestId));
     }
 
+    /**
+     * 查某潜水员最近一次已确认出水的受控潜次（按出水时刻倒序）。
+     * 积分消减、间隔门禁与方案冻结来源均以此为准；无则返回空。
+     */
+    public Optional<DiveRow> findLatestControlledSurfaced(String diverCode) {
+        return jdbc.query("SELECT * FROM dive WHERE points_controlled = TRUE "
+                        + "AND surfaced_at_utc IS NOT NULL "
+                        + "AND (diver_a_code = ? OR diver_b_code = ?) "
+                        + "ORDER BY surfaced_at_utc DESC, updated_at_utc DESC LIMIT 1",
+                MAPPER, diverCode, diverCode).stream().findFirst();
+    }
+
     public void updateStatus(String requestId, String status, Instant now) {
         jdbc.update("UPDATE dive SET status = ?, updated_at_utc = ? WHERE request_id = ?",
                 status, ts(now), requestId);
+    }
+
+    /** 受控潜次实际下潜重查通过：记录实际下潜时刻并进入 DIVING。 */
+    public void markControlledStarted(String requestId, Instant startedAt, Instant now) {
+        jdbc.update("UPDATE dive SET controlled_started_at_utc = ?, status = 'DIVING', "
+                        + "updated_at_utc = ? WHERE request_id = ?",
+                ts(startedAt), ts(now), requestId);
     }
 
     /** 出水登记。 */

@@ -84,6 +84,70 @@ public final class Requests {
         return write(m, body);
     }
 
+    // ---- 受控反复潜水流程（虚构积分模型） ----
+
+    public static String controlledApply(ObjectMapper m, String requestId, String a, String b,
+                                         int depth, int bottom) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("requestId", requestId);
+        body.put("diverACode", a);
+        body.put("diverBCode", b);
+        body.put("plannedDepthM", depth);
+        body.put("plannedBottomMin", bottom);
+        return write(m, body);
+    }
+
+    public static String controlledPlan(ObjectMapper m, String requestId, String diveRequestId,
+                                        int expectedVersion, int depth, int bottom,
+                                        Instant plannedDescentAt) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("requestId", requestId);
+        body.put("diveRequestId", diveRequestId);
+        body.put("expectedVersion", expectedVersion);
+        body.put("depthM", depth);
+        body.put("bottomMin", bottom);
+        body.put("plannedDescentAt", plannedDescentAt.toString());
+        return write(m, body);
+    }
+
+    public static String controlledStart(ObjectMapper m, String requestId, String diveRequestId,
+                                         int expectedVersion, Instant actualDescentAt) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("requestId", requestId);
+        body.put("diveRequestId", diveRequestId);
+        body.put("expectedVersion", expectedVersion);
+        if (actualDescentAt != null) {
+            body.put("actualDescentAt", actualDescentAt.toString());
+        }
+        return write(m, body);
+    }
+
+    public static String controlledSurface(ObjectMapper m, String requestId, String diveRequestId,
+                                           int expectedVersion, int bottomMin, Instant surfacedAt) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("requestId", requestId);
+        body.put("diveRequestId", diveRequestId);
+        body.put("expectedVersion", expectedVersion);
+        body.put("bottomMin", bottomMin);
+        if (surfacedAt != null) {
+            body.put("surfacedAt", surfacedAt.toString());
+        }
+        return write(m, body);
+    }
+
+    public static String correction(ObjectMapper m, String requestId, String diveRequestId,
+                                    String diver, String phase, int expectedVersion,
+                                    int correctedDurationMin) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("requestId", requestId);
+        body.put("diveRequestId", diveRequestId);
+        body.put("diverCode", diver);
+        body.put("phase", phase);
+        body.put("expectedVersion", expectedVersion);
+        body.put("correctedDurationMin", correctedDurationMin);
+        return write(m, body);
+    }
+
     private static String write(ObjectMapper m, Map<String, Object> body) {
         try {
             return m.writeValueAsString(body);

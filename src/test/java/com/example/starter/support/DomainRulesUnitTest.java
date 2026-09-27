@@ -59,4 +59,21 @@ class DomainRulesUnitTest {
                 "at", java.time.Instant.parse("2026-09-25T00:00:01Z"));
         assertNotEquals(Fingerprints.sha256(withNull), Fingerprints.sha256(otherTime));
     }
+
+    @Test
+    void fingerprintIsStructured_delimitersInsideLegalTextCannotForgeFields() {
+        // 合法文本里即便含 { } = , [ ] 等分隔符，也只作为带类型标量的内容，不能伪装成额外字段
+        String injected = "v},{evil=String(1),k=String(";
+        Map<String, Object> singleField = Map.of("k", injected);
+        Map<String, Object> twoFields = new java.util.TreeMap<>();
+        twoFields.put("k", "v");
+        twoFields.put("evil", "1");
+        // 各自稳定
+        assertEquals(Fingerprints.sha256(singleField), Fingerprints.sha256(singleField));
+        // 结构不同（一个含注入文本的单字段 vs 真的两个字段）指纹必须不同
+        assertNotEquals(Fingerprints.sha256(singleField), Fingerprints.sha256(twoFields));
+        // 含分隔符的文本与其子串/微调也可区分
+        assertNotEquals(Fingerprints.sha256(Map.of("k", injected)),
+                Fingerprints.sha256(Map.of("k", injected + "x")));
+    }
 }

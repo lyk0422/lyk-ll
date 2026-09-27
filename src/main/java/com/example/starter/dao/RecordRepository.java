@@ -118,6 +118,13 @@ public class RecordRepository {
                 MAPPER, requestId, version);
     }
 
+    /** 取某潜次某名组员某阶段成对生效、未冻结的记录（历史更正定位用）。 */
+    public Optional<RecordRow> findEffective(String requestId, String diverCode, String phase) {
+        return jdbc.query("SELECT * FROM dive_record WHERE dive_request_id = ? AND diver_code = ? "
+                        + "AND phase = ? AND effective = TRUE AND frozen = FALSE ORDER BY id LIMIT 1",
+                MAPPER, requestId, diverCode, phase).stream().findFirst();
+    }
+
     /**
      * 24 小时（UTC）滚动窗口内某潜水员已入账的水下时间（分钟），窗口含两端时刻。
      * 仅成对生效的 BOTTOM 记录入账；方案冻结时旧台账同事务删除，因此窗口内即为有效累计，可复算。

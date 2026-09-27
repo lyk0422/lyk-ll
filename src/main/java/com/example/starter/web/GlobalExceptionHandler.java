@@ -37,6 +37,14 @@ public class GlobalExceptionHandler {
                 .body(Map.of("error", "Bad Request", "message", ex.getMessage()));
     }
 
+    /** 虚构积分模型业务拒绝（积分上限/允许时长<=0 等）统一作为 422。 */
+    @ExceptionHandler(com.example.starter.domain.PointsRules.PointsRejectedException.class)
+    public ResponseEntity<Map<String, Object>> handlePointsRejected(
+            com.example.starter.domain.PointsRules.PointsRejectedException ex) {
+        return ResponseEntity.status(422)
+                .body(Map.of("error", "Unprocessable Entity", "message", ex.getMessage()));
+    }
+
     /** 数据库唯一约束兜底（并发唯一受理）统一作为 409。 */
     @org.springframework.web.bind.annotation.ExceptionHandler(
             org.springframework.dao.DuplicateKeyException.class)
