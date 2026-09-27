@@ -4,10 +4,13 @@ import com.example.starter.catalog.DocumentCatalog;
 import com.example.starter.catalog.InspectionCatalog;
 import com.example.starter.catalog.InspectionEvaluator;
 import com.example.starter.catalog.InspectionSpec;
+import com.example.starter.domain.CustomsDeclaration;
+import com.example.starter.domain.CustomsReservation;
 import com.example.starter.domain.EnterpriseProductStatus;
 import com.example.starter.domain.InspectionRecord;
 import com.example.starter.domain.PublicityRecord;
 import com.example.starter.domain.PublicityStatus;
+import com.example.starter.domain.ReservationStatus;
 import com.example.starter.domain.Review;
 import com.example.starter.domain.ReviewEvent;
 import com.example.starter.domain.ReviewStatus;
@@ -22,6 +25,7 @@ import com.example.starter.dto.ReviewView;
 import com.example.starter.dto.ServiceResult;
 import com.example.starter.idempotency.Fingerprints;
 import com.example.starter.json.JsonSupport;
+import com.example.starter.repo.CustomsRepository;
 import com.example.starter.repo.EnterpriseProductStatusRepository;
 import com.example.starter.repo.IdempotencyRepository;
 import com.example.starter.repo.ReviewRepository;
@@ -60,6 +64,7 @@ public class ReviewService {
     private final ReviewRepository reviewRepository;
     private final EnterpriseProductStatusRepository statusRepository;
     private final IdempotencyRepository idempotencyRepository;
+    private final CustomsRepository customsRepository;
     private final ReviewViewAssembler assembler;
     private final JsonSupport jsonSupport;
     private final BusinessClock clock;
@@ -68,6 +73,7 @@ public class ReviewService {
     public ReviewService(ReviewRepository reviewRepository,
                          EnterpriseProductStatusRepository statusRepository,
                          IdempotencyRepository idempotencyRepository,
+                         CustomsRepository customsRepository,
                          ReviewViewAssembler assembler,
                          JsonSupport jsonSupport,
                          BusinessClock clock,
@@ -75,6 +81,7 @@ public class ReviewService {
         this.reviewRepository = reviewRepository;
         this.statusRepository = statusRepository;
         this.idempotencyRepository = idempotencyRepository;
+        this.customsRepository = customsRepository;
         this.assembler = assembler;
         this.jsonSupport = jsonSupport;
         this.clock = clock;
@@ -432,6 +439,13 @@ public class ReviewService {
 
     private ServiceResult doIssue(String batchNo) {
         Instant now = clock.now();
+        // 锁顺序与通关服务一致：通关单 → 审查流程 → 预占绑定。先无锁探测是否进口子批。
+        Review probe = reviewRepository.findByBatchNo(batchNo.trim());
+        CustomsReservation reservationProbe = probe == null
+                ? null : customsRepository.findReservationByReview(probe.getId());
+        CustomsDeclaration declaration = reservationProbe == null
+                ? null : customsRepository.lockDeclarationById(reservationProbe.getCustomsId());
+
         Review review = reviewRepository.lockByBatchNo(batchNo.trim());
         if (review == null) {
             return ServiceResult.status(404, new ErrorResponse("REVIEW_NOT_FOUND", "批号不存在: " + batchNo));
@@ -444,10 +458,50 @@ public class ReviewService {
             return ServiceResult.status(409, new ErrorResponse("NOT_ISSUEABLE",
                     "仅公示期满生效的批次可签发归档，当前状态: " + review.getStatus()));
         }
+
+        CustomsReservation reservation = null;
+        if (reservationProbe != null) {
+            // 进口子批：事务内重查通关单有效且未撤销（行锁内，撤销与签发按提交顺序唯一）。
+            reservation = customsRepository.lockReservationByReview(review.getId());
+            if (declaration.isRevoked()) {
+                customsRepository.insertRiskEvent(new com.example.starter.domain.CustomsRiskEvent(
+                        declaration.getId(), review.getId(), "ISSUE_BLOCKED",
+                        jsonSupport.write(java.util.Map.of("reason", "CUSTOMS_REVOKED")), now));
+                return ServiceResult.status(422, new ErrorResponse("CUSTOMS_REVOKED",
+                        "通关单已撤销，签发被阻断: " + declaration.getDeclarationNo()));
+            }
+            LocalDate todayUtc = LocalDate.ofInstant(now, ZoneOffset.UTC);
+            if (!todayUtc.isBefore(declaration.getValidUntil())) {
+                // now<截止有效、恰截止拒绝。
+                customsRepository.insertRiskEvent(new com.example.starter.domain.CustomsRiskEvent(
+                        declaration.getId(), review.getId(), "ISSUE_BLOCKED",
+                        jsonSupport.write(java.util.Map.of("reason", "CUSTOMS_EXPIRED",
+                                "validUntil", declaration.getValidUntil().toString())), now));
+                return ServiceResult.status(422, new ErrorResponse("CUSTOMS_EXPIRED",
+                        "通关单已于 " + declaration.getValidUntil() + "（UTC）截止，签发被阻断"));
+            }
+            if (reservation.getStatus() != ReservationStatus.RESERVED) {
+                return ServiceResult.status(422, new ErrorResponse("RESERVATION_NOT_RESERVED",
+                        "子批预占状态为 " + reservation.getStatus() + "，不能签发核销"));
+            }
+        }
+
         review.setStatus(ReviewStatus.ISSUED);
         review.setIssuedAt(now);
         review.setUpdatedAt(now);
         reviewRepository.update(review);
+        if (reservation != null) {
+            // 签发原子动作：同一事务内把本子批预占转已核销，不能已发证而余量未扣。
+            reservation.setStatus(ReservationStatus.WRITTEN_OFF);
+            reservation.setWrittenOffAt(now);
+            reservation.setVersion(reservation.getVersion() + 1);
+            reservation.setUpdatedAt(now);
+            customsRepository.updateReservationVersioned(reservation, reservation.getVersion() - 1);
+            reviewRepository.insertEvent(new ReviewEvent(review.getId(), "CUSTOMS_WRITTEN_OFF",
+                    jsonSupport.write(java.util.Map.of(
+                            "declarationNo", declaration.getDeclarationNo(),
+                            "declaredQuantity", reservation.getDeclaredQuantity())), now));
+        }
         reviewRepository.insertEvent(new ReviewEvent(review.getId(), "ISSUED_ARCHIVED", null, now));
         return ServiceResult.ok(assembler.assemble(review));
     }
