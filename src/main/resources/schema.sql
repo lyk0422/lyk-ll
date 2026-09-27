@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS idempotency_record (
     PRIMARY KEY (scope, request_id)
 );
 COMMENT ON TABLE idempotency_record IS '幂等记录：同键同参返回首次结果，同键异参返回 409';
-COMMENT ON COLUMN idempotency_record.scope IS '操作类型：ENTRY/EXIT/ESTIMATE/SEAL';
+COMMENT ON COLUMN idempotency_record.scope IS '操作类型：ENTRY/EXIT/ESTIMATE/SEAL/REFUND_APPLY/REFUND_CONFIRM/ADJUST_SEAL';
 COMMENT ON COLUMN idempotency_record.request_id IS '请求幂等键';
 COMMENT ON COLUMN idempotency_record.fingerprint IS '请求指纹，覆盖 requestId 与全部业务字段';
 COMMENT ON COLUMN idempotency_record.response_body IS '首次成功响应快照（JSON）';
@@ -121,3 +121,85 @@ COMMENT ON COLUMN clearing_discrepancy.biz_date IS '交易原应入账的业务�
 COMMENT ON COLUMN clearing_discrepancy.txn_no IS '交易流水号';
 COMMENT ON COLUMN clearing_discrepancy.amount_cents IS '差异金额（分）';
 COMMENT ON COLUMN clearing_discrepancy.reason IS '差异原因';
+
+CREATE TABLE IF NOT EXISTS refund_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    refund_no VARCHAR(80) NOT NULL,
+    txn_no VARCHAR(64) NOT NULL,
+    amount_cents BIGINT NOT NULL,
+    reason VARCHAR(256) NOT NULL,
+    applicant VARCHAR(64) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    reviewer1 VARCHAR(64) NULL,
+    reviewer2 VARCHAR(64) NULL,
+    version INT NOT NULL,
+    request_id VARCHAR(64) NOT NULL,
+    fingerprint VARCHAR(128) NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT uk_refund_no UNIQUE (refund_no)
+);
+COMMENT ON TABLE refund_order IS '退款单：封账后行程的冲正申请与双人复核，不改写原流水与封账合计';
+COMMENT ON COLUMN refund_order.refund_no IS '退款单号，全局唯一，由系统生成';
+COMMENT ON COLUMN refund_order.txn_no IS '引用的原交易流水号（须已封账且按实结算）';
+COMMENT ON COLUMN refund_order.amount_cents IS '本次退款金额（分），正数；累计退款不得超原实收';
+COMMENT ON COLUMN refund_order.reason IS '退款原因';
+COMMENT ON COLUMN refund_order.applicant IS '申请人';
+COMMENT ON COLUMN refund_order.status IS '状态：PENDING 待复核 / CONFIRMED 已双人确认（终态）';
+COMMENT ON COLUMN refund_order.reviewer1 IS '第一复核人，NULL 表示尚未复核';
+COMMENT ON COLUMN refund_order.reviewer2 IS '第二复核人，NULL 表示尚未终审；须与第一复核人不同';
+COMMENT ON COLUMN refund_order.version IS '乐观锁版本：从 1 开始，每次成功变更加 1';
+COMMENT ON COLUMN refund_order.request_id IS '申请请求幂等键';
+COMMENT ON COLUMN refund_order.fingerprint IS '申请请求结构化指纹（长度前缀，文本含分隔符也可区分）';
+
+CREATE TABLE IF NOT EXISTS adjustment_batch (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    status VARCHAR(16) NOT NULL,
+    open_flag TINYINT NULL,
+    total_cents BIGINT NOT NULL DEFAULT 0,
+    order_count INT NOT NULL DEFAULT 0,
+    version INT NOT NULL,
+    seal_request_id VARCHAR(64) NULL,
+    created_at DATETIME NOT NULL,
+    sealed_at DATETIME NULL,
+    CONSTRAINT uk_adjust_open UNIQUE (open_flag)
+);
+COMMENT ON TABLE adjustment_batch IS '调账批次：退款调整单归集，封存为终态只读；全局同时最多一个开放批次';
+COMMENT ON COLUMN adjustment_batch.status IS '状态：OPEN 开放 / SEALED 已封存（终态只读）';
+COMMENT ON COLUMN adjustment_batch.open_flag IS '开放标记：开放批次恒为 1，封存后置 NULL，保证全局唯一开放批次';
+COMMENT ON COLUMN adjustment_batch.total_cents IS '批次合计（分，负数），封存时快照，封存后不再变化';
+COMMENT ON COLUMN adjustment_batch.order_count IS '批次内调整单笔数';
+COMMENT ON COLUMN adjustment_batch.version IS '乐观锁版本：从 1 开始，封存成功加 1';
+COMMENT ON COLUMN adjustment_batch.seal_request_id IS '封存请求幂等键';
+
+CREATE TABLE IF NOT EXISTS adjustment_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    adjust_no VARCHAR(80) NOT NULL,
+    refund_no VARCHAR(80) NOT NULL,
+    txn_no VARCHAR(64) NOT NULL,
+    batch_id BIGINT NOT NULL,
+    amount_cents BIGINT NOT NULL,
+    created_at DATETIME NOT NULL,
+    CONSTRAINT uk_adjust_no UNIQUE (adjust_no),
+    CONSTRAINT uk_adjust_refund UNIQUE (refund_no)
+);
+COMMENT ON TABLE adjustment_order IS '调整单：退款双人确认后生成，仅纳入一个开放调账批次，重复纳入不重复计额';
+COMMENT ON COLUMN adjustment_order.adjust_no IS '调整单号，全局唯一';
+COMMENT ON COLUMN adjustment_order.refund_no IS '来源退款单号，一退款单至多一调整单';
+COMMENT ON COLUMN adjustment_order.txn_no IS '原交易流水号';
+COMMENT ON COLUMN adjustment_order.batch_id IS '纳入的调账批次 ID，确认时分配且唯一';
+COMMENT ON COLUMN adjustment_order.amount_cents IS '调整金额合计（分，负数）';
+
+CREATE TABLE IF NOT EXISTS adjustment_detail (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    adjustment_id BIGINT NOT NULL,
+    txn_no VARCHAR(64) NOT NULL,
+    line_code VARCHAR(16) NOT NULL,
+    amount_cents BIGINT NOT NULL,
+    created_at DATETIME NOT NULL
+);
+COMMENT ON TABLE adjustment_detail IS '调整明细：按原线路实收份额分摊的负向金额，独立于原清分明细';
+COMMENT ON COLUMN adjustment_detail.adjustment_id IS '所属调整单 ID';
+COMMENT ON COLUMN adjustment_detail.txn_no IS '原交易流水号';
+COMMENT ON COLUMN adjustment_detail.line_code IS '承运线路编码';
+COMMENT ON COLUMN adjustment_detail.amount_cents IS '调整金额（分，负数）；各线路累计绝对值不超原实收份额';
