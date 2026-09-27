@@ -41,11 +41,12 @@ public class RideRecordRepository {
                 rideId, requestId, seq, normal);
     }
 
-    /** 记录一条运行读数；late=true 表示归档后迟到数据。 */
+    /** 记录一条运行读数；late=true 表示归档后迟到数据，warning=true 表示证书失效仅记录告警。 */
     public void insertReading(long rideId, int loadValue, int speedValue,
-            boolean exceeded, boolean late) {
-        jdbc.update("INSERT INTO runtime_reading (ride_id, load_value, speed_value, exceeded, late)"
-                + " VALUES (?, ?, ?, ?, ?)", rideId, loadValue, speedValue, exceeded, late);
+            boolean exceeded, boolean late, boolean warning) {
+        jdbc.update("INSERT INTO runtime_reading (ride_id, load_value, speed_value, exceeded,"
+                + " late, warning) VALUES (?, ?, ?, ?, ?, ?)",
+                rideId, loadValue, speedValue, exceeded, late, warning);
     }
 
     /** 追加启停链事件。 */
@@ -80,7 +81,7 @@ public class RideRecordRepository {
 
     public List<Map<String, Object>> listReadings(long rideId) {
         return jdbc.queryForList(
-                "SELECT id, load_value, speed_value, exceeded, late, created_at"
+                "SELECT id, load_value, speed_value, exceeded, warning, late, created_at"
                         + " FROM runtime_reading WHERE ride_id = ? ORDER BY id", rideId);
     }
 }

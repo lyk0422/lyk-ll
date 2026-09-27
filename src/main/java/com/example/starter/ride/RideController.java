@@ -19,11 +19,16 @@ import com.example.starter.ride.Idempotency.ApiResult;
 import com.example.starter.ride.dto.RideDtos.ArchiveRequest;
 import com.example.starter.ride.dto.RideDtos.CreateRideRequest;
 import com.example.starter.ride.dto.RideDtos.DailyCheckRequest;
+import com.example.starter.ride.dto.RideDtos.IssueCertificateRequest;
 import com.example.starter.ride.dto.RideDtos.OpenRequest;
 import com.example.starter.ride.dto.RideDtos.ReadingRequest;
 import com.example.starter.ride.dto.RideDtos.RecheckRequest;
+import com.example.starter.ride.dto.RideDtos.RegisterOverhaulRequest;
+import com.example.starter.ride.dto.RideDtos.RenewCertificateRequest;
 import com.example.starter.ride.dto.RideDtos.ReopenRequest;
+import com.example.starter.ride.dto.RideDtos.RevokeCertificateRequest;
 import com.example.starter.ride.dto.RideDtos.SafetyFaultRequest;
+import com.example.starter.ride.dto.RideDtos.SupervisoryInspectionRequest;
 import com.example.starter.ride.dto.RideDtos.TrialRunRequest;
 
 /**
@@ -96,6 +101,53 @@ public class RideController {
     public Map<String, Object> reading(@PathVariable long rideId,
             @Valid @RequestBody ReadingRequest request) {
         return service.reading(rideId, request);
+    }
+
+    // ---- 年度检验/大修门禁（合成规则） ----
+
+    @PostMapping("/{rideId}/annual-certificates")
+    public ResponseEntity<String> issueCertificate(@PathVariable long rideId,
+            @Valid @RequestBody IssueCertificateRequest request) {
+        return render(service.issueCertificate(rideId, request));
+    }
+
+    @PostMapping("/{rideId}/annual-certificates/renew")
+    public ResponseEntity<String> renewCertificate(@PathVariable long rideId,
+            @Valid @RequestBody RenewCertificateRequest request) {
+        return render(service.renewCertificate(rideId, request));
+    }
+
+    @PostMapping("/{rideId}/annual-certificates/revoke")
+    public ResponseEntity<String> revokeCertificate(@PathVariable long rideId,
+            @Valid @RequestBody RevokeCertificateRequest request) {
+        return render(service.revokeCertificate(rideId, request));
+    }
+
+    @PostMapping("/{rideId}/overhauls")
+    public ResponseEntity<String> registerOverhaul(@PathVariable long rideId,
+            @Valid @RequestBody RegisterOverhaulRequest request) {
+        return render(service.registerOverhaul(rideId, request));
+    }
+
+    @PostMapping("/{rideId}/supervisory-inspections")
+    public ResponseEntity<String> supervisoryInspection(@PathVariable long rideId,
+            @Valid @RequestBody SupervisoryInspectionRequest request) {
+        return render(service.supervisoryInspection(rideId, request));
+    }
+
+    @GetMapping("/{rideId}/eligibility")
+    public Map<String, Object> eligibility(@PathVariable long rideId) {
+        return service.getEligibility(rideId);
+    }
+
+    @GetMapping("/{rideId}/annual-certificates")
+    public Map<String, Object> certificates(@PathVariable long rideId) {
+        return service.listCertificates(rideId);
+    }
+
+    @GetMapping("/{rideId}/supervisory-inspections")
+    public List<Map<String, Object>> supervisoryInspections(@PathVariable long rideId) {
+        return service.listSupervisoryInspections(rideId);
     }
 
     @GetMapping("/{rideId}/events")

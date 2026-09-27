@@ -18,7 +18,12 @@ public class ApiException extends RuntimeException {
         return status;
     }
 
-    /** 状态机冲突（如未日检禁开放、当前状态不允许该操作）。 */
+    /** 请求参数非法（如两名检验人相同、截止时刻与默认值不符）。 */
+    public static ApiException badRequest(String message) {
+        return new ApiException(HttpStatus.BAD_REQUEST, message);
+    }
+
+    /** 状态机冲突（如未日检禁开放、当前状态不允许该操作、乐观锁版本不一致）。 */
     public static ApiException conflict(String message) {
         return new ApiException(HttpStatus.CONFLICT, message);
     }

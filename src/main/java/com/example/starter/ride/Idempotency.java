@@ -3,7 +3,9 @@ package com.example.starter.ride;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Optional;
 
 import org.springframework.dao.DuplicateKeyException;
@@ -13,11 +15,10 @@ import org.springframework.stereotype.Repository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-
 /**
- * 幂等组件：指纹覆盖 requestId 与全部业务字段。
- * 同键同参返回首次结果，同键异参返回 409 且不改变设备状态；
+ * 幂等组件：指纹为长度前缀的结构化 SHA-256，覆盖 requestId 与全部业务字段
+ * （含版本、集合与精确时刻）。合法文本即使含分隔符（如 "a|b" 与 ["a","b"]）也可区分。
+ * 同键同参返回首次结果，同键异参返回 409 且不改变设备状态；失败不占用 requestId 键；
  * 幂等记录与业务写入在同一事务内提交。
  */
 public final class Idempotency {
@@ -72,12 +73,10 @@ public final class Idempotency {
 
         private final Store store;
         private final TransactionTemplate tx;
-        private final ObjectMapper objectMapper;
 
-        public Executor(Store store, TransactionTemplate tx, ObjectMapper objectMapper) {
+        public Executor(Store store, TransactionTemplate tx) {
             this.store = store;
             this.tx = tx;
-            this.objectMapper = objectMapper;
         }
 
         /**
@@ -120,19 +119,84 @@ public final class Idempotency {
             return Optional.of(stored.result());
         }
 
-        /** 指纹 = SHA-256(requestId + 业务字段规范化JSON)。 */
+        /**
+         * 结构化长度前缀指纹：SHA-256(规范化结构)。
+         * 对 record 按“类名 + 字段数 + 每字段‘长度:值’”编码，集合加元素数，
+         * 标量按类型标记编码；合法文本即使含分隔符也不会与其他结构碰撞。
+         */
         public String fingerprint(String requestId, Object businessFields) {
             try {
-                String json = objectMapper.writeValueAsString(businessFields);
+                StringBuilder out = new StringBuilder();
+                appendTyped(out, requestId);
+                appendValue(out, businessFields);
                 MessageDigest digest = MessageDigest.getInstance("SHA-256");
-                byte[] hash = digest.digest(
-                        (requestId + "|" + json).getBytes(StandardCharsets.UTF_8));
+                byte[] hash = digest.digest(out.toString().getBytes(StandardCharsets.UTF_8));
                 return HexFormat.of().formatHex(hash);
             } catch (NoSuchAlgorithmException e) {
                 throw new IllegalStateException(e);
-            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-                throw new IllegalArgumentException("请求体无法序列化", e);
             }
+        }
+
+        private static void appendValue(StringBuilder out, Object value) {
+            if (value == null) {
+                out.append("n:0:");
+            } else if (value instanceof Record record) {
+                Object[] components = extractComponents(record);
+                out.append("R:").append(record.getClass().getSimpleName())
+                        .append(':').append(components.length).append(':');
+                for (Object component : components) {
+                    appendValue(out, component);
+                }
+            } else if (value instanceof List<?> list) {
+                out.append("L:").append(list.size()).append(':');
+                for (Object element : list) {
+                    appendNullable(out, element);
+                }
+            } else if (value instanceof String text) {
+                appendTyped(out, text);
+            } else if (value instanceof Boolean b) {
+                out.append("b:").append(b).append(':');
+            } else if (value instanceof Instant instant) {
+                out.append("i:").append(instant.toEpochMilli()).append(':');
+            } else if (value instanceof Number number) {
+                out.append("num:").append(value.getClass().getSimpleName())
+                        .append(':').append(number).append(':');
+            } else if (value instanceof Enum<?> e) {
+                out.append("e:").append(e.name()).append(':');
+            } else {
+                throw new IllegalArgumentException(
+                        "幂等指纹不支持的字段类型：" + value.getClass());
+            }
+        }
+
+        private static void appendNullable(StringBuilder out, Object element) {
+            if (element == null) {
+                out.append("n:0:");
+            } else {
+                appendValue(out, element);
+            }
+        }
+
+        private static Object[] extractComponents(Record record) {
+            try {
+                return java.util.Arrays.stream(record.getClass().getRecordComponents())
+                        .map(component -> {
+                            try {
+                                return component.getAccessor().invoke(record);
+                            } catch (ReflectiveOperationException e) {
+                                throw new IllegalStateException("读取记录字段失败", e);
+                            }
+                        })
+                        .toArray();
+            } catch (SecurityException e) {
+                throw new IllegalStateException("读取记录字段失败", e);
+            }
+        }
+
+        /** 字符串字段：s + UTF-8 字节数 + 内容，长度前缀保证含分隔符文本不产生拼接歧义。 */
+        private static void appendTyped(StringBuilder out, String text) {
+            byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+            out.append("s:").append(bytes.length).append(':').append(text).append(':');
         }
     }
 }
