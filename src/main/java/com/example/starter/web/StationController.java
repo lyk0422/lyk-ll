@@ -55,12 +55,13 @@ public class StationController {
     /**
      * 调节令请求。
      *
-     * @param requestId   客户端幂等键
-     * @param unitId      目标单元 ID
-     * @param stepPercent 步进幅度，单位 %，(0, 10]，越界由服务层返回 422
+     * @param requestId       客户端幂等键
+     * @param unitId          目标单元 ID
+     * @param stepPercent     步进幅度，单位 %，(0, 10]，越界由服务层返回 422
+     * @param expectedVersion 受控阀门当前开度版本；阀门有有效铅封时必填，否则可省略
      */
     public record AdjustmentRequest(@NotBlank String requestId, @NotNull Long unitId,
-                                    @NotNull BigDecimal stepPercent) {
+                                    @NotNull BigDecimal stepPercent, Integer expectedVersion) {
     }
 
     /**
@@ -84,13 +85,14 @@ public class StationController {
     }
 
     /**
-     * 下达调节令（初调节/再调节）：requestId 幂等，站内并发唯一受理。
+     * 下达调节令（初调节/再调节）：requestId 幂等，站内并发唯一受理；
+     * 阀门存在有效铅封时须携带 expectedVersion 并持生效中的解封单。
      */
     @PostMapping("/{stationId}/adjustments")
     public AdjustmentTask adjust(@PathVariable long stationId,
                                  @Valid @RequestBody AdjustmentRequest request) {
         return adjustmentService.issueAdjustment(stationId, request.requestId(),
-                request.unitId(), request.stepPercent());
+                request.unitId(), request.stepPercent(), request.expectedVersion());
     }
 
     /**

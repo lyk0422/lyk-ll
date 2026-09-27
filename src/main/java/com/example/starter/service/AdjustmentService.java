@@ -3,6 +3,7 @@ package com.example.starter.service;
 import com.example.starter.domain.AdjustmentTask;
 import com.example.starter.domain.Assessment;
 import com.example.starter.domain.HeatingUnit;
+import com.example.starter.domain.UnsealOrder;
 import com.example.starter.domain.Valve;
 import com.example.starter.domain.ValveVersion;
 import com.example.starter.repository.AdjustmentTaskRepository;
@@ -10,6 +11,7 @@ import com.example.starter.repository.AssessmentRepository;
 import com.example.starter.repository.StationRepository;
 import com.example.starter.repository.UnitRepository;
 import com.example.starter.repository.ValveRepository;
+import com.example.starter.repository.ValveSealRepository;
 import com.example.starter.repository.ValveVersionRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.dao.DuplicateKeyException;
@@ -17,13 +19,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.HexFormat;
 import java.util.List;
 
 /**
@@ -47,6 +45,8 @@ public class AdjustmentService {
     private final ValveVersionRepository versionRepository;
     private final AdjustmentTaskRepository taskRepository;
     private final AssessmentRepository assessmentRepository;
+    private final ValveSealRepository sealRepository;
+    private final SealService sealService;
     private final BalanceService balanceService;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -57,6 +57,8 @@ public class AdjustmentService {
                              ValveVersionRepository versionRepository,
                              AdjustmentTaskRepository taskRepository,
                              AssessmentRepository assessmentRepository,
+                             ValveSealRepository sealRepository,
+                             SealService sealService,
                              BalanceService balanceService,
                              ObjectMapper objectMapper,
                              Clock clock) {
@@ -66,14 +68,15 @@ public class AdjustmentService {
         this.versionRepository = versionRepository;
         this.taskRepository = taskRepository;
         this.assessmentRepository = assessmentRepository;
+        this.sealRepository = sealRepository;
+        this.sealService = sealService;
         this.balanceService = balanceService;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
 
     /**
-     * 下达调节令：幂等受理，站内同时刻只允许一个执行中任务；
-     * 阀门开度写入与版本记录在同一事务内完成。
+     * 下达调节令（旧入口兼容）：未登记铅封台账的阀门按原规则工作。
      *
      * @param stationId   换热站 ID
      * @param requestId   客户端幂等键
@@ -84,8 +87,29 @@ public class AdjustmentService {
     @Transactional
     public AdjustmentTask issueAdjustment(long stationId, String requestId, long unitId,
                                           BigDecimal stepPercent) {
-        String fingerprint = fingerprint("ADJ", requestId, String.valueOf(stationId),
-                String.valueOf(unitId), stepPercent.stripTrailingZeros().toPlainString());
+        return issueAdjustment(stationId, requestId, unitId, stepPercent, null);
+    }
+
+    /**
+     * 下达调节令：幂等受理，站内同时刻只允许一个执行中任务；
+     * 阀门开度写入与版本记录在同一事务内完成。
+     * 阀门存在有效铅封时走受控路径：事务内重查解封未撤销、在窗内、额度足够及版本一致，
+     * 再原子更新开度、写版本并消费一次额度；失败不消费，重复同键不消费两次。
+     *
+     * @param stationId       换热站 ID
+     * @param requestId       客户端幂等键
+     * @param unitId          目标单元 ID
+     * @param stepPercent     步进幅度，单位 %，0 &lt; step &le; 10
+     * @param expectedVersion 受控阀门当前开度版本；无铅封台账的阀门忽略，可为 null
+     * @return 已受理（或幂等重放的首次）任务
+     */
+    @Transactional
+    public AdjustmentTask issueAdjustment(long stationId, String requestId, long unitId,
+                                          BigDecimal stepPercent, Integer expectedVersion) {
+        String fingerprint = Fingerprints.of("ADJ", requestId, String.valueOf(stationId),
+                String.valueOf(unitId),
+                stepPercent == null ? null : stepPercent.stripTrailingZeros().toPlainString(),
+                expectedVersion == null ? null : String.valueOf(expectedVersion));
         var existing = taskRepository.findByRequestId(requestId);
         if (existing.isPresent()) {
             return replayOrConflict(existing.get(), fingerprint);
@@ -109,7 +133,29 @@ public class AdjustmentService {
         if (taskRepository.existsActiveByStationId(stationId)) {
             throw new ConflictException("换热站存在执行中的调节任务，并发下达唯一受理: stationId=" + stationId);
         }
+        Valve valve = valveRepository.findByUnitId(unitId)
+                .orElseThrow(() -> new NotFoundException("单元未配置阀门: unitId=" + unitId));
         Instant now = clock.instant();
+        // 受控阀门：存在有效铅封时须持生效中的解封单，且开度版本一致；完整铅封下调节令拒绝。
+        UnsealOrder unsealOrder = null;
+        if (sealRepository.findActiveByValveId(valve.id()).isPresent()) {
+            if (expectedVersion == null) {
+                throw new UnprocessableException(
+                        "受控阀门调节须携带 expectedVersion: valveId=" + valve.id());
+            }
+            // 与登记/复封保持一致的加锁顺序（阀门行 → 解封单行），避免相互等待死锁。
+            long valveId = valve.id();
+            valve = valveRepository.lockById(valveId)
+                    .orElseThrow(() -> new NotFoundException("阀门不存在: valveId=" + valveId));
+            unsealOrder = sealService.lockValidOrderForAdjustment(valve, now);
+            int currentVersion = versionRepository.maxVersionNo(valve.id());
+            if (expectedVersion != currentVersion
+                    || unsealOrder.expectedValveVersion() != currentVersion) {
+                throw new ConflictException("开度版本不一致，期望 " + expectedVersion
+                        + "，解封单期望 " + unsealOrder.expectedValveVersion()
+                        + "，当前 " + currentVersion + ": valveId=" + valve.id());
+            }
+        }
         int executed = taskRepository.countExecutedSince(unitId, now.minus(ADJUSTMENT_WINDOW));
         if (executed >= MAX_ADJUSTMENTS_PER_24H) {
             AdjustmentTask review = new AdjustmentTask(0, stationId, unitId, requestId, fingerprint,
@@ -124,8 +170,6 @@ public class AdjustmentService {
                 .findFirst()
                 .orElseThrow(() -> new UnprocessableException(
                         "单元无温度数据或未失衡，无法判定调节方向: unitId=" + unitId));
-        Valve valve = valveRepository.findByUnitId(unitId)
-                .orElseThrow(() -> new NotFoundException("单元未配置阀门: unitId=" + unitId));
         BigDecimal oldOpening = valve.openingPercent();
         BigDecimal newOpening = classification == AdjustmentTask.ImbalanceType.UNDERFLOW
                 ? oldOpening.add(stepPercent) : oldOpening.subtract(stepPercent);
@@ -145,10 +189,13 @@ public class AdjustmentService {
                     .map(t -> replayOrConflict(t, fingerprint))
                     .orElseThrow(() -> e);
         }
-        // 开度写入与版本记录同事务提交，任一失败整体回滚。
+        // 开度写入、版本记录与解封额度消费同事务提交，任一失败整体回滚。
         valveRepository.updateOpening(valve.id(), newOpening, now);
         versionRepository.insert(valve.id(), taskId,
                 versionRepository.maxVersionNo(valve.id()) + 1, oldOpening, newOpening, now);
+        if (unsealOrder != null) {
+            sealService.consumeQuota(unsealOrder, valve.id(), taskId, now);
+        }
         return taskRepository.findById(taskId).orElseThrow();
     }
 
@@ -157,7 +204,7 @@ public class AdjustmentService {
      */
     @Transactional
     public Assessment assess(long taskId, String requestId) {
-        String fingerprint = fingerprint("ASM", requestId, String.valueOf(taskId));
+        String fingerprint = Fingerprints.of("ASM", requestId, String.valueOf(taskId));
         var existing = assessmentRepository.findByRequestId(requestId);
         if (existing.isPresent()) {
             Assessment found = existing.get();
@@ -268,15 +315,5 @@ public class AdjustmentService {
      * 前后温度分布对比，用于评估快照与复算。
      */
     public record Comparison(BalanceService.BalanceView before, BalanceService.BalanceView after) {
-    }
-
-    static String fingerprint(String... parts) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(String.join("|", parts).getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
     }
 }

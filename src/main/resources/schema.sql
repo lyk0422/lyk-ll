@@ -91,6 +91,101 @@ COMMENT ON COLUMN valve_opening_version.old_opening IS '变更前开度，单位
 COMMENT ON COLUMN valve_opening_version.new_opening IS '变更后开度，单位 %';
 COMMENT ON COLUMN valve_opening_version.created_at IS '版本生成时间（UTC）';
 
+CREATE TABLE IF NOT EXISTS valve_seal (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    valve_id BIGINT NOT NULL REFERENCES valve (id),
+    seal_no VARCHAR(64) NOT NULL,
+    valve_version INT NOT NULL,
+    sealed_at TIMESTAMP NOT NULL,
+    operator_a VARCHAR(64) NOT NULL,
+    operator_b VARCHAR(64),
+    status VARCHAR(16) NOT NULL,
+    request_id VARCHAR(64) NOT NULL,
+    fingerprint VARCHAR(128) NOT NULL,
+    version INT NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_valve_seal_no UNIQUE (seal_no),
+    CONSTRAINT uk_valve_seal_request UNIQUE (request_id)
+);
+COMMENT ON TABLE valve_seal IS '阀门铅封台账：每行为一次登记/复封，保留历史封号链，同一阀门至多一行 ACTIVE';
+COMMENT ON COLUMN valve_seal.id IS '主键';
+COMMENT ON COLUMN valve_seal.valve_id IS '阀门 ID';
+COMMENT ON COLUMN valve_seal.seal_no IS '铅封号，全局唯一，复封须换新号';
+COMMENT ON COLUMN valve_seal.valve_version IS '封存时核对的开度版本号（阀门版本链从 1 开始，0 表示尚无版本）';
+COMMENT ON COLUMN valve_seal.sealed_at IS '封存时刻（UTC）';
+COMMENT ON COLUMN valve_seal.operator_a IS '登记人/复封核对人甲';
+COMMENT ON COLUMN valve_seal.operator_b IS '复封核对人乙，须与甲不同；首次登记时为空';
+COMMENT ON COLUMN valve_seal.status IS '状态：ACTIVE 当前有效 / SUPERSEDED 已被复封取代（历史链）';
+COMMENT ON COLUMN valve_seal.request_id IS '客户端幂等键，全局唯一';
+COMMENT ON COLUMN valve_seal.fingerprint IS '幂等指纹：requestId 与全部业务字段的结构化 SHA-256';
+COMMENT ON COLUMN valve_seal.version IS '台账行版本，从 1 开始，成功变更（被取代）加 1';
+COMMENT ON COLUMN valve_seal.created_at IS '登记时间（UTC）';
+COMMENT ON COLUMN valve_seal.updated_at IS '最后变更时间（UTC）';
+
+CREATE TABLE IF NOT EXISTS unseal_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    valve_id BIGINT NOT NULL REFERENCES valve (id),
+    seal_no VARCHAR(64) NOT NULL,
+    expected_valve_version INT NOT NULL,
+    authorizer_a VARCHAR(64) NOT NULL,
+    authorizer_b VARCHAR(64) NOT NULL,
+    window_start TIMESTAMP NOT NULL,
+    window_end TIMESTAMP NOT NULL,
+    quota_total INT NOT NULL,
+    quota_used INT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    request_id VARCHAR(64) NOT NULL,
+    fingerprint VARCHAR(128) NOT NULL,
+    revoke_request_id VARCHAR(64),
+    revoke_fingerprint VARCHAR(128),
+    version INT NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_unseal_order_request UNIQUE (request_id),
+    CONSTRAINT ck_unseal_quota CHECK (quota_total >= 1 AND quota_total <= 2
+        AND quota_used >= 0 AND quota_used <= quota_total)
+);
+COMMENT ON TABLE unseal_order IS '临时解封单：批准窗口与调节额度，受控调节在事务内重查并消费额度';
+COMMENT ON COLUMN unseal_order.id IS '主键';
+COMMENT ON COLUMN unseal_order.valve_id IS '阀门 ID';
+COMMENT ON COLUMN unseal_order.seal_no IS '引用的铅封号（批准时阀门的当前铅封）';
+COMMENT ON COLUMN unseal_order.expected_valve_version IS '期望的下一开度版本号：批准时等于当前版本，每次消费随开度版本同步加 1';
+COMMENT ON COLUMN unseal_order.authorizer_a IS '授权人甲';
+COMMENT ON COLUMN unseal_order.authorizer_b IS '授权人乙，须与甲不同';
+COMMENT ON COLUMN unseal_order.window_start IS '有效窗口起点（UTC），半开区间含起点';
+COMMENT ON COLUMN unseal_order.window_end IS '有效窗口终点（UTC），半开区间不含终点，恰到终点失效';
+COMMENT ON COLUMN unseal_order.quota_total IS '调节额度上限，最多 2 次';
+COMMENT ON COLUMN unseal_order.quota_used IS '已消费额度，仅在受控调节成功事务内加 1，失败不消费';
+COMMENT ON COLUMN unseal_order.status IS '状态：ACTIVE 生效中 / REVOKED 已撤销 / TERMINATED 复封终结';
+COMMENT ON COLUMN unseal_order.request_id IS '批准操作的客户端幂等键，全局唯一';
+COMMENT ON COLUMN unseal_order.fingerprint IS '批准操作的幂等指纹：requestId 与全部业务字段的结构化 SHA-256';
+COMMENT ON COLUMN unseal_order.revoke_request_id IS '撤销操作的客户端幂等键；未撤销时为空';
+COMMENT ON COLUMN unseal_order.revoke_fingerprint IS '撤销操作的幂等指纹；未撤销时为空';
+COMMENT ON COLUMN unseal_order.version IS '解封单行版本，从 1 开始，成功变更（消费/撤销/终结）加 1';
+COMMENT ON COLUMN unseal_order.created_at IS '批准时间（UTC）';
+COMMENT ON COLUMN unseal_order.updated_at IS '最后变更时间（UTC）';
+
+CREATE TABLE IF NOT EXISTS unseal_quota_event (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id BIGINT NOT NULL REFERENCES unseal_order (id),
+    valve_id BIGINT NOT NULL,
+    event_type VARCHAR(16) NOT NULL,
+    quota_used INT NOT NULL,
+    task_id BIGINT,
+    detail VARCHAR(512),
+    created_at TIMESTAMP NOT NULL
+);
+COMMENT ON TABLE unseal_quota_event IS '解封额度轨迹：授予/消费/撤销/终结事件，与业务变更同事务写入';
+COMMENT ON COLUMN unseal_quota_event.id IS '主键';
+COMMENT ON COLUMN unseal_quota_event.order_id IS '所属解封单 ID';
+COMMENT ON COLUMN unseal_quota_event.valve_id IS '阀门 ID';
+COMMENT ON COLUMN unseal_quota_event.event_type IS '事件类型：GRANT 授予 / CONSUME 消费 / REVOKE 撤销 / TERMINATE 复封终结';
+COMMENT ON COLUMN unseal_quota_event.quota_used IS '事件发生后已用额度';
+COMMENT ON COLUMN unseal_quota_event.task_id IS '消费事件对应的调节任务 ID；非消费事件为空';
+COMMENT ON COLUMN unseal_quota_event.detail IS '事件说明（合成数据）';
+COMMENT ON COLUMN unseal_quota_event.created_at IS '事件时间（UTC）';
+
 CREATE TABLE IF NOT EXISTS temperature_reading (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     unit_id BIGINT NOT NULL REFERENCES heating_unit (id),
