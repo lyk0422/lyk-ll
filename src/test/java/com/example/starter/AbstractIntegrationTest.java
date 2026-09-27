@@ -28,6 +28,8 @@ public abstract class AbstractIntegrationTest {
     @Autowired
     protected ReviewService reviewService;
     @Autowired
+    protected com.example.starter.service.CustomsService customsService;
+    @Autowired
     protected MutableBusinessClock clock;
     @Autowired
     protected JdbcTemplate jdbc;
@@ -37,6 +39,9 @@ public abstract class AbstractIntegrationTest {
     @AfterEach
     void cleanUp() {
         clock.reset();
+        jdbc.update("DELETE FROM customs_event");
+        jdbc.update("DELETE FROM sub_batch_binding");
+        jdbc.update("DELETE FROM customs_declaration");
         jdbc.update("DELETE FROM review_event");
         jdbc.update("DELETE FROM publicity_record");
         jdbc.update("DELETE FROM inspection_record");

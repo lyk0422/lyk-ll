@@ -68,4 +68,55 @@ class FingerprintsTest {
                 List.of(new InspectionInput("POTENCY", "4.5"),
                         new InspectionInput("STERILITY", "无菌")));
     }
+
+    @Test
+    void structuredFingerprintDistinguishesTextsContainingSeparators() {
+        // 合法文本含分隔符时仍须区分字段边界：拼接式编码会把两者混为一谈
+        assertNotEquals(
+                Fingerprints.structured("OP", "a|b", "c"),
+                Fingerprints.structured("OP", "a", "b|c"),
+                "含竖线的文本不得与字段边界混淆");
+        assertNotEquals(
+                Fingerprints.structured("OP", "x,y", "z"),
+                Fingerprints.structured("OP", "x", "y,z"),
+                "含逗号的文本不得与集合分隔混淆");
+        assertNotEquals(
+                Fingerprints.structured("OP", "k=1", "2"),
+                Fingerprints.structured("OP", "k", "1=2"),
+                "含等号的文本不得与键值分隔混淆");
+    }
+
+    @Test
+    void structuredFingerprintDistinguishesNullEmptyAndTypes() {
+        assertNotEquals(
+                Fingerprints.structured("OP", (Object) null),
+                Fingerprints.structured("OP", ""),
+                "null 与空串必须区分");
+        assertNotEquals(
+                Fingerprints.structured("OP", "1"),
+                Fingerprints.structured("OP", 1),
+                "字符串 1 与数字 1 必须区分");
+        assertNotEquals(
+                Fingerprints.structured("OP", List.of("a", "b")),
+                Fingerprints.structured("OP", List.of("ab")),
+                "集合元素边界必须区分");
+    }
+
+    @Test
+    void structuredFingerprintIsStableForSameParameters() {
+        java.time.Instant moment = java.time.Instant.parse("2026-12-31T00:00:00Z");
+        assertEquals(
+                Fingerprints.structured("OP", "req-1", "CUS-1", moment, 100, 1),
+                Fingerprints.structured("OP", "req-1", "CUS-1", moment, 100, 1),
+                "同参指纹必须稳定一致");
+        assertNotEquals(
+                Fingerprints.structured("OP", "req-1", "CUS-1", moment, 100, 1),
+                Fingerprints.structured("OP", "req-1", "CUS-1", moment, 100, 2),
+                "版本号变化必须导致指纹不同");
+        assertNotEquals(
+                Fingerprints.structured("OP", "req-1", "CUS-1", moment, 100, 1),
+                Fingerprints.structured("OP", "req-1", "CUS-1",
+                        moment.plusSeconds(1), 100, 1),
+                "精确时刻变化必须导致指纹不同");
+    }
 }

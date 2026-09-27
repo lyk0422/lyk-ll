@@ -64,6 +64,7 @@ public class ReviewService {
     private final JsonSupport jsonSupport;
     private final BusinessClock clock;
     private final TransactionTemplate txTemplate;
+    private final CustomsService customsService;
 
     public ReviewService(ReviewRepository reviewRepository,
                          EnterpriseProductStatusRepository statusRepository,
@@ -71,7 +72,8 @@ public class ReviewService {
                          ReviewViewAssembler assembler,
                          JsonSupport jsonSupport,
                          BusinessClock clock,
-                         TransactionTemplate txTemplate) {
+                         TransactionTemplate txTemplate,
+                         CustomsService customsService) {
         this.reviewRepository = reviewRepository;
         this.statusRepository = statusRepository;
         this.idempotencyRepository = idempotencyRepository;
@@ -79,6 +81,7 @@ public class ReviewService {
         this.jsonSupport = jsonSupport;
         this.clock = clock;
         this.txTemplate = txTemplate;
+        this.customsService = customsService;
     }
 
     /** 事务内执行业务并返回结果（允许提交 4xx 预期错误结果）。 */
@@ -212,6 +215,8 @@ public class ReviewService {
             review.setStatus(ReviewStatus.WITHDRAWN);
             review.setUpdatedAt(now);
             reviewRepository.update(review);
+            // 签发前撤回：释放该子批在通关单上的预占（只释放一次）。
+            customsService.releaseOnWithdraw(review.getId(), now);
             reviewRepository.insertEvent(new ReviewEvent(review.getId(), "WITHDRAWN",
                     jsonSupport.write(java.util.Map.of(
                             "deadline", review.getCorrectionDeadline().toString(),
@@ -443,6 +448,12 @@ public class ReviewService {
         if (review.getStatus() != ReviewStatus.PUBLICITY_EFFECTIVE) {
             return ServiceResult.status(409, new ErrorResponse("NOT_ISSUEABLE",
                     "仅公示期满生效的批次可签发归档，当前状态: " + review.getStatus()));
+        }
+        // 进口批次衔接：事务内重查通关单有效且未撤销，原子把本子批预占转已核销；
+        // 国内批次（无绑定）不新增门禁。拒绝时整个签发不生效，不能已发证而余量未扣。
+        ServiceResult customsError = customsService.consumeOnIssue(review, now);
+        if (customsError != null) {
+            return customsError;
         }
         review.setStatus(ReviewStatus.ISSUED);
         review.setIssuedAt(now);
