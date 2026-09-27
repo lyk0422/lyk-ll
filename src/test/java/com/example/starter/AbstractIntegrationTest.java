@@ -7,6 +7,7 @@ import com.example.starter.dto.InspectionInput;
 import com.example.starter.dto.ReviewView;
 import com.example.starter.dto.ServiceResult;
 import com.example.starter.json.JsonSupport;
+import com.example.starter.service.CustomsService;
 import com.example.starter.service.ReviewService;
 import com.example.starter.time.MutableBusinessClock;
 import org.junit.jupiter.api.AfterEach;
@@ -28,6 +29,8 @@ public abstract class AbstractIntegrationTest {
     @Autowired
     protected ReviewService reviewService;
     @Autowired
+    protected CustomsService customsService;
+    @Autowired
     protected MutableBusinessClock clock;
     @Autowired
     protected JdbcTemplate jdbc;
@@ -40,7 +43,10 @@ public abstract class AbstractIntegrationTest {
         jdbc.update("DELETE FROM review_event");
         jdbc.update("DELETE FROM publicity_record");
         jdbc.update("DELETE FROM inspection_record");
+        // 子批绑定外键引用审查流程与通关单，须先于两者清理。
+        jdbc.update("DELETE FROM subbatch_binding");
         jdbc.update("DELETE FROM batch_review");
+        jdbc.update("DELETE FROM customs_declaration");
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM enterprise_product_status");
     }
@@ -80,5 +86,22 @@ public abstract class AbstractIntegrationTest {
         return jsonSupport.convertValue(result.body(), ReviewView.class) == null
                 ? null
                 : jsonSupport.convertValue(result.body(), ReviewView.class);
+    }
+
+    /** 进口合成通关场景默认企业。 */
+    protected static final String IMPORT_ENTERPRISE = "合成生物制品厂";
+    /** 进口合成通关场景默认品种。 */
+    protected static final String IMPORT_PRODUCT = "重组冠状病毒疫苗";
+
+    /** 构造与通关单默认企业品种一致的进口子批申报（资料齐全、检验合格）。 */
+    protected DeclareRequest importDeclareRequest(String requestId, String batchNo) {
+        return new DeclareRequest(requestId, IMPORT_ENTERPRISE, IMPORT_PRODUCT,
+                batchNo, allDocuments(), boundaryPassingInspections());
+    }
+
+    /** 申报 → 评定 → 公示期满生效，把进口子批推进到可签发状态（签发时刻由时钟决定）。 */
+    protected void prepareIssueableImportBatch(String declareRequestId, String batchNo) {
+        reviewService.declare(importDeclareRequest(declareRequestId, batchNo));
+        reviewService.evaluate(batchNo);
     }
 }

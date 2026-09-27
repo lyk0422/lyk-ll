@@ -4,6 +4,9 @@ import com.example.starter.catalog.DocumentCatalog;
 import com.example.starter.catalog.InspectionCatalog;
 import com.example.starter.catalog.InspectionEvaluator;
 import com.example.starter.catalog.InspectionSpec;
+import com.example.starter.domain.BindingStatus;
+import com.example.starter.domain.CustomsDeclaration;
+import com.example.starter.domain.CustomsStatus;
 import com.example.starter.domain.EnterpriseProductStatus;
 import com.example.starter.domain.InspectionRecord;
 import com.example.starter.domain.PublicityRecord;
@@ -11,6 +14,7 @@ import com.example.starter.domain.PublicityStatus;
 import com.example.starter.domain.Review;
 import com.example.starter.domain.ReviewEvent;
 import com.example.starter.domain.ReviewStatus;
+import com.example.starter.domain.SubbatchBinding;
 import com.example.starter.dto.CorrectRequest;
 import com.example.starter.dto.DeclareRequest;
 import com.example.starter.dto.EnterpriseStatusView;
@@ -22,6 +26,7 @@ import com.example.starter.dto.ReviewView;
 import com.example.starter.dto.ServiceResult;
 import com.example.starter.idempotency.Fingerprints;
 import com.example.starter.json.JsonSupport;
+import com.example.starter.repo.CustomsRepository;
 import com.example.starter.repo.EnterpriseProductStatusRepository;
 import com.example.starter.repo.IdempotencyRepository;
 import com.example.starter.repo.ReviewRepository;
@@ -60,6 +65,7 @@ public class ReviewService {
     private final ReviewRepository reviewRepository;
     private final EnterpriseProductStatusRepository statusRepository;
     private final IdempotencyRepository idempotencyRepository;
+    private final CustomsRepository customsRepository;
     private final ReviewViewAssembler assembler;
     private final JsonSupport jsonSupport;
     private final BusinessClock clock;
@@ -68,6 +74,7 @@ public class ReviewService {
     public ReviewService(ReviewRepository reviewRepository,
                          EnterpriseProductStatusRepository statusRepository,
                          IdempotencyRepository idempotencyRepository,
+                         CustomsRepository customsRepository,
                          ReviewViewAssembler assembler,
                          JsonSupport jsonSupport,
                          BusinessClock clock,
@@ -75,6 +82,7 @@ public class ReviewService {
         this.reviewRepository = reviewRepository;
         this.statusRepository = statusRepository;
         this.idempotencyRepository = idempotencyRepository;
+        this.customsRepository = customsRepository;
         this.assembler = assembler;
         this.jsonSupport = jsonSupport;
         this.clock = clock;
@@ -432,10 +440,22 @@ public class ReviewService {
 
     private ServiceResult doIssue(String batchNo) {
         Instant now = clock.now();
-        Review review = reviewRepository.lockByBatchNo(batchNo.trim());
-        if (review == null) {
+        String trimmedBatchNo = batchNo.trim();
+
+        // 先用不加锁探测确定子批是否为进口绑定；进口子批按固定顺序
+        // customs_declaration → subbatch_binding → batch_review 加锁，与撤销/撤回互斥序列化。
+        Review probe = reviewRepository.findByBatchNo(trimmedBatchNo);
+        if (probe == null) {
             return ServiceResult.status(404, new ErrorResponse("REVIEW_NOT_FOUND", "批号不存在: " + batchNo));
         }
+        SubbatchBinding binding = customsRepository.findBindingByReviewId(probe.getId());
+        CustomsDeclaration customs = null;
+        if (binding != null) {
+            customs = customsRepository.lockById(binding.getCustomsDeclarationId());
+            binding = customsRepository.lockBindingByReviewId(probe.getId());
+        }
+        Review review = reviewRepository.lockById(probe.getId());
+
         if (review.getStatus() == ReviewStatus.ISSUED) {
             // 终态重复归档：幂等成功。
             return ServiceResult.ok(assembler.assemble(review));
@@ -444,12 +464,60 @@ public class ReviewService {
             return ServiceResult.status(409, new ErrorResponse("NOT_ISSUEABLE",
                     "仅公示期满生效的批次可签发归档，当前状态: " + review.getStatus()));
         }
+
+        if (binding != null) {
+            // 进口子批：事务内重查通关单，未撤销且 now 严格早于有效截止；恰截止即拒绝。
+            // 撤销与签发竞争由提交顺序唯一决定，不能拿先前公示通过绕过新失效。
+            if (customs.getStatus() == CustomsStatus.REVOKED) {
+                return ServiceResult.status(422, new ErrorResponse("CUSTOMS_REVOKED_BLOCKS_ISSUE",
+                        "通关单已撤销，未签发子批预占已释放，签发被阻断: " + customs.getCustomsNo()));
+            }
+            if (!now.isBefore(customs.getValidUntil())) {
+                return ServiceResult.status(422, new ErrorResponse("CUSTOMS_EXPIRED",
+                        "通关单有效截止 " + customs.getValidUntil() + "，恰截止或已过截止不得签发"));
+            }
+            if (binding.getStatus() != BindingStatus.RESERVED) {
+                return ServiceResult.status(422, new ErrorResponse("SUBBATCH_RESERVATION_NOT_HELD",
+                        "子批预占不处于可核销状态（已释放/已核销），不能签发: "
+                                + binding.getStatus()));
+            }
+
+            int qty = binding.getDeclaredQuantity();
+            // 原子核销：同一事务内把本子批预占转为已核销，并扣减通关单余量，
+            // 不可能出现已发证而余量未扣（行锁 + ck_customs_quantity_bounds 兜底）。
+            binding.setStatus(BindingStatus.WRITTEN_OFF);
+            binding.setWrittenOffAt(now);
+            binding.setVersion(binding.getVersion() + 1);
+            binding.setUpdatedAt(now);
+            customsRepository.updateBinding(binding);
+
+            customs.setReservedQuantity(customs.getReservedQuantity() - qty);
+            customs.setWrittenOffQuantity(customs.getWrittenOffQuantity() + qty);
+            customs.setVersion(customs.getVersion() + 1);
+            customs.setUpdatedAt(now);
+            customsRepository.update(customs);
+
+            markIssued(review, now);
+            reviewRepository.insertEvent(new ReviewEvent(review.getId(), "CUSTOMS_WRITTEN_OFF",
+                    jsonSupport.write(java.util.Map.of(
+                            "customsNo", customs.getCustomsNo(),
+                            "writtenOffQuantity", qty,
+                            "totalWrittenOff", customs.getWrittenOffQuantity())), now));
+            return ServiceResult.ok(assembler.assemble(review));
+        }
+
+        // 国内批次：不加通关门禁，沿用原签发归档逻辑。
+        markIssued(review, now);
+        return ServiceResult.ok(assembler.assemble(review));
+    }
+
+    /** 置签发归档终态并登记事件。 */
+    private void markIssued(Review review, Instant now) {
         review.setStatus(ReviewStatus.ISSUED);
         review.setIssuedAt(now);
         review.setUpdatedAt(now);
         reviewRepository.update(review);
         reviewRepository.insertEvent(new ReviewEvent(review.getId(), "ISSUED_ARCHIVED", null, now));
-        return ServiceResult.ok(assembler.assemble(review));
     }
 
     /**

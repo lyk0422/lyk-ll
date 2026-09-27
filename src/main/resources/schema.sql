@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS enterprise_product_status (
 -- requestId 幂等记录
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id   VARCHAR(80)  NOT NULL COMMENT '业务请求幂等键 requestId',
-    operation    VARCHAR(32)  NOT NULL COMMENT '操作类型：DECLARE/CORRECT/ISSUE',
+    operation    VARCHAR(32)  NOT NULL COMMENT '操作类型：DECLARE/CORRECT/ISSUE/CUSTOMS_REGISTER/CUSTOMS_BIND/CUSTOMS_REVOKE/CUSTOMS_AMEND/SUBBATCH_WITHDRAW',
     fingerprint  VARCHAR(96)  NOT NULL COMMENT '覆盖 requestId 与全部业务字段的 SHA-256 指纹',
     http_status  INT          NOT NULL COMMENT '首次请求返回的 HTTP 状态码',
     response_json CLOB        NOT NULL COMMENT '首次请求返回体 JSON，重放原样返回',
@@ -83,4 +83,46 @@ CREATE TABLE IF NOT EXISTS review_event (
     event_at   TIMESTAMP    NOT NULL COMMENT '事件发生的业务时刻',
     created_at TIMESTAMP    NOT NULL COMMENT '事件落库时刻',
     CONSTRAINT fk_event_review FOREIGN KEY (review_id) REFERENCES batch_review (id)
+);
+
+-- 进口通关单台账：一张合成通关单可被多个包装子批共用核销，企业+品种固定不可改
+CREATE TABLE IF NOT EXISTS customs_declaration (
+    id                    BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '通关单主键',
+    customs_no            VARCHAR(64)  NOT NULL COMMENT '合成通关单号（全局唯一）',
+    enterprise_name       VARCHAR(128) NOT NULL COMMENT '通关单登记企业名称，绑定子批企业必须一致',
+    product_name          VARCHAR(128) NOT NULL COMMENT '通关单登记疫苗品种，绑定子批品种必须一致，历史核销不可改',
+    valid_until           TIMESTAMP    NOT NULL COMMENT '有效截止精确时刻：签发要求 now<该时刻，恰等于即失效拒绝',
+    total_quantity        INT          NOT NULL COMMENT '可核销总支数（正整数，单位：支），修订仅允许增加',
+    reserved_quantity     INT          NOT NULL DEFAULT 0 COMMENT '当前已预占未核销支数（单位：支，签发转核销、撤回/撤销释放）',
+    written_off_quantity  INT          NOT NULL DEFAULT 0 COMMENT '累计已核销支数（单位：支，只增不减，历史证据不变）',
+    status                VARCHAR(16)  NOT NULL DEFAULT 'ACTIVE' COMMENT '通关单状态：ACTIVE 有效/REVOKED 已撤销',
+    version               INT          NOT NULL DEFAULT 1 COMMENT '乐观版本号：登记为 1，每次成功变更加 1',
+    revoked_at            TIMESTAMP    NULL COMMENT '撤销时刻，空值表示未撤销',
+    created_at            TIMESTAMP    NOT NULL COMMENT '登记时刻',
+    updated_at            TIMESTAMP    NOT NULL COMMENT '最近变更时刻',
+    CONSTRAINT uk_customs_no UNIQUE (customs_no),
+    CONSTRAINT ck_customs_total_positive CHECK (total_quantity > 0),
+    CONSTRAINT ck_customs_quantity_bounds CHECK (
+        reserved_quantity >= 0 AND written_off_quantity >= 0
+        AND reserved_quantity + written_off_quantity <= total_quantity)
+);
+
+-- 进口包装子批绑定：每个子批（审查流程）只能绑定一张通关单，先预占、签发转核销
+CREATE TABLE IF NOT EXISTS subbatch_binding (
+    id                     BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '绑定记录主键',
+    review_id              BIGINT      NOT NULL COMMENT '包装子批对应的审查流程 ID（一子批仅一张通关单）',
+    customs_declaration_id BIGINT      NOT NULL COMMENT '所绑定通关单 ID',
+    batch_no               VARCHAR(64) NOT NULL COMMENT '子批评号（冗余，便于台账核对）',
+    declared_quantity      INT         NOT NULL COMMENT '本子批申报预占支数（正整数，单位：支）',
+    status                 VARCHAR(16) NOT NULL COMMENT '绑定状态：RESERVED 已预占/WRITTEN_OFF 已核销/RELEASED 已释放',
+    version                INT         NOT NULL DEFAULT 1 COMMENT '乐观版本号：绑定为 1，撤回释放成功后加 1',
+    reserved_at            TIMESTAMP   NOT NULL COMMENT '预占时刻',
+    written_off_at         TIMESTAMP   NULL COMMENT '核销（进口签发）时刻，空值表示未核销',
+    released_at            TIMESTAMP   NULL COMMENT '预占释放（签发前撤回或通关单撤销）时刻，空值表示未释放',
+    created_at             TIMESTAMP   NOT NULL COMMENT '绑定创建时刻',
+    updated_at             TIMESTAMP   NOT NULL COMMENT '最近变更时刻',
+    CONSTRAINT fk_binding_review FOREIGN KEY (review_id) REFERENCES batch_review (id),
+    CONSTRAINT fk_binding_customs FOREIGN KEY (customs_declaration_id) REFERENCES customs_declaration (id),
+    CONSTRAINT uk_binding_review UNIQUE (review_id),
+    CONSTRAINT ck_binding_quantity_positive CHECK (declared_quantity > 0)
 );
