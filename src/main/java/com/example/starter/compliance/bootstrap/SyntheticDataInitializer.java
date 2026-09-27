@@ -1,6 +1,7 @@
 package com.example.starter.compliance.bootstrap;
 
 import com.example.starter.compliance.repo.ComplianceRepository;
+import com.example.starter.compliance.repo.LineGateRepository;
 import java.math.BigDecimal;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
@@ -18,6 +19,8 @@ import org.springframework.transaction.annotation.Transactional;
  *       ING_SYRUP 果味糖浆（含 E102 0.5 g/kg）；</li>
  *   <li>初始限量（g/kg 终产品）：BEV01 下 E202=0.5、E211=1.0、E102=0.1、E129=0.1、E300=0.5；
  *       BAK01 下 E202=1.0、E211=1.0、E300=2.0；MEAT01 下 E202=1.5、E300=0.5。</li>
+ *   <li>过敏原合成目录：MILK 乳、EGG 蛋、PEANUT 花生、TREE_NUT 坚果、SOY 大豆、
+ *       WHEAT 小麦（含麸质）、FISH 鱼、SHELLFISH 甲壳类、SESAME 芝麻。</li>
  * </ul>
  */
 @Component
@@ -25,9 +28,12 @@ import org.springframework.transaction.annotation.Transactional;
 public class SyntheticDataInitializer implements ApplicationRunner {
 
     private final ComplianceRepository repository;
+    private final LineGateRepository gateRepository;
 
-    public SyntheticDataInitializer(ComplianceRepository repository) {
+    public SyntheticDataInitializer(ComplianceRepository repository,
+            LineGateRepository gateRepository) {
         this.repository = repository;
+        this.gateRepository = gateRepository;
     }
 
     @Override
@@ -64,5 +70,15 @@ public class SyntheticDataInitializer implements ApplicationRunner {
         repository.insertLimit("E300", "BAK01", new BigDecimal("2.000000"), now);
         repository.insertLimit("E202", "MEAT01", new BigDecimal("1.500000"), now);
         repository.insertLimit("E300", "MEAT01", new BigDecimal("0.500000"), now);
+
+        gateRepository.insertAllergen("MILK", "乳");
+        gateRepository.insertAllergen("EGG", "蛋");
+        gateRepository.insertAllergen("PEANUT", "花生");
+        gateRepository.insertAllergen("TREE_NUT", "坚果");
+        gateRepository.insertAllergen("SOY", "大豆");
+        gateRepository.insertAllergen("WHEAT", "小麦（含麸质）");
+        gateRepository.insertAllergen("FISH", "鱼");
+        gateRepository.insertAllergen("SHELLFISH", "甲壳类");
+        gateRepository.insertAllergen("SESAME", "芝麻");
     }
 }

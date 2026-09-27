@@ -1,6 +1,7 @@
 package com.example.starter.compliance;
 
 import com.example.starter.compliance.repo.ComplianceRepository;
+import com.example.starter.compliance.repo.LineGateRepository;
 import com.example.starter.compliance.time.ComplianceClock;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -16,7 +17,7 @@ import org.springframework.boot.test.context.SpringBootTest;
  * 保证测试之间无顺序依赖。
  */
 @SpringBootTest(properties = {
-        "spring.datasource.url=jdbc:h2:mem:food_compliance_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
+        "spring.datasource.url=jdbc:h2:mem:food_compliance_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=15000",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
         "spring.datasource.driver-class-name=org.h2.Driver"
@@ -27,11 +28,15 @@ public abstract class AbstractIntegrationTest {
     protected ComplianceRepository repository;
 
     @Autowired
+    protected LineGateRepository gateRepository;
+
+    @Autowired
     protected ComplianceClock clock;
 
     @BeforeEach
     void cleanAndResetClock() {
         repository.deleteBusinessData();
+        gateRepository.deleteGateBusinessData();
         resetInitialLimits();
         clock.reset();
     }

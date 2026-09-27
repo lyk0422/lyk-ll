@@ -47,6 +47,9 @@ class ComplianceApiIntegrationTest {
     private ComplianceRepository repository;
 
     @Autowired
+    private com.example.starter.compliance.repo.LineGateRepository gateRepository;
+
+    @Autowired
     private ComplianceClock clock;
 
     private final ObjectMapper mapper = new ObjectMapper();
@@ -54,6 +57,7 @@ class ComplianceApiIntegrationTest {
     @BeforeEach
     void clean() {
         repository.deleteBusinessData();
+        gateRepository.deleteGateBusinessData();
         repository.updateLimit("E202", "BEV01", new BigDecimal("0.500000"),
                 System.currentTimeMillis());
         clock.reset();

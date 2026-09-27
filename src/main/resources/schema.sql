@@ -121,3 +121,72 @@ CREATE TABLE IF NOT EXISTS idempotent_request (
     response_json CLOB,
     created_at BIGINT NOT NULL
 );
+
+-- ---------------- 生产线过敏原切换清线凭证门禁 ----------------
+
+-- 过敏原合成目录：仅合成规则，不用于生产
+CREATE TABLE IF NOT EXISTS allergen (
+    allergen_code VARCHAR(64) PRIMARY KEY,
+    allergen_name VARCHAR(128) NOT NULL
+);
+
+-- 配方版本过敏原登记（表头行）：version 为登记自身的乐观锁版本，首次登记为 1，每次修改成功 +1；
+-- allergen_codes 为过敏原编码集合的结构化 JSON（数组，编码区分大小写，不靠分隔符拼接）；
+-- 未登记的配方版本视为未声明任何过敏原
+CREATE TABLE IF NOT EXISTS formula_allergen (
+    formula_id BIGINT PRIMARY KEY,
+    version INT NOT NULL,
+    allergen_codes CLOB NOT NULL,
+    request_id VARCHAR(96),
+    updated_at BIGINT NOT NULL
+);
+
+-- 生产线：last_formula_id 为最近一次受控量产的配方版本（NULL 表示线路登记后尚无生产，首产无需凭证）；
+-- occupancy_version 为递增占用版本，线路登记时从 1 开始，每笔受控量产成功原子 +1，
+-- 受控量产以 expectedVersion 做条件更新，两笔并发最多一笔使用同一占用版本
+CREATE TABLE IF NOT EXISTS production_line (
+    line_code VARCHAR(64) PRIMARY KEY,
+    line_name VARCHAR(128) NOT NULL,
+    last_formula_id BIGINT,
+    occupancy_version INT NOT NULL,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+-- 清线凭证：status 为 VALID 有效 / CONSUMED 已被量产核销 / SUPERSEDED 被后续生产作废旧证；
+-- operator_id 操作人与 reviewer_id 复核人必须为两名不同人员；
+-- occupied_formula_id 固定凭证确认时线路最近量产配方版本（线路版本），线路推进后旧凭证不可再用；
+-- cleaned_at 为清线确认精确时刻（UTC epoch 毫秒），有效期 [cleaned_at, cleaned_at + 2h)，恰满 2 小时失效；
+-- allergen_codes 为覆盖过敏原编码集合的结构化 JSON
+CREATE TABLE IF NOT EXISTS cleaning_certificate (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    line_code VARCHAR(64) NOT NULL,
+    expected_version INT NOT NULL,
+    occupied_formula_id BIGINT,
+    operator_id VARCHAR(64) NOT NULL,
+    reviewer_id VARCHAR(64) NOT NULL,
+    cleaned_at BIGINT NOT NULL,
+    allergen_codes CLOB NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    request_id VARCHAR(96),
+    consumed_at BIGINT,
+    created_at BIGINT NOT NULL
+);
+
+-- 受控量产记录（经过敏原清线门禁）：occupancy_version 为受理时使用的线路占用版本，
+-- certificate_id 为本次引用的清线凭证（无需凭证时为 NULL）；
+-- occurred_at 为客户端声明的精确生产时刻（UTC epoch 毫秒）
+CREATE TABLE IF NOT EXISTS line_production_record (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    line_code VARCHAR(64) NOT NULL,
+    occupancy_version INT NOT NULL,
+    formula_id BIGINT NOT NULL,
+    filing_id BIGINT NOT NULL,
+    certificate_id BIGINT,
+    batch_no VARCHAR(96) NOT NULL,
+    quantity_kg DECIMAL(18,6) NOT NULL,
+    occurred_at BIGINT NOT NULL,
+    request_id VARCHAR(96),
+    created_at BIGINT NOT NULL,
+    UNIQUE (line_code, occupancy_version)
+);

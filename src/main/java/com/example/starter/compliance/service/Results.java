@@ -80,4 +80,61 @@ public final class Results {
             List<FormulaView> formulas,
             List<FilingView> filings) {
     }
+
+    // ---------------- 生产线过敏原清线凭证门禁 ----------------
+
+    /** 配方版本过敏原登记视图：version 首次登记为 1，每次修改成功 +1。 */
+    public record FormulaAllergenView(
+            Long formulaId,
+            Integer version,
+            List<String> allergenCodes,
+            Long updatedAt,
+            boolean replayed) {
+    }
+
+    /** 生产线视图：occupancyVersion 为当前占用版本；lastFormulaId 为空表示首产前。 */
+    public record ProductionLineView(
+            String lineCode,
+            String lineName,
+            Long lastFormulaId,
+            Integer occupancyVersion,
+            Long createdAt,
+            Long updatedAt) {
+    }
+
+    /**
+     * 清线凭证视图：status VALID/CONSUMED/SUPERSEDED；
+     * expiresAt = cleanedAt + 2 小时；valid 字段综合状态与时钟窗口（恰满 2 小时为 false）。
+     */
+    public record CleaningCertificateView(
+            Long certificateId,
+            String lineCode,
+            Integer expectedVersion,
+            Long occupiedFormulaId,
+            String operatorId,
+            String reviewerId,
+            Long cleanedAt,
+            Long expiresAt,
+            List<String> allergenCodes,
+            String status,
+            boolean valid,
+            Long consumedAt,
+            Long createdAt,
+            boolean replayed) {
+    }
+
+    /** 受控量产受理视图：certificateId 为空表示无需凭证的切换。 */
+    public record ControlledProductionView(
+            Long recordId,
+            String lineCode,
+            Integer occupancyVersion,
+            Long formulaId,
+            Long filingId,
+            Long certificateId,
+            String batchNo,
+            String quantityKg,
+            Long occurredAt,
+            Long createdAt,
+            boolean replayed) {
+    }
 }
