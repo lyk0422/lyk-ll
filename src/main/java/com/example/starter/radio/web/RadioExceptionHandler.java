@@ -35,6 +35,7 @@ public class RadioExceptionHandler {
     }
 
     @ExceptionHandler({MethodArgumentNotValidException.class, IllegalArgumentException.class,
+            java.time.format.DateTimeParseException.class,
             org.springframework.http.converter.HttpMessageNotReadableException.class})
     public ResponseEntity<ErrorBody> badRequest(Exception e) {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(new ErrorBody(e.getMessage()));

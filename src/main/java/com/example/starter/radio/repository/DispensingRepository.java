@@ -29,13 +29,15 @@ public class DispensingRepository {
 
     public long insertDispensing(String requestId, String fingerprint, long motherLiquorId,
                                  long prescriptionId, long calibratorId, Double dispensedActivityBq,
-                                 Double deviationRatio, DispensingStatus status, long nowEpoch) {
+                                 Double deviationRatio, DispensingStatus status,
+                                 long administrationTimeEpoch, long nowEpoch) {
         KeyHolder keys = new GeneratedKeyHolder();
         jdbc.update(con -> {
             PreparedStatement ps = con.prepareStatement(
                     "INSERT INTO dispensing (request_id, fingerprint, mother_liquor_id, prescription_id,"
-                            + " calibrator_id, dispensed_activity_bq, deviation_ratio, status,"
-                            + " created_at_epoch, updated_at_epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            + " calibrator_id, dispensed_activity_bq, deviation_ratio, version,"
+                            + " administration_time_epoch, status, created_at_epoch, updated_at_epoch)"
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
                     Statement.RETURN_GENERATED_KEYS);
             ps.setString(1, requestId);
             ps.setString(2, fingerprint);
@@ -52,9 +54,10 @@ public class DispensingRepository {
             } else {
                 ps.setDouble(7, deviationRatio);
             }
-            ps.setString(8, status.name());
-            ps.setLong(9, nowEpoch);
+            ps.setLong(8, administrationTimeEpoch);
+            ps.setString(9, status.name());
             ps.setLong(10, nowEpoch);
+            ps.setLong(11, nowEpoch);
             return ps;
         }, keys);
         return keys.getKey().longValue();
@@ -103,27 +106,43 @@ public class DispensingRepository {
                 dispenseRequestId, dispenseFingerprint, nowEpoch, nowEpoch, id);
     }
 
-    public long insertCheck(long dispensingId, String checker, int checkSeq, long checkedAtEpoch) {
+    /**
+     * 变更生效同事务激活新版本：替换给药时刻、活度与偏差，版本号加 1，
+     * 状态回到 CALCULATED，并清除旧版本双人核对有效性（first/second_checker 置空）。
+     * 旧版本签认行保留在 dispensing_check 中作为证据，不删除。
+     */
+    public int activateVersion(long id, long newVersion, long administrationTimeEpoch,
+                               double dispensedActivityBq, double deviationRatio, long nowEpoch) {
+        return jdbc.update(
+                "UPDATE dispensing SET version = ?, administration_time_epoch = ?, dispensed_activity_bq = ?,"
+                        + " deviation_ratio = ?, status = 'CALCULATED', first_checker = NULL,"
+                        + " second_checker = NULL, updated_at_epoch = ? WHERE id = ?",
+                newVersion, administrationTimeEpoch, dispensedActivityBq, deviationRatio, nowEpoch, id);
+    }
+
+    public long insertCheck(long dispensingId, long versionNo, String checker, int checkSeq, long checkedAtEpoch) {
         KeyHolder keys = new GeneratedKeyHolder();
         jdbc.update(con -> {
             PreparedStatement ps = con.prepareStatement(
-                    "INSERT INTO dispensing_check (dispensing_id, checker, check_seq, checked_at_epoch)"
-                            + " VALUES (?, ?, ?, ?)",
+                    "INSERT INTO dispensing_check (dispensing_id, version_no, checker, check_seq, checked_at_epoch)"
+                            + " VALUES (?, ?, ?, ?, ?)",
                     Statement.RETURN_GENERATED_KEYS);
             ps.setLong(1, dispensingId);
-            ps.setString(2, checker);
-            ps.setInt(3, checkSeq);
-            ps.setLong(4, checkedAtEpoch);
+            ps.setLong(2, versionNo);
+            ps.setString(3, checker);
+            ps.setInt(4, checkSeq);
+            ps.setLong(5, checkedAtEpoch);
             return ps;
         }, keys);
         return keys.getKey().longValue();
     }
 
     public List<DispensingCheck> findChecks(long dispensingId) {
-        return jdbc.query("SELECT * FROM dispensing_check WHERE dispensing_id = ? ORDER BY check_seq",
+        return jdbc.query("SELECT * FROM dispensing_check WHERE dispensing_id = ? ORDER BY version_no, check_seq",
                 (rs, i) -> new DispensingCheck(
                         rs.getLong("id"),
                         rs.getLong("dispensing_id"),
+                        rs.getLong("version_no"),
                         rs.getString("checker"),
                         rs.getInt("check_seq"),
                         rs.getLong("checked_at_epoch")),
@@ -197,6 +216,8 @@ public class DispensingRepository {
         Double dispensedActivity = rs.wasNull() ? null : dispensed;
         double deviation = rs.getDouble("deviation_ratio");
         Double deviationRatio = rs.wasNull() ? null : deviation;
+        long adminTime = rs.getLong("administration_time_epoch");
+        Long administrationTimeEpoch = rs.wasNull() ? null : adminTime;
         long dispensedAt = rs.getLong("dispensed_at_epoch");
         Long dispensedAtEpoch = rs.wasNull() ? null : dispensedAt;
         return new Dispensing(
@@ -208,6 +229,8 @@ public class DispensingRepository {
                 rs.getLong("calibrator_id"),
                 dispensedActivity,
                 deviationRatio,
+                rs.getLong("version"),
+                administrationTimeEpoch,
                 DispensingStatus.valueOf(rs.getString("status")),
                 rs.getString("first_checker"),
                 rs.getString("second_checker"),

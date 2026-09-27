@@ -7,6 +7,7 @@ import java.util.List;
 
 import com.example.starter.radio.domain.DispensingStatus;
 import com.example.starter.radio.model.Dispensing;
+import com.example.starter.radio.model.DispensingVersion;
 import com.example.starter.radio.model.MotherLiquor;
 import com.example.starter.radio.model.Nuclide;
 import com.example.starter.radio.model.Prescription;
@@ -16,6 +17,7 @@ import com.example.starter.radio.repository.DispensingRepository;
 import com.example.starter.radio.repository.MotherLiquorRepository;
 import com.example.starter.radio.repository.NuclideRepository;
 import com.example.starter.radio.repository.PrescriptionRepository;
+import com.example.starter.radio.repository.VersionRepository;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -35,6 +37,7 @@ public class DispensingService {
     private static final double BALANCE_RELATIVE_TOLERANCE = 1e-9;
 
     private final DispensingRepository dispensings;
+    private final VersionRepository versions;
     private final MotherLiquorRepository motherLiquors;
     private final PrescriptionRepository prescriptions;
     private final CalibratorRepository calibrators;
@@ -43,6 +46,7 @@ public class DispensingService {
     private final Clock clock;
 
     public DispensingService(DispensingRepository dispensings,
+                             VersionRepository versions,
                              MotherLiquorRepository motherLiquors,
                              PrescriptionRepository prescriptions,
                              CalibratorRepository calibrators,
@@ -50,6 +54,7 @@ public class DispensingService {
                              DecayService decay,
                              Clock clock) {
         this.dispensings = dispensings;
+        this.versions = versions;
         this.motherLiquors = motherLiquors;
         this.prescriptions = prescriptions;
         this.calibrators = calibrators;
@@ -97,11 +102,17 @@ public class DispensingService {
         try {
             if (legal) {
                 long id = dispensings.insertDispensing(requestId, fingerprint, motherLiquorId, prescriptionId,
-                        calibratorId, dispensedAtAdmin, deviation, DispensingStatus.CALCULATED, now);
+                        calibratorId, dispensedAtAdmin, deviation, DispensingStatus.CALCULATED,
+                        prescription.administrationTimeEpoch(), now);
+                insertInitialVersion(id, mother, nuclide, prescription.administrationTimeEpoch(),
+                        dispensedAtAdmin, deviation, now);
                 return dispensings.findDispensingById(id).orElseThrow();
             }
             long id = dispensings.insertDispensing(requestId, fingerprint, motherLiquorId, prescriptionId,
-                    calibratorId, null, deviation, DispensingStatus.REJECTED, now);
+                    calibratorId, null, deviation, DispensingStatus.REJECTED,
+                    prescription.administrationTimeEpoch(), now);
+            insertInitialVersion(id, mother, nuclide, prescription.administrationTimeEpoch(),
+                    null, deviation, now);
             return dispensings.findDispensingById(id).orElseThrow();
         } catch (DuplicateKeyException e) {
             return dispensings.findDispensingByRequestId(requestId)
@@ -124,7 +135,7 @@ public class DispensingService {
         long now = clock.instant().getEpochSecond();
         if (dispensing.firstChecker() == null) {
             dispensings.updateChecker(dispensingId, "first_checker", checker, now);
-            dispensings.insertCheck(dispensingId, checker, 1, now);
+            dispensings.insertCheck(dispensingId, dispensing.version(), checker, 1, now);
             return dispensings.findDispensingById(dispensingId).orElseThrow();
         }
         if (dispensing.firstChecker().equals(checker)) {
@@ -134,7 +145,7 @@ public class DispensingService {
             throw new BusinessException("双人核对已完成，禁止重复核对");
         }
         dispensings.updateChecker(dispensingId, "second_checker", checker, now);
-        dispensings.insertCheck(dispensingId, checker, 2, now);
+        dispensings.insertCheck(dispensingId, dispensing.version(), checker, 2, now);
         dispensings.updateStatus(dispensingId, DispensingStatus.CHECKED, now);
         return dispensings.findDispensingById(dispensingId).orElseThrow();
     }
@@ -230,12 +241,12 @@ public class DispensingService {
         double dispensedTotal = 0.0;
         List<Dispensing> actives = dispensings.findActiveByMotherLiquor(mother.id());
         for (Dispensing active : actives) {
-            if (active.dispensedActivityBq() == null) {
+            if (active.dispensedActivityBq() == null || active.administrationTimeEpoch() == null) {
                 continue;
             }
-            Prescription p = prescriptions.findById(active.prescriptionId()).orElseThrow();
+            // 发药活度须对应当前有效版本的给药时刻；变更后旧活度不得与新时刻混用
             dispensedTotal += decay.activityAt(active.dispensedActivityBq(),
-                    p.administrationTimeEpoch(), measuredAtEpoch, halfLife);
+                    active.administrationTimeEpoch(), measuredAtEpoch, halfLife);
         }
         double lhs = mother.initialActivityBq();
         double rhs = dispensedTotal + remainingActivityBq + decayResidual;
@@ -249,6 +260,18 @@ public class DispensingService {
             throw new ConflictException("相同 requestId 但业务字段不一致，拒绝重复受理: " + existing.requestId());
         }
         return existing;
+    }
+
+    /**
+     * 写入版本 1 证据：固化母液初始活度、参考时刻与核素半衰期快照；
+     * 后续变更重算与重放均基于该快照，不受母液剩余量变化影响。
+     */
+    private void insertInitialVersion(long dispensingId, MotherLiquor mother, Nuclide nuclide,
+                                      long administrationTimeEpoch, Double dispensedActivityBq,
+                                      Double deviationRatio, long nowEpoch) {
+        versions.insert(new DispensingVersion(0L, dispensingId, 1L, administrationTimeEpoch,
+                dispensedActivityBq, deviationRatio, mother.initialActivityBq(),
+                mother.referenceTimeEpoch(), nuclide.halfLifeSeconds(), "INITIAL", nowEpoch));
     }
 
     /**
