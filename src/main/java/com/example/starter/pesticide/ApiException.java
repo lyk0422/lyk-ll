@@ -31,4 +31,18 @@ public class ApiException extends RuntimeException {
     public static ApiException notFound(String message) {
         return new ApiException(HttpStatus.NOT_FOUND, message);
     }
+
+    /**
+     * 构造 400 参数非法异常（业务规则无法表达的参数错误）。
+     */
+    public static ApiException badRequest(String message) {
+        return new ApiException(HttpStatus.BAD_REQUEST, message);
+    }
+
+    /**
+     * 构造 422 业务拒绝异常（状态机、能力、覆盖性等业务规则拒绝）。
+     */
+    public static ApiException unprocessable(String message) {
+        return new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, message);
+    }
 }

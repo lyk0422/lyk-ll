@@ -1,10 +1,13 @@
 package com.example.starter.pesticide.dto;
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Size;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -151,5 +154,163 @@ public final class ApiDtos {
             Integer triggerCount,
             String status,
             Instant createdAt) {
+    }
+
+    /** 联检创建请求；occurredAt 为精确时刻（UTC），入幂等指纹 */
+    public record JointTestCreateRequest(
+            @NotBlank(message = "requestId 不能为空") String requestId,
+            @NotNull(message = "批次 ID 不能为空") Long batchId,
+            @NotBlank(message = "承检机构不能为空") String agencyCode,
+            @NotNull(message = "项目集合不能为空")
+            @Size(min = 2, message = "联检项目至少两种") List<@NotBlank(message = "项目不能为空") String> items,
+            @NotNull(message = "精确时刻不能为空") Instant occurredAt) {
+    }
+
+    /** 联检项目视图；限值单位 mg/kg，恰等限值判合格 */
+    public record JointTestItemView(
+            String item,
+            BigDecimal limitValue,
+            Integer capabilityVersion) {
+    }
+
+    /** 联检创建响应；版本从 1 开始 */
+    public record JointTestCreateResponse(
+            Long orderId,
+            String requestId,
+            Long batchId,
+            String agencyCode,
+            Integer version,
+            String status,
+            List<JointTestItemView> items,
+            Instant createdAt,
+            boolean replayed) {
+    }
+
+    /** 分样明细：项目 + 全局唯一样本号 */
+    public record JointTestSplitItem(
+            @NotBlank(message = "项目不能为空") String item,
+            @NotBlank(message = "样本号不能为空") String sampleNo) {
+    }
+
+    /** 联检分样请求；须覆盖全部项目，任一项失败整单不分样 */
+    public record JointTestSplitRequest(
+            @NotBlank(message = "requestId 不能为空") String requestId,
+            @NotNull(message = "期望版本不能为空") @Positive(message = "期望版本必须为正") Integer expectedVersion,
+            @NotNull(message = "分样集合不能为空")
+            @Size(min = 1, message = "分样集合不能为空") List<@Valid JointTestSplitItem> splits,
+            @NotNull(message = "精确时刻不能为空") Instant occurredAt) {
+    }
+
+    /** 分样视图 */
+    public record JointTestSplitView(
+            String item,
+            String sampleNo) {
+    }
+
+    /** 联检分样响应；version 为分样后的联检单版本 */
+    public record JointTestSplitResponse(
+            Long orderId,
+            String requestId,
+            Integer version,
+            String status,
+            List<JointTestSplitView> splits,
+            Instant createdAt,
+            boolean replayed) {
+    }
+
+    /** 联检结果/复测请求；浓度单位 mg/kg，有限非负 */
+    public record JointTestResultRequest(
+            @NotBlank(message = "requestId 不能为空") String requestId,
+            @NotNull(message = "期望版本不能为空") @Positive(message = "期望版本必须为正") Integer expectedVersion,
+            @NotBlank(message = "项目不能为空") String item,
+            @NotNull(message = "浓度不能为空")
+            @DecimalMin(value = "0", message = "浓度不能为负")
+            @Digits(integer = 8, fraction = 4, message = "浓度超出可表示范围") BigDecimal concentration,
+            @NotNull(message = "精确时刻不能为空") Instant occurredAt) {
+    }
+
+    /** 联检结果响应；supplementary=true 表示综合判定后只记补充信息 */
+    public record JointTestResultResponse(
+            Long resultId,
+            String requestId,
+            Long orderId,
+            String item,
+            BigDecimal concentration,
+            BigDecimal limitValue,
+            Boolean itemQualified,
+            Integer itemVersion,
+            Integer orderVersion,
+            boolean supplementary,
+            Instant createdAt,
+            boolean replayed) {
+    }
+
+    /** 综合判定携带的项目结果版本 */
+    public record JointTestJudgeItem(
+            @NotBlank(message = "项目不能为空") String item,
+            @NotNull(message = "结果版本不能为空") @Positive(message = "结果版本必须为正") Integer resultVersion) {
+    }
+
+    /** 综合判定请求；携带全部项目结果版本，版本失配零写入 */
+    public record JointTestJudgeRequest(
+            @NotBlank(message = "requestId 不能为空") String requestId,
+            @NotNull(message = "期望版本不能为空") @Positive(message = "期望版本必须为正") Integer expectedVersion,
+            @NotNull(message = "项目版本集合不能为空")
+            @Size(min = 1, message = "项目版本集合不能为空") List<@Valid JointTestJudgeItem> items,
+            @NotNull(message = "精确时刻不能为空") Instant occurredAt) {
+    }
+
+    /** 项目结果版本视图（冻结证据） */
+    public record JointTestItemVersionView(
+            String item,
+            Integer resultVersion,
+            BigDecimal concentration,
+            BigDecimal limitValue,
+            Boolean itemQualified) {
+    }
+
+    /** 综合判定响应；overall 为 PENDING 时未落判定（尚缺项目结果，只能待定） */
+    public record JointTestJudgeResponse(
+            Long judgmentId,
+            String requestId,
+            Long orderId,
+            String overall,
+            Integer version,
+            Long batchId,
+            String batchStatus,
+            Instant retentionUntil,
+            List<JointTestItemVersionView> itemVersions,
+            Instant createdAt,
+            boolean replayed) {
+    }
+
+    /** 联检结果视图 */
+    public record JointTestResultView(
+            Long resultId,
+            String item,
+            String sampleNo,
+            BigDecimal concentration,
+            Boolean itemQualified,
+            Integer itemVersion,
+            Boolean current,
+            Boolean supplementary,
+            Instant occurredAt,
+            Instant createdAt) {
+    }
+
+    /** 联检单详情 */
+    public record JointTestDetailResponse(
+            Long orderId,
+            Long batchId,
+            String agencyCode,
+            Integer version,
+            String status,
+            String overall,
+            List<JointTestItemView> items,
+            List<JointTestSplitView> splits,
+            List<JointTestResultView> results,
+            List<JointTestItemVersionView> judgmentItemVersions,
+            Instant createdAt,
+            Instant updatedAt) {
     }
 }
