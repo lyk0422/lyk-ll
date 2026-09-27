@@ -57,18 +57,21 @@ public class TrainJobService {
     private final ConsistCheckRepository consistCheckRepository;
     private final PressureReadingRepository pressureReadingRepository;
     private final IdempotencyService idempotencyService;
+    private final EotService eotService;
 
     public TrainJobService(TrainJobRepository jobRepository, TrainCarRepository carRepository,
                            BrakeTestRepository brakeTestRepository,
                            ConsistCheckRepository consistCheckRepository,
                            PressureReadingRepository pressureReadingRepository,
-                           IdempotencyService idempotencyService) {
+                           IdempotencyService idempotencyService,
+                           EotService eotService) {
         this.jobRepository = jobRepository;
         this.carRepository = carRepository;
         this.brakeTestRepository = brakeTestRepository;
         this.consistCheckRepository = consistCheckRepository;
         this.pressureReadingRepository = pressureReadingRepository;
         this.idempotencyService = idempotencyService;
+        this.eotService = eotService;
     }
 
     /**
@@ -147,7 +150,7 @@ public class TrainJobService {
     }
 
     private ConsistChangeResponse doChangeConsist(long jobId, ConsistChangeRequest request) {
-        JobRow job = requireJob(jobId);
+        JobRow job = requireJobForUpdate(jobId);
         if (job.status() != JobStatus.ACCEPTED && job.status() != JobStatus.CHECKED) {
             throw new BusinessException("当前状态不允许摘挂变更：" + job.status());
         }
@@ -184,11 +187,13 @@ public class TrainJobService {
         int newVersion = job.consistVersion() + 1;
         jobRepository.updateConsist(jobId, newVersion, active.size(), totalLength, totalWeight,
                 false, JobStatus.ACCEPTED);
+        // 编组变化（含尾车/版本变化）：列尾绑定保留，但一致性确认立即失效，须重新双人确认
+        eotService.invalidateConfirmationsOnConsistChange(jobId);
         return new ConsistChangeResponse(jobId, newVersion, active.size(), totalLength, totalWeight, voidedTests);
     }
 
     private ConsistCheckResponse doCheckConsist(long jobId, ConsistCheckRequest request) {
-        JobRow job = requireJob(jobId);
+        JobRow job = requireJobForUpdate(jobId);
         if (job.status() == JobStatus.DEPARTURE_CONFIRMED || job.status() == JobStatus.CLOSED) {
             throw new BusinessException("当前状态不允许编组核对：" + job.status());
         }
@@ -208,7 +213,7 @@ public class TrainJobService {
     }
 
     private BrakeTestResponse doBrakeTest(long jobId, BrakeTestRequest request) {
-        JobRow job = requireJob(jobId);
+        JobRow job = requireJobForUpdate(jobId);
         if (job.status() != JobStatus.CHECKED) {
             throw new BusinessException("编组未通过运统1核对或状态不允许试验：" + job.status());
         }
@@ -245,7 +250,7 @@ public class TrainJobService {
     }
 
     private DepartureResponse doConfirmDeparture(long jobId) {
-        JobRow job = requireJob(jobId);
+        JobRow job = requireJobForUpdate(jobId);
         if (job.status() == JobStatus.CLOSED) {
             throw new BusinessException("作业已销记，不得重复发车确认");
         }
@@ -262,12 +267,15 @@ public class TrainJobService {
         if (!withinClosedCarLimit(closed, active.size())) {
             throw new BusinessException("关门车比例超过 6%，拒绝发车");
         }
+        // 原制动试验仍有效的前提下，事务内同时核对列尾装置自检未过期、双人一致性确认匹配最新编组；
+        // 未绑定列尾装置的历史作业不增加新门禁
+        eotService.assertDepartureReady(job);
         jobRepository.updateStatus(jobId, JobStatus.DEPARTURE_CONFIRMED);
         return new DepartureResponse(jobId, true, "准许发车");
     }
 
     private ClosureResponse doClose(long jobId) {
-        JobRow job = requireJob(jobId);
+        JobRow job = requireJobForUpdate(jobId);
         if (job.status() == JobStatus.CLOSED) {
             return new ClosureResponse(jobId, true, true, "重复销记，幂等成功");
         }
@@ -275,6 +283,8 @@ public class TrainJobService {
             throw new BusinessException("未发车确认，不得销记：" + job.status());
         }
         jobRepository.close(jobId);
+        // 销记原子解除列尾装置占用、解除绑定并失效确认，绑定历史保留
+        eotService.releaseOnClosure(jobId);
         return new ClosureResponse(jobId, true, false, "销记完成，作业终态");
     }
 
@@ -340,6 +350,11 @@ public class TrainJobService {
 
     private JobRow requireJob(long jobId) {
         return jobRepository.findById(jobId)
+                .orElseThrow(() -> new NotFoundException("作业不存在：" + jobId));
+    }
+
+    private JobRow requireJobForUpdate(long jobId) {
+        return jobRepository.findByIdForUpdate(jobId)
                 .orElseThrow(() -> new NotFoundException("作业不存在：" + jobId));
     }
 

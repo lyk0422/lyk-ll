@@ -85,9 +85,55 @@ COMMENT ON TABLE late_event IS '销记后迟到事件表';
 
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id VARCHAR(64) PRIMARY KEY COMMENT '幂等请求键',
-    operation VARCHAR(32) NOT NULL COMMENT '操作类型：ACCEPT/CONSIST_CHANGE/CONSIST_CHECK/BRAKE_TEST/DEPARTURE/CLOSURE/PRESSURE',
-    fingerprint VARCHAR(64) NOT NULL COMMENT '请求指纹SHA-256，覆盖requestId与全部业务字段',
+    operation VARCHAR(32) NOT NULL COMMENT '操作类型：ACCEPT/CONSIST_CHANGE/CONSIST_CHECK/BRAKE_TEST/DEPARTURE/CLOSURE/PRESSURE/EOT_DEVICE_REGISTER/EOT_BIND/EOT_CONFIRM/EOT_UNBIND',
+    fingerprint VARCHAR(64) NOT NULL COMMENT '请求指纹SHA-256，覆盖requestId与全部业务字段（JSON结构化序列化，含分隔符文本亦无歧义）',
     response_body CLOB NOT NULL COMMENT '首次成功响应JSON快照，同键同参重放时原样返回',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间（JVM 时区）'
 );
 COMMENT ON TABLE idempotency_record IS '幂等记录表';
+
+CREATE TABLE IF NOT EXISTS eot_device (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '列尾装置主键',
+    device_no VARCHAR(64) NOT NULL COMMENT '列尾装置编号（合成数据，唯一建档）',
+    self_check_valid_until TIMESTAMP NOT NULL COMMENT '自检合格有效截止时刻（UTC无时区基准存储）；UTC下now<该时刻方可绑定/发车，恰到该时刻即失效',
+    bound_job_id BIGINT DEFAULT NULL COMMENT '当前绑定作业ID；NULL表示空闲；销记或提前解绑在事务内原子置空',
+    version INT NOT NULL DEFAULT 1 COMMENT '装置状态递增版本，自1起；绑定/共同确认/解绑/销记释放每次成功变更加1',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间（UTC存储）',
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '更新时间（UTC存储）',
+    CONSTRAINT uk_eot_device_no UNIQUE (device_no)
+);
+COMMENT ON TABLE eot_device IS '列尾装置档案表（自检有效期、当前占用与乐观版本）';
+
+CREATE TABLE IF NOT EXISTS eot_binding (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '绑定主键',
+    device_id BIGINT NOT NULL COMMENT '列尾装置ID',
+    device_no VARCHAR(64) NOT NULL COMMENT '列尾装置编号（冗余留存证据）',
+    job_id BIGINT NOT NULL COMMENT '受控作业ID',
+    tail_car_no VARCHAR(32) NOT NULL COMMENT '绑定时冻结的当前编组尾车车辆号；摘挂后不更新，仅作冻结证据',
+    consist_version INT NOT NULL COMMENT '绑定时冻结的编组版本；摘挂后不更新，仅作冻结证据',
+    status VARCHAR(16) NOT NULL COMMENT '绑定状态：ACTIVE绑定中/RELEASED已解除（提前解绑或销记）',
+    active_device_id BIGINT DEFAULT NULL COMMENT 'ACTIVE时等于装置ID，RELEASED置NULL；唯一约束保证一台装置同时仅一条生效绑定',
+    active_job_id BIGINT DEFAULT NULL COMMENT 'ACTIVE时等于作业ID，RELEASED置NULL；唯一约束保证一个作业同时仅一条生效绑定',
+    request_id VARCHAR(64) NOT NULL COMMENT '幂等请求键',
+    released_at TIMESTAMP DEFAULT NULL COMMENT '解除时刻（UTC存储）；NULL表示仍绑定中',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间（UTC存储）',
+    CONSTRAINT uk_eot_binding_active_device UNIQUE (active_device_id),
+    CONSTRAINT uk_eot_binding_active_job UNIQUE (active_job_id)
+);
+COMMENT ON TABLE eot_binding IS '列尾装置绑定历史表（解除后保留全部历史）';
+
+CREATE TABLE IF NOT EXISTS eot_consistency_confirmation (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '一致性确认主键',
+    binding_id BIGINT NOT NULL COMMENT '所属绑定ID',
+    device_id BIGINT NOT NULL COMMENT '列尾装置ID（冗余证据）',
+    device_no VARCHAR(64) NOT NULL COMMENT '列尾装置编号（冗余证据）',
+    job_id BIGINT NOT NULL COMMENT '受控作业ID',
+    tail_car_no VARCHAR(32) NOT NULL COMMENT '两名人员共同确认时的尾车车辆号',
+    consist_version INT NOT NULL COMMENT '两名人员共同确认时的编组版本',
+    confirmer1 VARCHAR(64) NOT NULL COMMENT '共同确认人1（不得为空，不得与确认人2相同）',
+    confirmer2 VARCHAR(64) NOT NULL COMMENT '共同确认人2（不得为空，不得与确认人1相同）',
+    valid BOOLEAN NOT NULL DEFAULT TRUE COMMENT '是否仍有效：TRUE有效；摘挂改变尾车/版本、提前解绑、销记时同事务置FALSE',
+    request_id VARCHAR(64) NOT NULL COMMENT '幂等请求键',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间（UTC存储）'
+);
+COMMENT ON TABLE eot_consistency_confirmation IS '列尾与编组尾车一致性双人确认记录表';

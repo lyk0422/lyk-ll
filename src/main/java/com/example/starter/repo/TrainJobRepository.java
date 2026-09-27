@@ -67,6 +67,15 @@ public class TrainJobRepository {
     }
 
     /**
+     * 按主键加行锁查询作业（SELECT ... FOR UPDATE）；摘挂/绑定/确认/发车事务内先锁定作业行，
+     * 使编组变更与列尾操作在同一作业上串行化，保持一致顺序。
+     */
+    public Optional<JobRow> findByIdForUpdate(long id) {
+        return jdbc.query("SELECT * FROM train_job WHERE id = ? FOR UPDATE", ROW_MAPPER, id)
+                .stream().findFirst();
+    }
+
+    /**
      * 更新编组统计与版本；consistChecked 为当前版本是否已通过运统1核对。
      */
     public void updateConsist(long id, int consistVersion, int carCount,
