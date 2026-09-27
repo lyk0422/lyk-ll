@@ -2,15 +2,23 @@ package com.example.starter.survey.service;
 
 import com.example.starter.survey.data.CertificateRepository;
 import com.example.starter.survey.data.DefectRepository;
+import com.example.starter.survey.data.InspectionReportRepository;
+import com.example.starter.survey.data.RecognitionBindingRepository;
 import com.example.starter.survey.data.ShipRepository;
+import com.example.starter.survey.data.SurveyItemCompletionRepository;
 import com.example.starter.survey.data.SurveyRepository;
 import com.example.starter.survey.domain.Certificate;
 import com.example.starter.survey.domain.CertificateStatus;
 import com.example.starter.survey.domain.Defect;
 import com.example.starter.survey.domain.DefectSeverity;
 import com.example.starter.survey.domain.DefectStatus;
+import com.example.starter.survey.domain.InspectionReport;
+import com.example.starter.survey.domain.RecognitionBinding;
+import com.example.starter.survey.domain.BindingStatus;
+import com.example.starter.survey.domain.ReportStatus;
 import com.example.starter.survey.domain.Ship;
 import com.example.starter.survey.domain.Survey;
+import com.example.starter.survey.domain.SurveyItem;
 import com.example.starter.survey.domain.SurveyStatus;
 import com.example.starter.survey.support.Fingerprint;
 import com.example.starter.survey.support.IdempotentExecutor;
@@ -43,17 +51,26 @@ public class CertificateService {
     private final SurveyRepository surveyRepository;
     private final ShipRepository shipRepository;
     private final DefectRepository defectRepository;
+    private final RecognitionBindingRepository bindingRepository;
+    private final InspectionReportRepository reportRepository;
+    private final SurveyItemCompletionRepository completionRepository;
     private final IdempotentExecutor executor;
 
     public CertificateService(CertificateRepository certificateRepository,
                               SurveyRepository surveyRepository,
                               ShipRepository shipRepository,
                               DefectRepository defectRepository,
+                              RecognitionBindingRepository bindingRepository,
+                              InspectionReportRepository reportRepository,
+                              SurveyItemCompletionRepository completionRepository,
                               IdempotentExecutor executor) {
         this.certificateRepository = certificateRepository;
         this.surveyRepository = surveyRepository;
         this.shipRepository = shipRepository;
         this.defectRepository = defectRepository;
+        this.bindingRepository = bindingRepository;
+        this.reportRepository = reportRepository;
+        this.completionRepository = completionRepository;
         this.executor = executor;
     }
 
@@ -106,6 +123,9 @@ public class CertificateService {
                     throw new BusinessRuleException("DEFECT_OVERDUE",
                             "存在逾期未合格复查的缺陷，不得发证: defectId=" + d.id());
                 });
+
+        // 互认门禁：冻结一致修订与规则版本，不得以旧互认可用标志先发证。
+        enforceRecognitionGates(survey);
 
         // 行锁旧有效证书，随后“挂起插入新证 -> 旧证失效 -> 新证生效”同事务完成。
         Certificate old = certificateRepository.findValidForUpdate(ship.id(), survey.type())
@@ -163,5 +183,61 @@ public class CertificateService {
             case SPECIAL ->
                     survey.cycleAnchor().plusYears(5).plusMonths(3);
         };
+    }
+
+    /**
+     * 互认与项目完成证明门禁（发证前，与缺陷检查并列）：
+     * <ul>
+     *   <li>按报告主键升序行锁报告当前修订（与报告更正同一锁顺序），
+     *       锁后重读绑定，验证有效绑定冻结的修订仍与当前有效修订一致；</li>
+     *   <li>失效绑定所涉项目若无登轮完成证明或新的有效互认覆盖，
+     *       不得凭旧互认可用标志发证；</li>
+     *   <li>检验类型的全部必需项目须由登轮完成证明或有效互认绑定覆盖；
+     *       互认只替代映射项目的完成证明，不替代本门禁本身。</li>
+     * </ul>
+     */
+    private void enforceRecognitionGates(Survey survey) {
+        List<RecognitionBinding> bindings = bindingRepository.findBySurvey(survey.id());
+        if (!bindings.isEmpty()) {
+            // 先锁报告行（与更正相同的锁获取顺序），再在锁保护下重读绑定状态。
+            bindings.stream().map(RecognitionBinding::reportId).distinct().sorted()
+                    .forEach(reportRepository::findByIdForUpdate);
+            bindings = bindingRepository.findBySurvey(survey.id());
+        }
+        java.util.Set<SurveyItem> recognized = new java.util.HashSet<>();
+        java.util.Set<SurveyItem> invalidatedItems = new java.util.HashSet<>();
+        for (RecognitionBinding binding : bindings) {
+            if (binding.status() == BindingStatus.INVALIDATED) {
+                invalidatedItems.add(binding.itemCode());
+                continue;
+            }
+            InspectionReport report = reportRepository
+                    .findByIdForUpdate(binding.reportId()).orElseThrow();
+            if (report.status() != ReportStatus.ACTIVE
+                    || report.revision() != binding.reportRevision()) {
+                throw new BusinessRuleException("RECOGNITION_STALE",
+                        "互认绑定冻结的修订 " + binding.reportRevision()
+                                + " 与报告当前有效修订不一致，不得发证: bindingId=" + binding.id());
+            }
+            recognized.add(binding.itemCode());
+        }
+        java.util.Set<SurveyItem> covered = new java.util.HashSet<>(
+                completionRepository.findBySurvey(survey.id()));
+        covered.addAll(recognized);
+        // 失效互认所涉项目没有任何有效覆盖：不得凭旧互认可用标志发证。
+        List<SurveyItem> staleItems = invalidatedItems.stream()
+                .filter(item -> !covered.contains(item)).sorted().toList();
+        if (!staleItems.isEmpty()) {
+            throw new BusinessRuleException("RECOGNITION_INVALIDATED",
+                    "互认绑定已因报告更正失效，不得凭旧互认发证，"
+                            + "须重新申请互认或补足登轮完成证明，项目: " + staleItems);
+        }
+        java.util.Set<SurveyItem> required = SurveyItem.requiredFor(survey.type());
+        List<SurveyItem> missing = required.stream()
+                .filter(item -> !covered.contains(item)).sorted().toList();
+        if (!missing.isEmpty()) {
+            throw new BusinessRuleException("ITEM_COMPLETION_MISSING",
+                    "必需项目缺少完成证明（登轮完成或有效互认）: " + missing);
+        }
     }
 }

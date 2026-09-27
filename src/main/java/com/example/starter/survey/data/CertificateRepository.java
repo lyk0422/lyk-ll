@@ -5,13 +5,18 @@ import com.example.starter.survey.domain.CertificateStatus;
 import com.example.starter.survey.domain.SurveyType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.support.GeneratedKeyHolder;
+import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Repository;
 
 import java.sql.Date;
+import java.sql.PreparedStatement;
+import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -78,29 +83,36 @@ public class CertificateRepository {
 
     /**
      * 插入新版本证书。
+     * 以自增主键回取本事务插入的行：并发发证时对方可能已提交同 version 行，
+     * 按 (ship_id, type, version) 回取会错取对方行，导致 markValid 作用错行、
+     * 本事务挂起行残留提交。
      *
      * @param validFlag true 插入即有效（唯一索引槽位须已释放）；false 先挂起再由 {@link #markValid} 生效
      */
     public Certificate insert(long shipId, SurveyType type, int version,
                               CertificateStatus status, LocalDate validFrom, LocalDate validUntil,
                               Long surveyId, boolean validFlag, Instant now) {
-        jdbc.update("""
-                        INSERT INTO certificate (ship_id, type, version, status, valid_from, valid_until,
-                                                 survey_id, superseded_by, created_at, valid_flag)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-                        """,
-                shipId, type.name(), version, status.name(),
-                Date.valueOf(validFrom),
-                validUntil == null ? null : Date.valueOf(validUntil),
-                surveyId,
-                Timestamp.from(now),
-                validFlag ? "Y" : null);
-        // 同事务内取该船+类型最新版本行。
-        return jdbc.query("""
-                        SELECT * FROM certificate
-                        WHERE ship_id = ? AND type = ? AND version = ?
-                        """, MAPPER, shipId, type.name(), version)
-                .stream().findFirst().orElseThrow();
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement("""
+                            INSERT INTO certificate (ship_id, type, version, status, valid_from, valid_until,
+                                                     survey_id, superseded_by, created_at, valid_flag)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                            """,
+                    Statement.RETURN_GENERATED_KEYS);
+            ps.setLong(1, shipId);
+            ps.setString(2, type.name());
+            ps.setInt(3, version);
+            ps.setString(4, status.name());
+            ps.setObject(5, Date.valueOf(validFrom));
+            ps.setObject(6, validUntil == null ? null : Date.valueOf(validUntil));
+            ps.setObject(7, surveyId);
+            ps.setTimestamp(8, Timestamp.from(now));
+            ps.setString(9, validFlag ? "Y" : null);
+            return ps;
+        }, keyHolder);
+        long id = Objects.requireNonNull(keyHolder.getKey()).longValue();
+        return findById(id).orElseThrow();
     }
 
     /** 旧证失效：状态 SUPERSEDED、释放唯一索引槽位、记录替代版本。 */

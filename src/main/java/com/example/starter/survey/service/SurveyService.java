@@ -2,17 +2,20 @@ package com.example.starter.survey.service;
 
 import com.example.starter.survey.data.ShipRepository;
 import com.example.starter.survey.data.SurveyEventRepository;
+import com.example.starter.survey.data.SurveyItemCompletionRepository;
 import com.example.starter.survey.data.SurveyRepository;
 import com.example.starter.survey.data.DefectRepository;
 import com.example.starter.survey.domain.Defect;
 import com.example.starter.survey.domain.Ship;
 import com.example.starter.survey.domain.Survey;
+import com.example.starter.survey.domain.SurveyItem;
 import com.example.starter.survey.domain.SurveyStatus;
 import com.example.starter.survey.domain.SurveyType;
 import com.example.starter.survey.support.Fingerprint;
 import com.example.starter.survey.support.IdempotentExecutor;
 import com.example.starter.survey.support.SurveyWindowCalculator;
 import com.example.starter.survey.support.SurveyWindowCalculator.SurveyWindow;
+import com.example.starter.survey.web.BadRequestException;
 import com.example.starter.survey.web.BusinessRuleException;
 import com.example.starter.survey.web.ConflictException;
 import com.example.starter.survey.web.NotFoundException;
@@ -41,17 +44,20 @@ public class SurveyService {
     private final ShipRepository shipRepository;
     private final DefectRepository defectRepository;
     private final SurveyEventRepository eventRepository;
+    private final SurveyItemCompletionRepository completionRepository;
     private final IdempotentExecutor executor;
 
     public SurveyService(SurveyRepository surveyRepository,
                          ShipRepository shipRepository,
                          DefectRepository defectRepository,
                          SurveyEventRepository eventRepository,
+                         SurveyItemCompletionRepository completionRepository,
                          IdempotentExecutor executor) {
         this.surveyRepository = surveyRepository;
         this.shipRepository = shipRepository;
         this.defectRepository = defectRepository;
         this.eventRepository = eventRepository;
+        this.completionRepository = completionRepository;
         this.executor = executor;
     }
 
@@ -100,6 +106,9 @@ public class SurveyService {
                 .orElseThrow(() -> new NotFoundException("SURVEY_NOT_FOUND",
                         "检验不存在: surveyId=" + request.surveyId()));
         Ship ship = shipRepository.findById(survey.shipId()).orElseThrow();
+        // 完成项目集合规范化（参数非法 400，不占幂等键）；null 表示全部必需项目。
+        List<String> completedItems = normalizeCompletedItems(
+                request.completedItems(), survey.type());
 
         Map<String, Object> fields = new LinkedHashMap<>();
         fields.put("surveyId", request.surveyId());
@@ -110,6 +119,7 @@ public class SurveyService {
                         "description", d.description(),
                         "foundDate", d.foundDate().toString()))
                 .toList());
+        fields.put("completedItems", completedItems == null ? "ALL" : completedItems);
         String fp = Fingerprint.of(request.requestId(), "BOARD_SURVEY", fields);
 
         return executor.run(request.requestId(), fp, BoardResponse.class, () -> {
@@ -146,6 +156,13 @@ public class SurveyService {
                 }
             }
             surveyRepository.markBoarded(survey.id(), executor.now());
+            // 记录登轮项目完成证明：null 表示该类型全部必需项目均已完成（兼容旧调用）。
+            List<SurveyItem> completed = completedItems == null
+                    ? List.copyOf(SurveyItem.requiredFor(survey.type()))
+                    : completedItems.stream().map(SurveyItem::valueOf).toList();
+            for (SurveyItem item : completed) {
+                completionRepository.insert(survey.id(), item, executor.now());
+            }
             List<DefectResponse> defects = new java.util.ArrayList<>();
             for (DefectInput d : inputs) {
                 LocalDate deadline = switch (d.severity()) {
@@ -183,5 +200,29 @@ public class SurveyService {
             case INTERMEDIATE -> "中间";
             case SPECIAL -> "特别";
         };
+    }
+
+    /**
+     * 完成项目集合规范化：null 原样返回（表示全部必需项目均完成，兼容旧调用）；
+     * 显式列表（可为空，表示本次登轮无项目完成、全部依赖互认覆盖）
+     * 须无重复且为必需项目子集，否则参数非法 400。
+     */
+    private static List<String> normalizeCompletedItems(List<SurveyItem> items,
+                                                        SurveyType type) {
+        if (items == null) {
+            return null;
+        }
+        List<String> sorted = items.stream().map(SurveyItem::name).distinct().sorted().toList();
+        if (sorted.size() != items.size()) {
+            throw new BadRequestException("DUPLICATE_ITEM", "完成项目集合存在重复项目代码");
+        }
+        java.util.Set<SurveyItem> required = SurveyItem.requiredFor(type);
+        for (SurveyItem item : items) {
+            if (!required.contains(item)) {
+                throw new BadRequestException("ITEM_NOT_REQUIRED",
+                        "项目 " + item + " 不是" + typeName(type) + "检验的必需项目");
+            }
+        }
+        return sorted;
     }
 }

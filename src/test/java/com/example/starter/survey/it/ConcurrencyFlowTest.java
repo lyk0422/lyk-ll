@@ -166,8 +166,15 @@ class ConcurrencyFlowTest extends AbstractH2IntegrationTest {
         HttpResult after = postSync("/api/certificates/certify",
                 certifyBody("cert-after", surveyId));
         assertEquals(200, after.status);
-        assertEquals(1, jdbc.queryForObject(
+        Integer total = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM certificate WHERE ship_id="
-                        + "(SELECT id FROM ship WHERE imo='IMO-PC')", Integer.class));
+                        + "(SELECT id FROM ship WHERE imo='IMO-PC')", Integer.class);
+        if (total != 1) {
+            // 诊断：列出全部证书行，便于定位并发异常残留。
+            var rows = jdbc.queryForList(
+                    "SELECT id, version, status, valid_flag, survey_id FROM certificate"
+                            + " WHERE ship_id=(SELECT id FROM ship WHERE imo='IMO-PC')");
+            throw new AssertionError("证书总数应为 1，实际 " + total + "，明细: " + rows);
+        }
     }
 }

@@ -35,6 +35,13 @@ public abstract class AbstractH2IntegrationTest {
 
     @BeforeEach
     void cleanDatabase() {
+        jdbc.update("DELETE FROM recognition_risk");
+        jdbc.update("DELETE FROM recognition_binding");
+        jdbc.update("DELETE FROM survey_item_completion");
+        jdbc.update("DELETE FROM inspection_report_item");
+        jdbc.update("DELETE FROM inspection_report");
+        jdbc.update("DELETE FROM recognition_rule_item");
+        jdbc.update("DELETE FROM recognition_rule");
         jdbc.update("DELETE FROM survey_event");
         jdbc.update("DELETE FROM defect");
         jdbc.update("DELETE FROM certificate");
@@ -145,5 +152,56 @@ public abstract class AbstractH2IntegrationTest {
 
     protected Map<String, Object> extensionApproveBody(String requestId, long extensionId) {
         return Map.of("requestId", requestId, "extensionId", extensionId);
+    }
+
+    // ---- 互认：规则 / 报告 / 申请 ----
+
+    protected Map<String, Object> ruleBody(String requestId, int ruleVersion, String flagCode,
+                                           int maxEvidenceDays, java.util.List<String> items) {
+        return Map.of("requestId", requestId, "ruleVersion", ruleVersion,
+                "flagCode", flagCode, "maxEvidenceDays", maxEvidenceDays,
+                "items", items);
+    }
+
+    protected Map<String, Object> reportItem(String itemCode, String conclusion) {
+        return Map.of("itemCode", itemCode, "conclusion", conclusion);
+    }
+
+    protected Map<String, Object> importReportBody(String requestId, String reportNo,
+                                                   String shipImo, String flagCode,
+                                                   java.time.Instant completedAt,
+                                                   java.util.List<Map<String, Object>> items) {
+        return Map.of("requestId", requestId, "reportNo", reportNo,
+                "shipImo", shipImo, "flagCode", flagCode,
+                "completedAt", completedAt.toString(),
+                "attestation", "SYNTHETIC-ATTEST",
+                "items", items);
+    }
+
+    protected Map<String, Object> correctReportBody(String requestId, String reportNo,
+                                                    int expectedVersion,
+                                                    java.time.Instant completedAt,
+                                                    java.util.List<Map<String, Object>> items) {
+        return Map.of("requestId", requestId, "reportNo", reportNo,
+                "expectedVersion", expectedVersion,
+                "completedAt", completedAt.toString(),
+                "attestation", "SYNTHETIC-ATTEST",
+                "items", items);
+    }
+
+    protected Map<String, Object> applyRecognitionBody(String requestId, long surveyId,
+                                                       String reportNo, int ruleVersion) {
+        return Map.of("requestId", requestId, "surveyId", surveyId,
+                "reportNo", reportNo, "ruleVersion", ruleVersion);
+    }
+
+    protected Map<String, Object> boardBody(String requestId, long surveyId,
+                                            LocalDate completedDate,
+                                            java.util.List<Map<String, Object>> defects,
+                                            java.util.List<String> completedItems) {
+        return Map.of("requestId", requestId, "surveyId", surveyId,
+                "completedDate", completedDate.toString(),
+                "defects", defects == null ? java.util.List.of() : defects,
+                "completedItems", completedItems == null ? java.util.List.of() : completedItems);
     }
 }
