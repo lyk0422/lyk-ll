@@ -13,11 +13,15 @@ import com.example.starter.fermentation.api.BatchDtos.ReadingResponse;
 import com.example.starter.fermentation.api.BatchDtos.StartPhaseRequest;
 import com.example.starter.fermentation.api.BatchDtos.TemperatureReadingRequest;
 import com.example.starter.fermentation.api.BatchDtos.TransferRequest;
+import com.example.starter.fermentation.api.YeastDtos.ControlledStartRequest;
+import com.example.starter.fermentation.api.YeastDtos.ControlledStartResponse;
+import com.example.starter.fermentation.api.YeastDtos.YeastUnitResponse;
 import com.example.starter.fermentation.domain.BatchStatus;
 import com.example.starter.fermentation.domain.CurvePhase;
 import com.example.starter.fermentation.domain.DiacetylTest;
 import com.example.starter.fermentation.domain.FermentationBatch;
 import com.example.starter.fermentation.domain.TemperatureReading;
+import com.example.starter.fermentation.domain.YeastUnit;
 import com.example.starter.fermentation.error.ApiException;
 import com.example.starter.fermentation.repository.BatchRepository;
 import com.example.starter.fermentation.repository.CurveRepository;
@@ -67,15 +71,17 @@ public class BatchService {
     private final CurveRepository curveRepository;
     private final ReadingRepository readingRepository;
     private final IdempotencyService idempotencyService;
+    private final YeastService yeastService;
     private final ObjectMapper objectMapper;
 
     public BatchService(BatchRepository batchRepository, CurveRepository curveRepository,
                         ReadingRepository readingRepository, IdempotencyService idempotencyService,
-                        ObjectMapper objectMapper) {
+                        YeastService yeastService, ObjectMapper objectMapper) {
         this.batchRepository = batchRepository;
         this.curveRepository = curveRepository;
         this.readingRepository = readingRepository;
         this.idempotencyService = idempotencyService;
+        this.yeastService = yeastService;
         this.objectMapper = objectMapper;
     }
 
@@ -117,6 +123,30 @@ public class BatchService {
             requireStatus(batch, BatchStatus.FILLED, "仅满罐批次可开始主酵");
             batchRepository.startMainFerment(batchId, req.startedAt());
             return new StoredResponse(200, toJson(toResponse(mustFind(batchId))));
+        });
+    }
+
+    /**
+     * 受控投酵启动主酵：FILLED → MAIN_FERMENT，同时原子绑定指定酵母单元。
+     * 酵母校验（版本、可用状态、代次 ≤5、72 小时失效）与批次状态变更在同一事务内完成；
+     * 重复启动（同 requestId）重放首次结果，不重复绑定或递增版本。
+     */
+    @Transactional
+    public StoredResponse startMainFermentControlled(long batchId, ControlledStartRequest req) {
+        String endpoint = "POST /api/batches/" + batchId + "/main-ferment/start-controlled";
+        String fingerprint = idempotencyService.structuredFingerprint(endpoint, req.requestId(),
+                req.startedAt().toString(), req.yeastUnitCode(), req.expectedVersion().toString());
+        return idempotent(req.requestId(), endpoint, fingerprint, () -> {
+            FermentationBatch batch = mustFind(batchId);
+            requireStatus(batch, BatchStatus.FILLED, "仅满罐批次可开始主酵");
+            YeastUnit unit = yeastService.bindForPitch(req.yeastUnitCode(), req.expectedVersion(),
+                    batchId, req.startedAt());
+            batchRepository.startMainFerment(batchId, req.startedAt());
+            return new StoredResponse(200, toJson(new ControlledStartResponse(
+                    toResponse(mustFind(batchId)),
+                    new YeastUnitResponse(unit.id(), unit.unitCode(), unit.generation(),
+                            unit.status(), unit.lastRecoveredAt(), unit.version(),
+                            unit.activeBatchId()))));
         });
     }
 

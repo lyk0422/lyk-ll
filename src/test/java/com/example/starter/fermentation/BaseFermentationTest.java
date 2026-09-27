@@ -52,6 +52,8 @@ public abstract class BaseFermentationTest {
         jdbc.update("DELETE FROM temperature_reading");
         jdbc.update("DELETE FROM diacetyl_test");
         jdbc.update("DELETE FROM idempotency_record");
+        jdbc.update("DELETE FROM yeast_recovery");
+        jdbc.update("DELETE FROM yeast_unit");
         jdbc.update("DELETE FROM fermentation_batch");
         jdbc.update("DELETE FROM curve_segment WHERE curve_id IN"
                 + " (SELECT id FROM process_curve WHERE version > 1)");

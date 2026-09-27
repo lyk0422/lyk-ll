@@ -47,10 +47,34 @@ public class IdempotencyService {
         for (String field : businessFields) {
             canonical.append('|').append(field);
         }
+        return sha256(canonical.toString());
+    }
+
+    /**
+     * 计算结构化请求指纹：每个字段以“长度:值;”长度前缀编码后取 SHA-256。
+     * 字段边界无歧义，合法文本含分隔符（如 '|'、':'、';'）也能与字段切分区分。
+     */
+    public String structuredFingerprint(String endpoint, String requestId,
+                                        String... businessFields) {
+        StringBuilder canonical = new StringBuilder();
+        appendLengthPrefixed(canonical, endpoint);
+        appendLengthPrefixed(canonical, requestId);
+        for (String field : businessFields) {
+            appendLengthPrefixed(canonical, field);
+        }
+        return sha256(canonical.toString());
+    }
+
+    private static void appendLengthPrefixed(StringBuilder canonical, String field) {
+        String value = field == null ? "" : field;
+        canonical.append(value.length()).append(':').append(value).append(';');
+    }
+
+    private static String sha256(String canonical) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             return HexFormat.of().formatHex(
-                    digest.digest(canonical.toString().getBytes(StandardCharsets.UTF_8)));
+                    digest.digest(canonical.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 不可用", e);
         }

@@ -83,6 +83,31 @@ CREATE TABLE IF NOT EXISTS idempotency_record (
     CONSTRAINT uk_idem_request UNIQUE (request_id)
 ) COMMENT '幂等受理记录';
 
+CREATE TABLE IF NOT EXISTS yeast_unit (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    unit_code VARCHAR(64) NOT NULL COMMENT '酵母单元编号，全局唯一',
+    generation INT NOT NULL COMMENT '当前代次，初始 0；回收合格（活率≥90%且无污染）后加 1；代次 6 不可再投酵（恰 5 允许本次投酵）',
+    status VARCHAR(16) NOT NULL COMMENT '状态：AVAILABLE 可用 / IN_USE 主酵占用中 / RETIRED 报废（不可再投酵） / EXPIRED 回收后超 72 小时失效',
+    last_recovered_at TIMESTAMP NULL COMMENT '最近一次回收时刻（业务时间，Asia/Shanghai 本地时间，无时区）；首次单元（未回收过）为 NULL，不受 72 小时失效限制',
+    version INT NOT NULL COMMENT '乐观锁版本，从 1 开始，每次成功变更加 1；写操作须携带 expectedVersion',
+    active_batch_id BIGINT NULL COMMENT '当前占用的主酵批次 ID，未占用为 NULL；唯一约束保证一个批次至多绑定一个酵母单元',
+    CONSTRAINT uk_yeast_unit_code UNIQUE (unit_code),
+    CONSTRAINT uk_yeast_active_batch UNIQUE (active_batch_id)
+) COMMENT '合成酵母单元（代次限用与投酵回收追溯）';
+
+CREATE TABLE IF NOT EXISTS yeast_recovery (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    yeast_unit_id BIGINT NOT NULL COMMENT '酵母单元 ID',
+    batch_id BIGINT NOT NULL COMMENT '回收时绑定的批次 ID；唯一约束保证失败批次也只能回收一次',
+    recovered_at TIMESTAMP NOT NULL COMMENT '回收时刻（业务时间，Asia/Shanghai 本地时间，无时区）',
+    viability_percent DECIMAL(5,2) NOT NULL COMMENT '回收活率，单位 %；不低于 90 且无污染判定合格（恰 90 合格）',
+    contaminated TINYINT NOT NULL COMMENT '是否检出污染：0 否 / 1 是；污染即报废',
+    outcome VARCHAR(16) NOT NULL COMMENT '回收结果：RECYCLED 合格转可用（代次+1） / RETIRED 报废（不可再投酵）',
+    generation_after INT NOT NULL COMMENT '回收后酵母代次',
+    CONSTRAINT uk_recovery_batch UNIQUE (batch_id),
+    CONSTRAINT fk_recovery_unit FOREIGN KEY (yeast_unit_id) REFERENCES yeast_unit (id)
+) COMMENT '酵母回收记录（投酵回收追溯链）';
+
 CREATE TABLE IF NOT EXISTS late_event (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     batch_id BIGINT NOT NULL COMMENT '所属批次 ID',
