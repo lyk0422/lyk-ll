@@ -59,3 +59,20 @@ cement:
     NOX: 400.0
     SO2: 200.0
     DUST: 30.0
+  # 冷修后升温合成曲线：分阶段目标温度与最长用时，恰满最长用时未达目标自动转保温段
+  warm-up:
+    # 合成曲线版本号，随升温票与阶段记录落库
+    curve-version: CURVE-2026A
+    # 保温段超时升级告警阈值，单位小时，恰满即判定
+    hold-timeout-hours: 4
+    # 合成升温曲线阶段：目标温度(℃)与最长用时(分钟)，恰等于目标判达标
+    stages:
+      - stage-no: 1
+        target-temp: 600.0
+        max-duration-minutes: 120
+      - stage-no: 2
+        target-temp: 1000.0
+        max-duration-minutes: 180
+      - stage-no: 3
+        target-temp: 1450.0
+        max-duration-minutes: 240

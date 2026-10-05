@@ -23,3 +23,17 @@ cement:
     NOX: 400.0
     SO2: 200.0
     DUST: 30.0
+  warm-up:
+    curve-version: CURVE-2026A
+    hold-timeout-hours: 4
+    hold-timeout-scan-delay-ms: 3600000
+    stages:
+      - stage-no: 1
+        target-temp: 600.0
+        max-duration-minutes: 120
+      - stage-no: 2
+        target-temp: 1000.0
+        max-duration-minutes: 180
+      - stage-no: 3
+        target-temp: 1450.0
+        max-duration-minutes: 240

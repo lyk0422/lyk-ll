@@ -30,7 +30,9 @@ public abstract class AbstractIntegrationTest {
         for (String table : new String[] {
                 "daily_summary", "ban_record", "late_reading_event", "idempotent_request",
                 "reduction_command", "hourly_assessment", "emission_reading",
-                "kiln_active_plan", "kiln_lock", "plan_fuel", "co_firing_plan"}) {
+                "kiln_active_plan", "kiln_lock", "plan_fuel", "co_firing_plan",
+                "warm_up_stage_confirm", "warm_up_alarm", "warm_up_stage", "feed_record",
+                "kiln_active_warmup", "warm_up_ticket"}) {
             jdbc.update("TRUNCATE TABLE " + table);
         }
         jdbc.execute("SET REFERENTIAL_INTEGRITY TRUE");

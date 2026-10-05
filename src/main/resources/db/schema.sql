@@ -175,3 +175,87 @@ CREATE TABLE IF NOT EXISTS daily_summary (
     CONSTRAINT fk_summary_plan FOREIGN KEY (plan_id) REFERENCES co_firing_plan (id)
 );
 COMMENT ON TABLE daily_summary IS '日结输出，实际替代率/超标时段/降掺记录三项勾稽可复算，sealed=TRUE为封存终态';
+
+CREATE TABLE IF NOT EXISTS warm_up_ticket (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id       VARCHAR(64) NOT NULL,
+    ticket_no        VARCHAR(64) NOT NULL,
+    kiln_id          VARCHAR(32) NOT NULL,
+    curve_version    VARCHAR(32) NOT NULL,
+    status           VARCHAR(16) NOT NULL,
+    current_stage_no INT         NOT NULL,
+    hold_started_at  TIMESTAMP,
+    created_at       TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at     TIMESTAMP,
+    updated_at       TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_ticket_request_id UNIQUE (request_id),
+    CONSTRAINT uk_ticket_ticket_no UNIQUE (ticket_no)
+);
+COMMENT ON TABLE warm_up_ticket IS '冷修后升温操作票，按合成曲线分阶段执行，曲线走完才允许投料';
+COMMENT ON COLUMN warm_up_ticket.status IS 'EXECUTING升温中 HOLDING保温中 COMPLETED曲线走完(终态，允许投料)';
+COMMENT ON COLUMN warm_up_ticket.current_stage_no IS '当前执行阶段序号，与阶段推进同事务更新';
+COMMENT ON COLUMN warm_up_ticket.hold_started_at IS '进入保温段时刻(Asia/Shanghai)，恰满4小时未结束即升级告警';
+
+CREATE TABLE IF NOT EXISTS kiln_active_warmup (
+    kiln_id     VARCHAR(32) PRIMARY KEY,
+    ticket_id   BIGINT      NOT NULL,
+    acquired_at TIMESTAMP   NOT NULL,
+    CONSTRAINT uk_active_warmup_ticket UNIQUE (ticket_id)
+);
+COMMENT ON TABLE kiln_active_warmup IS '窑当前执行中升温票占用槽，同一窑同时刻只允许一张执行中/保温中升温票，靠主键唯一约束并发受理';
+
+CREATE TABLE IF NOT EXISTS warm_up_stage (
+    id                   BIGINT AUTO_INCREMENT PRIMARY KEY,
+    ticket_id            BIGINT       NOT NULL,
+    stage_no             INT          NOT NULL,
+    stage_type           VARCHAR(8)   NOT NULL,
+    curve_stage_no       INT          NOT NULL,
+    curve_version        VARCHAR(32)  NOT NULL,
+    target_temp          DECIMAL(8,1),
+    max_duration_minutes INT,
+    started_at           TIMESTAMP    NOT NULL,
+    confirmed_at         TIMESTAMP,
+    confirm_operator_a   VARCHAR(64),
+    confirm_operator_b   VARCHAR(64),
+    CONSTRAINT uk_stage_ticket_seq UNIQUE (ticket_id, stage_no),
+    CONSTRAINT fk_stage_ticket FOREIGN KEY (ticket_id) REFERENCES warm_up_ticket (id)
+);
+COMMENT ON TABLE warm_up_stage IS '升温票执行阶段记录，与票的阶段推进在同一事务写入，curve_version 随阶段落库保证原子可溯';
+COMMENT ON COLUMN warm_up_stage.stage_type IS 'RAMP升温段(按曲线定义) HOLD保温段(恰满最长用时未达目标自动转入)';
+COMMENT ON COLUMN warm_up_stage.curve_stage_no IS '对应合成曲线中的阶段序号，保温段记录其承接的升温段序号';
+COMMENT ON COLUMN warm_up_stage.target_temp IS '阶段目标温度，单位摄氏度，恰等于判达标';
+COMMENT ON COLUMN warm_up_stage.max_duration_minutes IS '升温段最长用时(分钟)，恰满未达目标自动转保温段';
+
+CREATE TABLE IF NOT EXISTS warm_up_stage_confirm (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    ticket_id    BIGINT      NOT NULL,
+    stage_no     INT         NOT NULL,
+    operator     VARCHAR(64) NOT NULL,
+    confirmed_at TIMESTAMP   NOT NULL,
+    CONSTRAINT uk_stage_operator UNIQUE (ticket_id, stage_no, operator),
+    CONSTRAINT fk_confirm_ticket FOREIGN KEY (ticket_id) REFERENCES warm_up_ticket (id)
+);
+COMMENT ON TABLE warm_up_stage_confirm IS '阶段确认双人复核记录，同阶段须两名不同操作人确认方可推进，单人确认不生效';
+
+CREATE TABLE IF NOT EXISTS warm_up_alarm (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    ticket_id    BIGINT      NOT NULL,
+    stage_no     INT         NOT NULL,
+    alarm_type   VARCHAR(32) NOT NULL,
+    triggered_at TIMESTAMP   NOT NULL,
+    CONSTRAINT uk_alarm_ticket_stage UNIQUE (ticket_id, stage_no),
+    CONSTRAINT fk_alarm_ticket FOREIGN KEY (ticket_id) REFERENCES warm_up_ticket (id)
+);
+COMMENT ON TABLE warm_up_alarm IS '保温段超时升级告警，保温恰满4小时未结束触发，每票每阶段至多一条';
+
+CREATE TABLE IF NOT EXISTS feed_record (
+    id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id VARCHAR(64) NOT NULL,
+    kiln_id    VARCHAR(32) NOT NULL,
+    ticket_id  BIGINT      NOT NULL,
+    fed_at     TIMESTAMP   NOT NULL,
+    created_at TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_feed_request UNIQUE (request_id),
+    CONSTRAINT fk_feed_ticket FOREIGN KEY (ticket_id) REFERENCES warm_up_ticket (id)
+);
+COMMENT ON TABLE feed_record IS '恢复投料记录，投料请求与升温曲线状态在同一事务校验，曲线未走完禁止投料';

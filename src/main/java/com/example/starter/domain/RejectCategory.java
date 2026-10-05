@@ -19,5 +19,9 @@ public enum RejectCategory {
     /** 当日已被连续3小时超标禁烧。 */
     KILN_BANNED,
     /** 同 requestId 指纹不一致。 */
-    IDEMPOTENT_CONFLICT
+    IDEMPOTENT_CONFLICT,
+    /** 升温曲线未走完，禁止投料。 */
+    CURVE_NOT_FINISHED,
+    /** 同一窑同时刻已有执行中/保温中升温票。 */
+    WARMUP_TICKET_ACTIVE
 }
