@@ -34,12 +34,14 @@ CREATE TABLE IF NOT EXISTS cutover_request (
     priority         VARCHAR(16)  NOT NULL COMMENT '优先级：HIGH/MEDIUM/LOW',
     window_start     TIMESTAMP    NOT NULL COMMENT '窗口开始时间(含),Asia/Shanghai',
     window_end       TIMESTAMP    NOT NULL COMMENT '窗口结束时间(不含),Asia/Shanghai',
-    status           VARCHAR(24)  NOT NULL COMMENT '状态:SUBMITTED/IMPACT_ANALYZED/APPROVED/EXECUTING/VERIFIED/SEALED/REJECTED/ROLLING_BACK/ROLLED_BACK/WINDOW_EXPIRED',
+    status           VARCHAR(24)  NOT NULL COMMENT '状态:SUBMITTED/IMPACT_ANALYZED/APPROVED/EXECUTING/VERIFIED/SEALED/REJECTED/ROLLING_BACK/ROLLED_BACK/WINDOW_EXPIRED/DEPENDENCY_BLOCKED依赖阻断',
     impact_systems   VARCHAR(1000) COMMENT '影响分析命中的业务系统编码,逗号分隔;NULL表示尚未分析',
     fingerprint      VARCHAR(128) NOT NULL COMMENT 'requestId+全部业务字段的SHA-256指纹',
     reject_reason    VARCHAR(500) COMMENT '拒绝原因;NULL表示未拒绝',
     exec_started_at  TIMESTAMP    COMMENT '窗口执行开始时间;NULL表示尚未进入执行',
     rollback_cause   VARCHAR(32)  COMMENT '回退判据:HARDCHECK_FAILED硬性检查失败/CRITICAL_TIMEOUT验证点超时/CRITICAL_FAILED验证点失败/STEP_FAILED普通步骤失败/WINDOW_EXPIRED窗口超期;NULL表示未回退',
+    version          INT          NOT NULL DEFAULT 1 COMMENT '版本号,从1开始,每次成功变更加1',
+    batch_id         VARCHAR(64)  COMMENT '绑定的割接批次ID;NULL表示未绑定批次,旧单申请行为不变',
     created_at       TIMESTAMP    NOT NULL COMMENT '创建时间',
     updated_at       TIMESTAMP    NOT NULL COMMENT '最近更新时间',
     UNIQUE (request_id)
@@ -76,3 +78,53 @@ CREATE TABLE IF NOT EXISTS cutover_event (
 
 CREATE INDEX IF NOT EXISTS idx_step_request ON cutover_step(request_id);
 CREATE INDEX IF NOT EXISTS idx_event_request ON cutover_event(request_id);
+
+-- 割接批次表：发布原子冻结成员/依赖/窗口快照，batch_id 为幂等键
+CREATE TABLE IF NOT EXISTS cutover_batch (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id     VARCHAR(64)  NOT NULL COMMENT '幂等键:批次ID',
+    published_at TIMESTAMP    NOT NULL COMMENT '发布精确时刻(参与幂等指纹),Asia/Shanghai',
+    status       VARCHAR(16)  NOT NULL COMMENT '状态:PUBLISHED已发布未结束/CLOSED已结束(全部成员到达终态)',
+    fingerprint  VARCHAR(128) NOT NULL COMMENT 'batchId+版本+成员集合+依赖边+精确时刻的SHA-256指纹',
+    version      INT          NOT NULL COMMENT '批次版本号,从1开始,每次成功变更加1',
+    created_at   TIMESTAMP    NOT NULL COMMENT '创建时间',
+    updated_at   TIMESTAMP    NOT NULL COMMENT '最近更新时间',
+    UNIQUE (batch_id)
+);
+
+-- 批次成员表：发布时冻结申请版本与窗口快照；一项申请最多属于一个未结束批次
+CREATE TABLE IF NOT EXISTS cutover_batch_member (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id        VARCHAR(64)  NOT NULL COMMENT '所属批次ID',
+    request_id      VARCHAR(64)  NOT NULL COMMENT '成员割接申请ID',
+    request_version INT          NOT NULL COMMENT '发布时冻结的申请版本号(与发布入参expectedVersion一致)',
+    window_start    TIMESTAMP    NOT NULL COMMENT '窗口开始快照(含),Asia/Shanghai',
+    window_end      TIMESTAMP    NOT NULL COMMENT '窗口结束快照(不含),Asia/Shanghai',
+    created_at      TIMESTAMP    NOT NULL COMMENT '创建时间',
+    UNIQUE (batch_id, request_id)
+);
+
+-- 批次内有向前置依赖边：前置须先验证通过并封板，后继方可启动
+CREATE TABLE IF NOT EXISTS cutover_batch_edge (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id     VARCHAR(64) NOT NULL COMMENT '所属批次ID',
+    predecessor  VARCHAR(64) NOT NULL COMMENT '前置申请ID(须先验证通过并封板)',
+    successor    VARCHAR(64) NOT NULL COMMENT '后继申请ID(全部直接前置封板后方可启动)',
+    created_at   TIMESTAMP   NOT NULL COMMENT '创建时间',
+    UNIQUE (batch_id, predecessor, successor)
+);
+
+-- 依赖阻断明细：保留首个阻断来源集合，阻断落库后不改写
+CREATE TABLE IF NOT EXISTS cutover_block_record (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id          VARCHAR(64)  NOT NULL COMMENT '所属批次ID',
+    request_id        VARCHAR(64)  NOT NULL COMMENT '被阻断(转DEPENDENCY_BLOCKED)的申请ID',
+    source_request_id VARCHAR(64)  NOT NULL COMMENT '阻断来源:处于回退/超期/阻断态的直接前置申请ID',
+    cause             VARCHAR(32)  NOT NULL COMMENT '来源触发原因:ROLLBACK回退/WINDOW_EXPIRED窗口超期/DEPENDENCY_BLOCKED依赖阻断传导',
+    created_at        TIMESTAMP    NOT NULL COMMENT '落库时间',
+    UNIQUE (batch_id, request_id, source_request_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_batch_member_request ON cutover_batch_member(request_id);
+CREATE INDEX IF NOT EXISTS idx_batch_edge_batch ON cutover_batch_edge(batch_id);
+CREATE INDEX IF NOT EXISTS idx_block_record_batch ON cutover_block_record(batch_id);

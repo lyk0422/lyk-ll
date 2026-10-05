@@ -62,6 +62,7 @@ public class CutoverService {
             Set.of(RequestStatus.APPROVED.name(), RequestStatus.EXECUTING.name());
 
     private final CutoverRepository repo;
+    private final BatchService batchService;
 
     /** 窗口最大分钟数，默认 240（4 小时，恰达合法）。 */
     @Value("${cutover.max-window-minutes:240}")
@@ -71,8 +72,9 @@ public class CutoverService {
     @Value("${cutover.verification-timeout-minutes:10}")
     private long verificationTimeoutMinutes;
 
-    public CutoverService(CutoverRepository repo) {
+    public CutoverService(CutoverRepository repo, BatchService batchService) {
         this.repo = repo;
+        this.batchService = batchService;
     }
 
     // ---------------- 申请 ----------------
@@ -138,7 +140,7 @@ public class CutoverService {
             overlap.setRejectReason("被更高优先级新申请 " + req.requestId()
                     + "（优先级 " + newPriority + "）抢占拒绝");
             overlap.setUpdatedAt(LocalDateTime.now());
-            repo.updateMutable(overlap);
+            saveMutable(overlap);
         }
 
         LocalDateTime now = LocalDateTime.now();
@@ -180,7 +182,7 @@ public class CutoverService {
         po.setImpactSystems(String.join(",", systems));
         po.setStatus(RequestStatus.IMPACT_ANALYZED.name());
         po.setUpdatedAt(LocalDateTime.now());
-        repo.updateMutable(po);
+        saveMutable(po);
         return new ActionResult(false,
                 "影响分析完成，命中 " + systems.size() + " 个关联业务系统", toView(po));
     }
@@ -228,6 +230,9 @@ public class CutoverService {
             if (RequestStatus.REJECTED.name().equals(po.getStatus())) {
                 return new ActionResult(true, "该割接已是拒绝终态，幂等返回", toView(po));
             }
+            if (RequestStatus.DEPENDENCY_BLOCKED.name().equals(po.getStatus())) {
+                throw new BusinessRuleException("割接已被依赖阻断（终态），不能拒绝");
+            }
             if (ACTIVE_STATUS.contains(po.getStatus())
                     || RequestStatus.VERIFIED.name().equals(po.getStatus())
                     || RequestStatus.SEALED.name().equals(po.getStatus())) {
@@ -239,7 +244,11 @@ public class CutoverService {
             message = "审批拒绝，状态 REJECTED";
         }
         po.setUpdatedAt(LocalDateTime.now());
-        repo.updateMutable(po);
+        saveMutable(po);
+        if (RequestStatus.REJECTED.name().equals(po.getStatus())) {
+            // 批内成员被拒绝（终态）：同事务刷新批次关闭状态。
+            batchService.refreshClosure(po.getBatchId());
+        }
         insertEvent(req.requestUid(), req.requestId(), EventType.APPROVE, null, fp,
                 message, false);
         return new ActionResult(false, message, toView(po));
@@ -271,10 +280,16 @@ public class CutoverService {
                 || req.startTime().isAfter(po.getWindowEnd())) {
             throw new BusinessRuleException("执行开始时间必须落在窗口 [start,end] 内");
         }
+        // 批内成员启动门禁：全部直接前置须已验证通过并封板，否则返回等待，
+        // 不写步骤、不改状态、不占 requestUid 幂等键（可稍后同键重试）。
+        String gate = batchService.gateMessage(po);
+        if (gate != null) {
+            return new ActionResult(false, gate, toView(po));
+        }
         po.setStatus(RequestStatus.EXECUTING.name());
         po.setExecStartedAt(req.startTime());
         po.setUpdatedAt(LocalDateTime.now());
-        repo.updateMutable(po);
+        saveMutable(po);
         String message = "进入窗口执行，执行开始时间 " + req.startTime();
         insertEvent(req.requestUid(), req.requestId(), EventType.EXECUTE_START, null, fp,
                 message, false);
@@ -413,7 +428,7 @@ public class CutoverService {
         if (allSuccess) {
             po.setStatus(RequestStatus.VERIFIED.name());
             po.setUpdatedAt(now);
-            repo.updateMutable(po);
+            saveMutable(po);
             message = "步骤 seqNo=" + req.seqNo() + " 成功，全部步骤完成，验证通过 VERIFIED";
         } else {
             message = "步骤 seqNo=" + req.seqNo() + " 成功，等待后续步骤回报";
@@ -444,6 +459,7 @@ public class CutoverService {
         if (RequestStatus.SEALED.name().equals(status)
                 || RequestStatus.ROLLED_BACK.name().equals(status)
                 || RequestStatus.WINDOW_EXPIRED.name().equals(status)
+                || RequestStatus.DEPENDENCY_BLOCKED.name().equals(status)
                 || RequestStatus.REJECTED.name().equals(status)) {
             String message = "割接已处于终态 " + status + "，巡检幂等返回";
             insertEvent(req.requestUid(), req.requestId(), EventType.EXPIRE_CHECK, null, fp,
@@ -537,7 +553,9 @@ public class CutoverService {
         }
         po.setStatus(RequestStatus.SEALED.name());
         po.setUpdatedAt(LocalDateTime.now());
-        repo.updateMutable(po);
+        saveMutable(po);
+        // 批内成员封板（终态）：同事务刷新批次关闭状态。
+        batchService.refreshClosure(po.getBatchId());
         insertEvent(req.requestUid(), req.requestId(), EventType.SEAL, null, fp,
                 "验证封板完成，状态 SEALED", false);
         return new ActionResult(false, "验证封板完成，状态 SEALED", toView(po));
@@ -594,7 +612,7 @@ public class CutoverService {
         po.setStatus("WINDOW_EXPIRED".equals(cause)
                 ? RequestStatus.WINDOW_EXPIRED.name() : RequestStatus.ROLLED_BACK.name());
         po.setUpdatedAt(now);
-        repo.updateMutable(po);
+        saveMutable(po);
 
         // 回退判据命中记录（幂等，便于重入/复算）。
         String triggerUid = "SYS-ROLLBACK-" + po.getRequestId() + "-" + cause;
@@ -604,6 +622,16 @@ public class CutoverService {
                     FingerprintUtil.sha256("ROLLBACK", po.getRequestId(), cause, triggerSeq),
                     "命中回退判据: " + cause, false);
         }
+
+        // 批内传播与前置状态提交同事务：尚未开始的可达后继转依赖阻断，
+        // 已开始成员按原回退流程处理，已封板结果不改；随后刷新批次关闭状态。
+        batchService.propagateFailure(po);
+    }
+
+    /** 更新可变字段：数据库原子 version+1，内存对象同步加 1 保持视图一致。 */
+    private void saveMutable(CutoverRequestPO po) {
+        repo.updateMutable(po);
+        po.setVersion(po.getVersion() == null ? 1 : po.getVersion() + 1);
     }
 
     private void persistStep(CutoverStepPO step) {
@@ -700,7 +728,8 @@ public class CutoverService {
         return new RequestView(po.getRequestId(), po.getTitle(), po.getDeviceCode(),
                 po.getPriority(), po.getWindowStart(), po.getWindowEnd(), po.getStatus(),
                 po.getImpactSystems() == null ? null : impacts,
-                po.getRejectReason(), po.getRollbackCause(), stepViews);
+                po.getRejectReason(), po.getRollbackCause(), stepViews,
+                po.getVersion(), po.getBatchId());
     }
 
     private String writeSnapshot(String message) {

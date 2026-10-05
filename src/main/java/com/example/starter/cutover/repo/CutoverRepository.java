@@ -7,6 +7,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -32,14 +33,15 @@ public class CutoverRepository {
                 INSERT INTO cutover_request
                   (request_id, title, device_code, priority, window_start, window_end,
                    status, impact_systems, fingerprint, reject_reason, exec_started_at,
-                   rollback_cause, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   rollback_cause, version, batch_id, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 po.getRequestId(), po.getTitle(), po.getDeviceCode(), po.getPriority(),
                 Timestamp.valueOf(po.getWindowStart()), Timestamp.valueOf(po.getWindowEnd()),
                 po.getStatus(), po.getImpactSystems(), po.getFingerprint(), po.getRejectReason(),
                 po.getExecStartedAt() == null ? null : Timestamp.valueOf(po.getExecStartedAt()),
                 po.getRollbackCause(),
+                po.getVersion() == null ? 1 : po.getVersion(), po.getBatchId(),
                 Timestamp.valueOf(po.getCreatedAt()), Timestamp.valueOf(po.getUpdatedAt()));
     }
 
@@ -56,6 +58,22 @@ public class CutoverRepository {
                 "SELECT * FROM cutover_request WHERE request_id = ? FOR UPDATE",
                 REQUEST_MAPPER, requestId);
         return list.isEmpty() ? null : list.get(0);
+    }
+
+    /**
+     * 按申请编号升序逐行加锁（FOR UPDATE），供批次发布/依赖阻断传播等多行操作
+     * 以固定顺序串行化，避免死锁。返回顺序与入参排序后一致。
+     */
+    public List<CutoverRequestPO> lockRequestsOrdered(List<String> requestIds) {
+        List<String> sorted = requestIds.stream().distinct().sorted().toList();
+        List<CutoverRequestPO> result = new ArrayList<>();
+        for (String id : sorted) {
+            CutoverRequestPO po = lockRequest(id);
+            if (po != null) {
+                result.add(po);
+            }
+        }
+        return result;
     }
 
     /**
@@ -78,16 +96,18 @@ public class CutoverRepository {
                 Timestamp.valueOf(start), excludeRequestId);
     }
 
+    /** 更新可变字段；版本号每次成功变更由数据库原子加 1。 */
     public void updateMutable(CutoverRequestPO po) {
         jdbc.update("""
                 UPDATE cutover_request SET
                   status = ?, impact_systems = ?, reject_reason = ?,
-                  exec_started_at = ?, rollback_cause = ?, updated_at = ?
+                  exec_started_at = ?, rollback_cause = ?, batch_id = ?,
+                  version = version + 1, updated_at = ?
                 WHERE request_id = ?
                 """,
                 po.getStatus(), po.getImpactSystems(), po.getRejectReason(),
                 po.getExecStartedAt() == null ? null : Timestamp.valueOf(po.getExecStartedAt()),
-                po.getRollbackCause(), Timestamp.valueOf(po.getUpdatedAt()),
+                po.getRollbackCause(), po.getBatchId(), Timestamp.valueOf(po.getUpdatedAt()),
                 po.getRequestId());
     }
 
@@ -214,6 +234,8 @@ public class CutoverRepository {
         po.setRejectReason(rs.getString("reject_reason"));
         po.setExecStartedAt(toLdt(rs, "exec_started_at"));
         po.setRollbackCause(rs.getString("rollback_cause"));
+        po.setVersion(rs.getInt("version"));
+        po.setBatchId(rs.getString("batch_id"));
         po.setCreatedAt(toLdt(rs, "created_at"));
         po.setUpdatedAt(toLdt(rs, "updated_at"));
         return po;
