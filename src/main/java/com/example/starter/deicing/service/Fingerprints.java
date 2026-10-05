@@ -17,14 +17,20 @@ final class Fingerprints {
     static String sha256(String requestId, String flightNumber, String standCode,
                          DeicingType type, int requiredBays, int durationMinutes,
                          Instant targetTakeoffTime) {
-        String canonical = String.join("|",
-                requestId,
+        return sha256(requestId,
                 flightNumber,
                 standCode,
                 type.name(),
                 Integer.toString(requiredBays),
                 Integer.toString(durationMinutes),
                 Long.toString(targetTakeoffTime.toEpochMilli()));
+    }
+
+    /**
+     * 通用指纹：按给定字段顺序拼接后取 SHA-256。
+     */
+    static String sha256(String... parts) {
+        String canonical = String.join("|", parts);
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] hash = digest.digest(canonical.getBytes(StandardCharsets.UTF_8));

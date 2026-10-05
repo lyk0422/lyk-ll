@@ -44,6 +44,8 @@ public class DeicingService {
     private final SchedulingCalculator calculator;
     private final ViewMapper viewMapper;
     private final TimeSource timeSource;
+    private final InventoryService inventoryService;
+    private final ManualReviewService manualReviewService;
 
     public DeicingService(RequestRepository requestRepository,
                           AllocationRepository allocationRepository,
@@ -52,7 +54,9 @@ public class DeicingService {
                           LatchRepository latchRepository,
                           SchedulingCalculator calculator,
                           ViewMapper viewMapper,
-                          TimeSource timeSource) {
+                          TimeSource timeSource,
+                          InventoryService inventoryService,
+                          ManualReviewService manualReviewService) {
         this.requestRepository = requestRepository;
         this.allocationRepository = allocationRepository;
         this.bayRepository = bayRepository;
@@ -61,6 +65,8 @@ public class DeicingService {
         this.calculator = calculator;
         this.viewMapper = viewMapper;
         this.timeSource = timeSource;
+        this.inventoryService = inventoryService;
+        this.manualReviewService = manualReviewService;
     }
 
     /**
@@ -120,6 +126,17 @@ public class DeicingService {
             po.setFingerprint(fingerprint);
             po.setCreatedAt(now);
             po.setUpdatedAt(now);
+            if (request.type() == DeicingType.TWO_STEP) {
+                // 预占与受理同事务：库存不足转人工确认队列，不静默降级
+                try {
+                    inventoryService.reserveForTwoStep(request.requestId(),
+                            request.durationMinutes());
+                } catch (InsufficientFluidException e) {
+                    manualReviewService.recordInsufficientFluid(request, e.getMessage());
+                    throw ApiException.conflict("除冰液库存不足，申请 " + request.requestId()
+                            + " 已转人工确认队列：" + e.getMessage());
+                }
+            }
             requestRepository.insert(po);
             DeicingRequestPo stored = requestRepository.findByRequestId(request.requestId());
             return MutationResponse.of(viewMapper.toView(stored), false, List.of());
@@ -300,6 +317,8 @@ public class DeicingService {
         requestRepository.updateTakeoffResult(requestId, nextStatus, actualTakeoffTime, now);
         allocationRepository.updateStatusByRequest(requestId, nextStatus.name());
         DeicingRequestPo stored = mustFind(requestId);
+        // 结算与作业完成记录同事务：一步法按实际时长扣减，两步法预占转消耗
+        inventoryService.settleOnCompletion(stored, actualTakeoffTime);
         return new TakeoffResponse(viewMapper.toView(stored), valid, false,
                 viewMapper.hotDeadline(stored));
     }
@@ -321,6 +340,8 @@ public class DeicingService {
         Instant now = timeSource.now();
         requestRepository.updateStatus(requestId, RequestStatus.CANCELLED, now);
         allocationRepository.deleteByRequest(requestId);
+        // 取消释放两步法预占（幂等：非 ACTIVE 预占不受影响）
+        inventoryService.releaseReservation(requestId);
         return mutationReplay(mustFind(requestId));
     }
 

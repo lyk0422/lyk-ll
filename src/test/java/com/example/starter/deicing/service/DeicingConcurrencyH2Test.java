@@ -46,6 +46,12 @@ class DeicingConcurrencyH2Test {
     void cleanUp() {
         jdbcTemplate.update("DELETE FROM deicing_allocation");
         jdbcTemplate.update("DELETE FROM deicing_request");
+        jdbcTemplate.update("DELETE FROM fluid_reservation");
+        jdbcTemplate.update("DELETE FROM fluid_consumption");
+        jdbcTemplate.update("DELETE FROM fluid_borrow");
+        jdbcTemplate.update("DELETE FROM manual_review_queue");
+        jdbcTemplate.update("DELETE FROM fluid_batch WHERE source = 'INBOUND'");
+        jdbcTemplate.update("UPDATE fluid_batch SET remaining_liters = quantity_liters");
         timeSource.pin(Clock.fixed(T0, ZoneOffset.UTC));
     }
 

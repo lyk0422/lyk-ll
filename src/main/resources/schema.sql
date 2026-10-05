@@ -101,3 +101,104 @@ MERGE INTO flight_timetable (flight_number, hot_minutes) KEY (flight_number) VAL
     ('MU510', 10),
     ('CZ303', 30),
     ('HU780', 15);
+
+-- ---------------------------------------------------------------------------
+-- 除冰液库存与配比管理
+-- ---------------------------------------------------------------------------
+
+-- 除冰液配比表：每种液记录单位作业消耗（升/分钟）与期初库存（升）
+CREATE TABLE IF NOT EXISTS deicing_fluid (
+    fluid_code                    VARCHAR(32) PRIMARY KEY,
+    fluid_name                    VARCHAR(64)    NOT NULL,
+    consumption_per_minute_liters DECIMAL(10,2)  NOT NULL,
+    opening_liters                DECIMAL(14,2)  NOT NULL,
+    created_at                    TIMESTAMP(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+);
+COMMENT ON COLUMN deicing_fluid.consumption_per_minute_liters IS '合成配比：每分钟作业消耗（升），按车位占用时长或实际作业时长计费';
+COMMENT ON COLUMN deicing_fluid.opening_liters IS '期初库存（升），与 source=OPENING 批次合计一致';
+
+-- 补料入库批次：先到期先出（FEFO）；效期耗尽的批次不参与预占与扣减
+CREATE TABLE IF NOT EXISTS fluid_batch (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_no         VARCHAR(64)   NOT NULL,
+    fluid_code       VARCHAR(32)   NOT NULL,
+    source           VARCHAR(16)   NOT NULL,
+    quantity_liters  DECIMAL(14,2) NOT NULL,
+    remaining_liters DECIMAL(14,2) NOT NULL,
+    expiry_time      TIMESTAMP(3)  NOT NULL,
+    created_at       TIMESTAMP(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    CONSTRAINT uk_batch_no UNIQUE (batch_no),
+    CONSTRAINT ck_batch_source CHECK (source IN ('OPENING', 'INBOUND'))
+);
+COMMENT ON COLUMN fluid_batch.source IS '批次来源：OPENING 期初 / INBOUND 补料入库';
+COMMENT ON COLUMN fluid_batch.expiry_time IS '效期截止（UTC），到期及之后批次视为耗尽，拒绝预占';
+COMMENT ON COLUMN fluid_batch.remaining_liters IS '剩余量（升）；结算超扣时可为负，表示断供透支';
+
+-- 两步法预占：受理同事务写入；取消释放、作业完成转消耗
+CREATE TABLE IF NOT EXISTS fluid_reservation (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id      VARCHAR(64)    NOT NULL,
+    fluid_code      VARCHAR(32)    NOT NULL,
+    quantity_liters DECIMAL(14,2)  NOT NULL,
+    status          VARCHAR(16)    NOT NULL,
+    created_at      TIMESTAMP(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at      TIMESTAMP(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    CONSTRAINT uk_reservation_request UNIQUE (request_id)
+);
+COMMENT ON COLUMN fluid_reservation.status IS '状态：ACTIVE 预占中 / SETTLED 已转消耗 / RELEASED 已释放';
+
+-- 消耗台账：一步法按实际作业时长结算，两步法按预占量转结
+CREATE TABLE IF NOT EXISTS fluid_consumption (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id      VARCHAR(64)   NOT NULL,
+    fluid_code      VARCHAR(32)   NOT NULL,
+    quantity_liters DECIMAL(14,2) NOT NULL,
+    job_minutes     INT           NOT NULL,
+    created_at      TIMESTAMP(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+);
+COMMENT ON COLUMN fluid_consumption.job_minutes IS '计费作业时长（分钟）：一步法为实际时长，两步法为车位占用时长';
+
+-- 跨班组借用单：requestId 幂等；同一液罐同时刻只允许一张未归还借用单
+CREATE TABLE IF NOT EXISTS fluid_borrow (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id      VARCHAR(64)   NOT NULL,
+    fluid_code      VARCHAR(32)   NOT NULL,
+    tank_code       VARCHAR(32)   NOT NULL,
+    quantity_liters DECIMAL(14,2) NOT NULL,
+    from_team       VARCHAR(32)   NOT NULL,
+    to_team         VARCHAR(32)   NOT NULL,
+    status          VARCHAR(16)   NOT NULL,
+    fingerprint     CHAR(64)      NOT NULL,
+    created_at      TIMESTAMP(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    returned_at     TIMESTAMP(3),
+    CONSTRAINT uk_borrow_request UNIQUE (request_id)
+);
+COMMENT ON COLUMN fluid_borrow.tank_code IS '出借液罐编号；同时刻仅允许一张未归还借用单';
+COMMENT ON COLUMN fluid_borrow.status IS '状态：OPEN 未归还 / RETURNED 已归还';
+COMMENT ON COLUMN fluid_borrow.fingerprint IS '幂等指纹：requestId 与全部业务字段 SHA-256';
+
+-- 人工确认队列：库存不足的两步法申请转入，不静默降级
+CREATE TABLE IF NOT EXISTS manual_review_queue (
+    id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id    VARCHAR(64)  NOT NULL,
+    flight_number VARCHAR(32)  NOT NULL,
+    reason        VARCHAR(32)  NOT NULL,
+    detail        VARCHAR(256) NOT NULL,
+    status        VARCHAR(16)  NOT NULL DEFAULT 'PENDING',
+    created_at    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    CONSTRAINT uk_review_request UNIQUE (request_id)
+);
+COMMENT ON COLUMN manual_review_queue.reason IS '转人工成因：INSUFFICIENT_FLUID 库存不足';
+COMMENT ON COLUMN manual_review_queue.status IS '状态：PENDING 待人工确认';
+
+-- 合成除冰液配比与期初库存
+MERGE INTO deicing_fluid (fluid_code, fluid_name, consumption_per_minute_liters, opening_liters)
+KEY (fluid_code) VALUES
+    ('TYPE-I', '一步法除冰液（合成）', 40.00, 20000.00),
+    ('TYPE-II', '两步法防冰液（合成）', 25.00, 10000.00);
+
+-- 期初库存批次（效期远期，视为永不在测试窗口内耗尽）
+MERGE INTO fluid_batch (batch_no, fluid_code, source, quantity_liters, remaining_liters, expiry_time)
+KEY (batch_no) VALUES
+    ('OPENING-TYPE-I', 'TYPE-I', 'OPENING', 20000.00, 20000.00, '2027-12-31 00:00:00'),
+    ('OPENING-TYPE-II', 'TYPE-II', 'OPENING', 10000.00, 10000.00, '2027-12-31 00:00:00');
