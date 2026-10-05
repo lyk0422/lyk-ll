@@ -56,7 +56,7 @@ public abstract class AbstractIntegrationTest {
         jdbcTemplate.update("SET REFERENTIAL_INTEGRITY FALSE");
         for (String table : List.of("idempotent_request", "daily_evaluation", "control_command",
                 "energy_budget", "deviation_alarm", "late_reading_event", "sensor_reading",
-                "climate_strategy", "crop_stage", "crop", "zone_info")) {
+                "strategy_rehearsal", "climate_strategy", "crop_stage", "crop", "zone_info")) {
             jdbcTemplate.update("TRUNCATE TABLE " + table);
         }
         jdbcTemplate.update("SET REFERENTIAL_INTEGRITY TRUE");

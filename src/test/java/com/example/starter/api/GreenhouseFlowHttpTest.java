@@ -52,7 +52,7 @@ class GreenhouseFlowHttpTest {
         jdbcTemplate.update("SET REFERENTIAL_INTEGRITY FALSE");
         for (String table : List.of("idempotent_request", "daily_evaluation", "control_command",
                 "energy_budget", "deviation_alarm", "late_reading_event", "sensor_reading",
-                "climate_strategy", "crop_stage", "crop", "zone_info")) {
+                "strategy_rehearsal", "climate_strategy", "crop_stage", "crop", "zone_info")) {
             jdbcTemplate.update("TRUNCATE TABLE " + table);
         }
         jdbcTemplate.update("SET REFERENTIAL_INTEGRITY TRUE");
@@ -109,6 +109,18 @@ class GreenhouseFlowHttpTest {
         // 不存在策略 404
         ResponseEntity<Map> notFound = restTemplate.getForEntity(url("/api/strategies/NOPE"), Map.class);
         assertThat(notFound.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+
+        // 预演结果查询：下发留档 APPROVED（当时未分配预算，预算字段为空）；不存在策略 404
+        ResponseEntity<StrategyDtos.RehearsalResponse[]> rehearsals = restTemplate.getForEntity(
+                url("/api/strategies/ST-1/rehearsals"), StrategyDtos.RehearsalResponse[].class);
+        assertThat(rehearsals.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(rehearsals.getBody()).hasSize(1);
+        assertThat(rehearsals.getBody()[0].decision()).isEqualTo("APPROVED");
+        assertThat(rehearsals.getBody()[0].estimatedKwh()).isNotNull();
+        assertThat(rehearsals.getBody()[0].remainingKwh()).isNull();
+        ResponseEntity<Map> rehearsalsNotFound = restTemplate.getForEntity(
+                url("/api/strategies/NOPE/rehearsals"), Map.class);
+        assertThat(rehearsalsNotFound.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
 
         // 连续 3 点偏离（白天带 [28,30]，30.5 偏离）恰在第 3 点告警
         postReading(T0, "30.50", "70");

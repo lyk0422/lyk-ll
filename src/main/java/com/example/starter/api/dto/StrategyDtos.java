@@ -62,4 +62,22 @@ public final class StrategyDtos {
     /** 昼夜设定差等校验结果明细，供编制失败时定位规则。 */
     public record ValidationResult(boolean valid, String message) {
     }
+
+    /**
+     * 预演留档：每次下发尝试一行的估算与仲裁结论。budgetKwh/remainingKwh 为空表示当日未分配预算。
+     */
+    public record RehearsalResponse(
+            Long id,
+            String strategyCode,
+            String requestId,
+            Instant effectiveTime,
+            long execMinutes,
+            BigDecimal estimatedKwh,
+            java.time.LocalDate budgetDate,
+            BigDecimal budgetKwh,
+            BigDecimal remainingKwh,
+            String decision,
+            String reason,
+            Instant createdAt) {
+    }
 }

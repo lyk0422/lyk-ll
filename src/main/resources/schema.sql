@@ -55,8 +55,8 @@ CREATE TABLE IF NOT EXISTS climate_strategy (
     CONSTRAINT uk_strategy_code UNIQUE (strategy_code),
     CONSTRAINT uk_zone_effective UNIQUE (zone_code, effective_time)
 );
-COMMENT ON TABLE climate_strategy IS '气候策略：编制→校验→下发→执行→评估/失效';
-COMMENT ON COLUMN climate_strategy.status IS 'DRAFT/VALIDATED/DISPATCHED/EXECUTING/EXPIRED/EVALUATED';
+COMMENT ON TABLE climate_strategy IS '气候策略：编制→校验→下发→执行→评估/失效；与进行中告警处置不兼容时挂起等待';
+COMMENT ON COLUMN climate_strategy.status IS 'DRAFT/VALIDATED/SUSPENDED/DISPATCHED/EXECUTING/EXPIRED/EVALUATED；SUSPENDED=告警处置冲突挂起，无副作用';
 COMMENT ON COLUMN climate_strategy.day_temp IS '白天温度设定点，单位摄氏度';
 COMMENT ON COLUMN climate_strategy.night_temp IS '夜间温度设定点，单位摄氏度；与白天设定点差值不得超过8摄氏度（含8）';
 COMMENT ON COLUMN climate_strategy.temp_tolerance IS '温度允许带宽半宽，单位摄氏度';
@@ -141,6 +141,27 @@ CREATE TABLE IF NOT EXISTS daily_evaluation (
 );
 COMMENT ON TABLE daily_evaluation IS '日评估，SEALED 为终态；重复封存幂等返回';
 COMMENT ON COLUMN daily_evaluation.achievement_rate IS '设定达成率=带内采样点数/总采样点数，取值0~1';
+
+CREATE TABLE IF NOT EXISTS strategy_rehearsal (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    strategy_code   VARCHAR(64)  NOT NULL,
+    request_id      VARCHAR(96)  NOT NULL,
+    effective_time  TIMESTAMP(6) NOT NULL,
+    exec_minutes    BIGINT       NOT NULL,
+    estimated_kwh   DECIMAL(12,3) NOT NULL,
+    budget_date     DATE         NOT NULL,
+    budget_kwh      DECIMAL(12,3),
+    remaining_kwh   DECIMAL(12,3),
+    decision        VARCHAR(24)  NOT NULL,
+    reason          VARCHAR(256) NOT NULL,
+    created_at      TIMESTAMP(6) NOT NULL
+);
+COMMENT ON TABLE strategy_rehearsal IS '下发前预演与仲裁留档：每次下发尝试一行，随策略版本留存，可按合成能耗模型复算';
+COMMENT ON COLUMN strategy_rehearsal.exec_minutes IS '执行期分钟数：生效时刻到次日 UTC 零点';
+COMMENT ON COLUMN strategy_rehearsal.estimated_kwh IS '合成能耗模型估算的执行期能耗，单位kWh';
+COMMENT ON COLUMN strategy_rehearsal.budget_kwh IS '预演时刻当日预算快照，单位kWh；空值表示当日未分配预算（不拦截）';
+COMMENT ON COLUMN strategy_rehearsal.remaining_kwh IS '预演时刻当日剩余预算快照，单位kWh；空值表示当日未分配预算';
+COMMENT ON COLUMN strategy_rehearsal.decision IS 'APPROVED=通过/REJECTED_BUDGET=超当日剩余预算拒绝/SUSPENDED_ALARM=告警处置冲突挂起';
 
 CREATE TABLE IF NOT EXISTS idempotent_request (
     request_id      VARCHAR(96)  NOT NULL,

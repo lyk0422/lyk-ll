@@ -42,4 +42,9 @@ public class StrategyController {
     public StrategyDtos.StrategyResponse get(@PathVariable String strategyCode) {
         return strategyService.get(strategyCode);
     }
+
+    @GetMapping("/{strategyCode}/rehearsals")
+    public java.util.List<StrategyDtos.RehearsalResponse> rehearsals(@PathVariable String strategyCode) {
+        return strategyService.rehearsals(strategyCode);
+    }
 }

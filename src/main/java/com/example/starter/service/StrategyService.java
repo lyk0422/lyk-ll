@@ -1,8 +1,10 @@
 package com.example.starter.service;
 
 import com.example.starter.api.dto.StrategyDtos;
+import com.example.starter.domain.ArbitrationDecision;
 import com.example.starter.domain.StrategyStatus;
 import com.example.starter.repo.CropRepository;
+import com.example.starter.repo.RehearsalRepository;
 import com.example.starter.repo.StrategyRepository;
 import com.example.starter.support.IdempotencySupport;
 import com.example.starter.web.BusinessRuleException;
@@ -22,7 +24,10 @@ import java.util.List;
  *     <li>温湿度设定点须在作物生育期允许窗口内，恰在边界合法；</li>
  *     <li>昼夜设定差绝对值不得超过 8 摄氏度，恰 8 合法；</li>
  *     <li>相邻两次变更（生效时刻）间隔不少于 30 分钟，恰满 30 分钟允许；</li>
- *     <li>同一分区同时刻只允许一个生效策略，新策略生效与旧策略失效在同一事务完成。</li>
+ *     <li>同一分区同时刻只允许一个生效策略，新策略生效与旧策略失效在同一事务完成；</li>
+ *     <li>下发前预演：按合成能耗模型估算执行期能耗，超过当日剩余预算直接拒绝（恰等允许）；</li>
+ *     <li>同分区存在进行中告警处置时，新策略须与之兼容，否则挂起等待处置完结，挂起无副作用；</li>
+ *     <li>仲裁结论与策略状态推进在同一事务内完成，预演结果随策略版本留档可复算。</li>
  * </ul>
  */
 @Service
@@ -36,14 +41,20 @@ public class StrategyService {
     private final StrategyRepository strategyRepository;
     private final CropRepository cropRepository;
     private final SetupService setupService;
+    private final RehearsalService rehearsalService;
+    private final RehearsalRepository rehearsalRepository;
     private final IdempotencySupport idempotencySupport;
     private final Clock clock;
 
     public StrategyService(StrategyRepository strategyRepository, CropRepository cropRepository,
-                           SetupService setupService, IdempotencySupport idempotencySupport, Clock clock) {
+                           SetupService setupService, RehearsalService rehearsalService,
+                           RehearsalRepository rehearsalRepository,
+                           IdempotencySupport idempotencySupport, Clock clock) {
         this.strategyRepository = strategyRepository;
         this.cropRepository = cropRepository;
         this.setupService = setupService;
+        this.rehearsalService = rehearsalService;
+        this.rehearsalRepository = rehearsalRepository;
         this.idempotencySupport = idempotencySupport;
         this.clock = clock;
     }
@@ -111,12 +122,35 @@ public class StrategyService {
                                                       StrategyDtos.DispatchRequest request) {
         StrategyRepository.Strategy strategy = strategyRepository.findByCode(strategyCode)
                 .orElseThrow(() -> new NotFoundException("策略不存在：" + strategyCode));
-        if (!"VALIDATED".equals(strategy.status())) {
-            throw new BusinessRuleException("仅校验通过、尚未下发的策略可下发，当前状态：" + strategy.status());
+        // SUSPENDED（告警处置冲突挂起）未产生任何副作用，处置完结后可再次下发。
+        if (!"VALIDATED".equals(strategy.status()) && !"SUSPENDED".equals(strategy.status())) {
+            throw new BusinessRuleException("仅校验通过或挂起等待的策略可下发，当前状态：" + strategy.status());
         }
         Instant effectiveTime = request.effectiveTime();
-        // 锁定分区行，串行化同分区并发下发，保证间隔判定与唯一生效不被并发穿透。
+        // 锁定分区行，串行化同分区并发下发，保证间隔判定、仲裁与唯一生效不被并发穿透。
         strategyRepository.lockZone(strategy.zoneCode());
+
+        // 预演：估算能耗超过当日剩余预算直接拒绝；恰等允许；未分配预算不拦截。
+        // 拒绝路径无状态推进，留档独立事务提交，随策略版本可查。
+        RehearsalService.Estimate estimate = rehearsalService.estimate(strategy, effectiveTime);
+        if (estimate.remainingKwh() != null
+                && estimate.estimatedKwh().compareTo(estimate.remainingKwh()) > 0) {
+            String reason = "预演估算能耗 " + estimate.estimatedKwh()
+                    + "kWh 超过当日剩余预算 " + estimate.remainingKwh() + "kWh，拒绝下发";
+            rehearsalService.archiveRejected(strategy, request.requestId(), effectiveTime, estimate, reason);
+            throw new BusinessRuleException(reason);
+        }
+
+        // 仲裁：进行中告警处置与新策略不兼容时挂起等待处置完结；结论与状态推进同一事务。
+        var incompatible = rehearsalService.findIncompatibleAlarm(strategy);
+        if (incompatible.isPresent()) {
+            rehearsalService.archive(strategy, request.requestId(), effectiveTime, estimate,
+                    ArbitrationDecision.SUSPENDED_ALARM,
+                    "与进行中告警处置不兼容（告警 #" + incompatible.get().id() + "），挂起等待处置完结");
+            strategyRepository.markSuspended(strategy.id());
+            return toResponse(strategyRepository.findByCode(strategyCode).orElseThrow());
+        }
+
         strategyRepository.findLatestEffectiveTime(strategy.zoneCode()).ifPresent(previous -> {
             Duration interval = Duration.between(previous, effectiveTime);
             if (interval.abs().compareTo(MIN_CHANGE_INTERVAL) < 0) {
@@ -132,6 +166,8 @@ public class StrategyService {
             }
         });
         strategyRepository.markDispatched(strategy.id(), request.requestId(), effectiveTime, now);
+        rehearsalService.archive(strategy, request.requestId(), effectiveTime, estimate,
+                ArbitrationDecision.APPROVED, "预演通过，策略已下发");
         return toResponse(strategyRepository.findByCode(strategyCode).orElseThrow());
     }
 
@@ -140,6 +176,18 @@ public class StrategyService {
         return strategyRepository.findByCode(strategyCode)
                 .map(this::toResponse)
                 .orElseThrow(() -> new NotFoundException("策略不存在：" + strategyCode));
+    }
+
+    /**
+     * 查询该策略全部预演留档（每次下发尝试一行，含拒绝与挂起结论），按留档顺序返回。
+     */
+    @Transactional(readOnly = true)
+    public List<StrategyDtos.RehearsalResponse> rehearsals(String strategyCode) {
+        strategyRepository.findByCode(strategyCode)
+                .orElseThrow(() -> new NotFoundException("策略不存在：" + strategyCode));
+        return rehearsalRepository.findByStrategyCode(strategyCode).stream()
+                .map(this::toRehearsalResponse)
+                .toList();
     }
 
     private static boolean less(BigDecimal value, BigDecimal bound) {
@@ -161,5 +209,12 @@ public class StrategyService {
                 s.tempTolerance(), s.humidityTolerance(),
                 s.status(), s.requestId(), s.effectiveTime(),
                 s.createdAt(), s.dispatchedAt(), s.expiredAt());
+    }
+
+    private StrategyDtos.RehearsalResponse toRehearsalResponse(RehearsalRepository.Rehearsal r) {
+        return new StrategyDtos.RehearsalResponse(
+                r.id(), r.strategyCode(), r.requestId(), r.effectiveTime(), r.execMinutes(),
+                r.estimatedKwh(), r.budgetDate(), r.budgetKwh(), r.remainingKwh(),
+                r.decision(), r.reason(), r.createdAt());
     }
 }

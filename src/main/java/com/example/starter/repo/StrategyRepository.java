@@ -153,4 +153,11 @@ public class StrategyRepository {
                         + "effective_time = ?, dispatched_at = ? WHERE id = ?",
                 requestId, Timestamp.from(effectiveTime), Timestamp.from(dispatchedAt), id);
     }
+
+    /**
+     * 告警处置冲突挂起：仅推进状态为 SUSPENDED，不写生效时刻、不失效旧策略，无任何副作用。
+     */
+    public void markSuspended(Long id) {
+        jdbcTemplate.update("UPDATE climate_strategy SET status = 'SUSPENDED' WHERE id = ?", id);
+    }
 }
