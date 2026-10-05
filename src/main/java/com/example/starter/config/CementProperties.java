@@ -24,6 +24,8 @@ public class CementProperties {
     private long commandConfirmTimeoutMinutes = 30;
     /** 连续小时均值超标触发当日禁烧的次数，恰等于触发。 */
     private int consecutiveExceedBan = 3;
+    /** 保温段超时升级告警时长（小时），恰满即升级。 */
+    private long warmupHoldingTimeoutHours = 4;
     /** 各污染物小时均值排放限值 mg/Nm3，恰等于判达标。 */
     private Map<String, BigDecimal> emissionLimits = new LinkedHashMap<>();
 
@@ -73,6 +75,14 @@ public class CementProperties {
 
     public void setConsecutiveExceedBan(int consecutiveExceedBan) {
         this.consecutiveExceedBan = consecutiveExceedBan;
+    }
+
+    public long getWarmupHoldingTimeoutHours() {
+        return warmupHoldingTimeoutHours;
+    }
+
+    public void setWarmupHoldingTimeoutHours(long warmupHoldingTimeoutHours) {
+        this.warmupHoldingTimeoutHours = warmupHoldingTimeoutHours;
     }
 
     public Map<String, BigDecimal> getEmissionLimits() {

@@ -19,6 +19,8 @@ cement:
   command-confirm-timeout-minutes: 30
   consecutive-exceed-ban: 3
   command-timeout-scan-delay-ms: 3600000
+  warmup-holding-timeout-hours: 4
+  warmup-timeout-scan-delay-ms: 3600000
   emission-limits:
     NOX: 400.0
     SO2: 200.0

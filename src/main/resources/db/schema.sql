@@ -175,3 +175,67 @@ CREATE TABLE IF NOT EXISTS daily_summary (
     CONSTRAINT fk_summary_plan FOREIGN KEY (plan_id) REFERENCES co_firing_plan (id)
 );
 COMMENT ON TABLE daily_summary IS '日结输出，实际替代率/超标时段/降掺记录三项勾稽可复算，sealed=TRUE为封存终态';
+
+CREATE TABLE IF NOT EXISTS warmup_ticket (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id        VARCHAR(64) NOT NULL,
+    ticket_no         VARCHAR(64) NOT NULL,
+    kiln_id           VARCHAR(32) NOT NULL,
+    curve_version     VARCHAR(32) NOT NULL,
+    status            VARCHAR(16) NOT NULL,
+    current_stage_seq INT         NOT NULL DEFAULT 1,
+    created_at        TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at      TIMESTAMP,
+    updated_at        TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_warmup_request_id UNIQUE (request_id),
+    CONSTRAINT uk_warmup_ticket_no UNIQUE (ticket_no)
+);
+COMMENT ON TABLE warmup_ticket IS '冷修后升温操作票主表，状态 EXECUTING执行中→COMPLETED曲线走完；curve_version 记录执行的合成升温曲线版本';
+COMMENT ON COLUMN warmup_ticket.current_stage_seq IS '当前执行中阶段序号，阶段推进与曲线版本记录在同一事务内原子更新';
+
+CREATE TABLE IF NOT EXISTS warmup_stage (
+    id                   BIGINT AUTO_INCREMENT PRIMARY KEY,
+    ticket_id            BIGINT       NOT NULL,
+    seq                  INT          NOT NULL,
+    curve_version        VARCHAR(32)  NOT NULL,
+    stage_type           VARCHAR(16)  NOT NULL,
+    target_temp          DECIMAL(8,2) NOT NULL,
+    max_duration_minutes INT          NOT NULL,
+    status               VARCHAR(16)  NOT NULL,
+    entered_at           TIMESTAMP,
+    holding_since        TIMESTAMP,
+    confirm_user1        VARCHAR(64),
+    confirm_user2        VARCHAR(64),
+    confirmed_at         TIMESTAMP,
+    alarm                BOOLEAN      NOT NULL DEFAULT FALSE,
+    alarmed_at           TIMESTAMP,
+    created_at           TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at           TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_stage_ticket_seq UNIQUE (ticket_id, seq),
+    CONSTRAINT fk_stage_ticket FOREIGN KEY (ticket_id) REFERENCES warmup_ticket (id)
+);
+COMMENT ON TABLE warmup_stage IS '升温曲线阶段：HEATING升温段恰满最长用时未确认自动转HOLDING保温段；保温段恰满4小时升级告警；阶段确认须双人复核(confirm_user1/2为不同操作人)，单人确认不生效';
+COMMENT ON COLUMN warmup_stage.target_temp IS '阶段目标温度，单位摄氏度；确认时实测温度须大于等于目标温度';
+COMMENT ON COLUMN warmup_stage.max_duration_minutes IS '升温段最长用时，单位分钟；entered_at+最长用时<=当前时刻且未确认即自动转保温段，恰满判定';
+COMMENT ON COLUMN warmup_stage.holding_since IS '转入保温段时刻(Asia/Shanghai)，NULL表示尚未进入保温；保温段超时4小时以该时刻起算';
+COMMENT ON COLUMN warmup_stage.stage_type IS 'HEATING升温段 HOLDING保温段(由升温段超时自动转入)';
+COMMENT ON COLUMN warmup_stage.status IS 'PENDING待进入 ACTIVE执行中 CONFIRMED双人复核确认完成';
+
+CREATE TABLE IF NOT EXISTS kiln_active_warmup (
+    kiln_id     VARCHAR(32) PRIMARY KEY,
+    ticket_id   BIGINT      NOT NULL,
+    acquired_at TIMESTAMP   NOT NULL,
+    CONSTRAINT uk_active_warmup_ticket UNIQUE (ticket_id)
+);
+COMMENT ON TABLE kiln_active_warmup IS '窑当前执行中升温票占用槽，同一窑同时刻只允许一张执行中升温票，靠主键唯一约束并发受理';
+
+CREATE TABLE IF NOT EXISTS feed_record (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id  VARCHAR(64) NOT NULL,
+    kiln_id     VARCHAR(32) NOT NULL,
+    operator_id VARCHAR(64) NOT NULL,
+    fed_at      TIMESTAMP   NOT NULL,
+    created_at  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_feed_request_id UNIQUE (request_id)
+);
+COMMENT ON TABLE feed_record IS '投料记录：投料请求与升温曲线状态在同一事务内校验，曲线未走完禁止投料；fed_at 为 Asia/Shanghai 本地时刻';

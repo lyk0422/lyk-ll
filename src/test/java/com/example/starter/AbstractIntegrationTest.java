@@ -28,6 +28,7 @@ public abstract class AbstractIntegrationTest {
     void cleanBase() {
         jdbc.execute("SET REFERENTIAL_INTEGRITY FALSE");
         for (String table : new String[] {
+                "feed_record", "warmup_stage", "warmup_ticket", "kiln_active_warmup",
                 "daily_summary", "ban_record", "late_reading_event", "idempotent_request",
                 "reduction_command", "hourly_assessment", "emission_reading",
                 "kiln_active_plan", "kiln_lock", "plan_fuel", "co_firing_plan"}) {

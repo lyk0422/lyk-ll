@@ -54,6 +54,8 @@ cement:
   command-confirm-timeout-minutes: 30
   # 连续小时均值超标达到该次数即当日禁烧，恰等于触发
   consecutive-exceed-ban: 3
+  # 保温段超时升级告警时长，单位小时，恰满即升级
+  warmup-holding-timeout-hours: 4
   # 各污染物小时均值排放限值，单位 mg/Nm3，恰等于判达标
   emission-limits:
     NOX: 400.0
