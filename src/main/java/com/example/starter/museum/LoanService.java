@@ -242,7 +242,10 @@ public class LoanService {
     }
 
     /**
-     * 结案：仅归还点交完成后可结案；结案为终态，重复结案返回幂等成功。
+     * 结案：仅归还点交完成后可结案；存在未闭环差异工单时禁止结案。
+     * 结案校验与工单状态原子判定：先对合同行加锁（FOR UPDATE），
+     * 与差异工单生成事务（同样先锁合同行）串行，杜绝“校验通过后工单插入”的竞态。
+     * 结案为终态，重复结案返回幂等成功。
      */
     @Transactional
     public Map<String, Object> close(long contractId) {
@@ -252,8 +255,23 @@ public class LoanService {
             view.put("idempotentReplay", true);
             return view;
         }
-        if (!STATUS_RETURNED.equals(contract.status())) {
-            throw ApiException.conflict("合同状态为 " + contract.status() + "，须完成归还点交后方可结案");
+        // 锁定合同行：差异工单登记事务亦先锁同一行，二者串行保证原子判定
+        String lockedStatus = jdbc.queryForObject(
+                "SELECT status FROM loan_contract WHERE id = ? FOR UPDATE", String.class, contractId);
+        if (STATUS_CLOSED.equals(lockedStatus)) {
+            Map<String, Object> view = contractView(getContract(contractId));
+            view.put("idempotentReplay", true);
+            return view;
+        }
+        if (!STATUS_RETURNED.equals(lockedStatus)) {
+            throw ApiException.conflict(
+                    "合同状态为 " + lockedStatus + "，须完成归还点交后方可结案");
+        }
+        Integer openOrders = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM contract_open_diff_order WHERE contract_id = ?",
+                Integer.class, contractId);
+        if (openOrders != null && openOrders > 0) {
+            throw ApiException.conflict("归还点交存在未闭环差异工单，合同不得结案");
         }
         Instant now = Instant.now(clock);
         int updated = jdbc.update(
@@ -366,7 +384,10 @@ public class LoanService {
         return contracts.isEmpty() ? null : contracts.get(0);
     }
 
-    private long ensureHandover(long contractId, String handoverType) {
+    /**
+     * 确保点交单存在并返回其主键：供双方确认与影像特征登记在同一事务内复用。
+     */
+    long ensureHandover(long contractId, String handoverType) {
         List<Long> ids = jdbc.queryForList(
                 "SELECT id FROM handover WHERE contract_id = ? AND handover_type = ?",
                 Long.class, contractId, handoverType);

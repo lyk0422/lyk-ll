@@ -1,6 +1,7 @@
 package com.example.starter.museum;
 
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -36,6 +37,9 @@ public abstract class MuseumTestSupport {
     protected ClimateService climateService;
 
     @Autowired
+    protected ImageHandoverService imageHandoverService;
+
+    @Autowired
     protected MutableClock clock;
 
     @BeforeEach
@@ -45,6 +49,10 @@ public abstract class MuseumTestSupport {
         jdbc.update("DELETE FROM protection_order");
         jdbc.update("DELETE FROM climate_reading");
         jdbc.update("DELETE FROM resume_review");
+        jdbc.update("DELETE FROM difference_item");
+        jdbc.update("DELETE FROM contract_open_diff_order");
+        jdbc.update("DELETE FROM difference_order");
+        jdbc.update("DELETE FROM handover_image_feature");
         jdbc.update("DELETE FROM handover");
         jdbc.update("DELETE FROM artifact_active_loan");
         jdbc.update("DELETE FROM loan_contract");
@@ -66,6 +74,15 @@ public abstract class MuseumTestSupport {
         loanService.confirmHandover(contractId, "DELIVERY", LoanService.PARTY_MUSEUM);
         loanService.confirmHandover(contractId, "DELIVERY", LoanService.PARTY_BORROWER);
         return contractId;
+    }
+
+    /** 构造合成影像特征清单。 */
+    protected static List<ImageHandoverService.ImageFeature> features(String... kv) {
+        java.util.List<ImageHandoverService.ImageFeature> list = new java.util.ArrayList<>();
+        for (int i = 0; i < kv.length; i += 2) {
+            list.add(new ImageHandoverService.ImageFeature(kv[i], kv[i + 1]));
+        }
+        return list;
     }
 
     /** 查询合同当前状态。 */

@@ -169,10 +169,73 @@ CREATE TABLE IF NOT EXISTS idempotency_record (
 COMMENT ON TABLE idempotency_record IS '幂等记录：指纹覆盖 requestId 与全部业务字段，同键同参返回首次结果，同键异参返回 409';
 COMMENT ON COLUMN idempotency_record.request_id IS '幂等请求号（主键）';
 COMMENT ON COLUMN idempotency_record.fingerprint IS '请求指纹：requestId 与全部业务字段的散列';
-COMMENT ON COLUMN idempotency_record.op_type IS '操作类型，如 APPLY/HANDOVER/EXTEND/RETURN/CLOSE/READING/CONFIRM/RESUME';
+COMMENT ON COLUMN idempotency_record.op_type IS '操作类型，如 APPLY/HANDOVER/EXTEND/RETURN/CLOSE/READING/CONFIRM/RESUME/IMAGES_DELIVERY/IMAGES_RETURN/RESOLVE_DIFF_ORDER';
 COMMENT ON COLUMN idempotency_record.response_status IS '首次响应 HTTP 状态码，NULL 表示处理中';
 COMMENT ON COLUMN idempotency_record.response_body IS '首次响应报文快照';
 COMMENT ON COLUMN idempotency_record.created_at IS '记录创建时间（UTC）';
+
+-- 点交影像留档：出借/归还点交登记的合成影像特征清单（特征键值对），与点交单同一事务落库
+CREATE TABLE IF NOT EXISTS handover_image_feature (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    handover_id BIGINT NOT NULL,
+    feature_key VARCHAR(64) NOT NULL,
+    feature_value VARCHAR(256) NOT NULL,
+    captured_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_handover_feature UNIQUE (handover_id, feature_key)
+);
+COMMENT ON TABLE handover_image_feature IS '点交影像合成特征清单：出借与归还点交各登记一份，归还时按键比对特征值';
+COMMENT ON COLUMN handover_image_feature.id IS '影像特征主键';
+COMMENT ON COLUMN handover_image_feature.handover_id IS '所属点交单主键（DELIVERY 清单为比对基线）';
+COMMENT ON COLUMN handover_image_feature.feature_key IS '合成影像特征项名称，如 CORNER 边角 / GLAZE 釉面 / INSCRIPTION 题跋';
+COMMENT ON COLUMN handover_image_feature.feature_value IS '合成影像特征值（合成描述符/哈希，非真实影像）';
+COMMENT ON COLUMN handover_image_feature.captured_at IS '特征采集登记时间（UTC）';
+
+-- 差异工单：归还点交影像比对差异项超过 0 时自动生成，闭环前合同不得结案
+CREATE TABLE IF NOT EXISTS difference_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    contract_id BIGINT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    diff_count INT NOT NULL,
+    request_id VARCHAR(64) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    resolved_at TIMESTAMP DEFAULT NULL,
+    resolved_by VARCHAR(128) DEFAULT NULL
+);
+COMMENT ON TABLE difference_order IS '归还点交差异工单：差异项超过 0 自动生成，OPEN 未闭环 / RESOLVED 已闭环';
+COMMENT ON COLUMN difference_order.id IS '差异工单主键';
+COMMENT ON COLUMN difference_order.contract_id IS '所属借展合同主键';
+COMMENT ON COLUMN difference_order.status IS '工单状态：OPEN 进行中（未闭环）/ RESOLVED 已闭环';
+COMMENT ON COLUMN difference_order.diff_count IS '比对差异项数量（大于 0 才生成工单）';
+COMMENT ON COLUMN difference_order.request_id IS '触发生成工单的归还点交登记幂等请求号';
+COMMENT ON COLUMN difference_order.created_at IS '工单生成时间（UTC）';
+COMMENT ON COLUMN difference_order.resolved_at IS '闭环时间（UTC），NULL 表示未闭环';
+COMMENT ON COLUMN difference_order.resolved_by IS '闭环处置人，NULL 表示未闭环';
+
+-- 差异明细：工单内每一个差异项（值不一致 / 归还缺失 / 归还有新增）
+CREATE TABLE IF NOT EXISTS difference_item (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id BIGINT NOT NULL,
+    feature_key VARCHAR(64) NOT NULL,
+    delivery_value VARCHAR(256) DEFAULT NULL,
+    return_value VARCHAR(256) DEFAULT NULL,
+    diff_type VARCHAR(24) NOT NULL
+);
+COMMENT ON TABLE difference_item IS '差异工单明细：逐特征记录出借基线值与归还值及差异类型';
+COMMENT ON COLUMN difference_item.id IS '差异明细主键';
+COMMENT ON COLUMN difference_item.order_id IS '所属差异工单主键';
+COMMENT ON COLUMN difference_item.feature_key IS '差异特征项名称';
+COMMENT ON COLUMN difference_item.delivery_value IS '出借点交基线特征值，NULL 表示归还时新增项';
+COMMENT ON COLUMN difference_item.return_value IS '归还点交特征值，NULL 表示归还时缺失项';
+COMMENT ON COLUMN difference_item.diff_type IS '差异类型：VALUE_MISMATCH 值不一致 / MISSING_ON_RETURN 归还缺失 / EXTRA_ON_RETURN 归还新增';
+
+-- 同一合同同一时刻仅允许一个进行中（OPEN）差异工单的唯一约束表
+CREATE TABLE IF NOT EXISTS contract_open_diff_order (
+    contract_id BIGINT PRIMARY KEY,
+    order_id BIGINT NOT NULL
+);
+COMMENT ON TABLE contract_open_diff_order IS '进行中差异工单唯一约束表：合同主键即唯一约束，工单闭环时删除对应行';
+COMMENT ON COLUMN contract_open_diff_order.contract_id IS '合同主键（主键即唯一约束）';
+COMMENT ON COLUMN contract_open_diff_order.order_id IS '当前唯一进行中差异工单主键';
 
 -- 合成种子数据：两件文物、两个展柜
 MERGE INTO artifact KEY(id) VALUES

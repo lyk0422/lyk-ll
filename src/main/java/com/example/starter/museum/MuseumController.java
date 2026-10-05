@@ -51,15 +51,29 @@ public class MuseumController {
     public record ConfirmOrderRequest(String requestId, String handler) {
     }
 
+    /** 点交影像特征清单登记请求（合成特征键值对）。 */
+    public record ImageFeaturesRequest(String requestId, List<FeatureDto> features) {
+    }
+
+    /** 合成影像特征项。 */
+    public record FeatureDto(String key, String value) {
+    }
+
+    /** 差异工单闭环请求。 */
+    public record ResolveDiffOrderRequest(String requestId, String resolvedBy) {
+    }
+
     private final LoanService loanService;
     private final ClimateService climateService;
     private final IdempotencyService idempotencyService;
+    private final ImageHandoverService imageHandoverService;
 
     public MuseumController(LoanService loanService, ClimateService climateService,
-            IdempotencyService idempotencyService) {
+            IdempotencyService idempotencyService, ImageHandoverService imageHandoverService) {
         this.loanService = loanService;
         this.climateService = climateService;
         this.idempotencyService = idempotencyService;
+        this.imageHandoverService = imageHandoverService;
     }
 
     /**
@@ -99,6 +113,65 @@ public class MuseumController {
                 String.valueOf(id), type, request.party());
         return respond(idempotencyService.execute(request.requestId(), "HANDOVER_" + type, fingerprint,
                 () -> new ApiResult(200, loanService.confirmHandover(id, type, request.party()))));
+    }
+
+    /**
+     * 出借点交影像特征清单登记（与点交单同事务落库）。
+     */
+    @PostMapping("/loans/{id}/delivery-images")
+    public ResponseEntity<Map<String, Object>> deliveryImages(@PathVariable long id,
+            @RequestBody ImageFeaturesRequest request) {
+        return registerImages(id, ImageHandoverService.HANDOVER_DELIVERY, request, 201);
+    }
+
+    /**
+     * 归还点交影像特征清单登记：登记后自动比对出借基线，差异超过 0 生成差异工单，恰一致放行。
+     */
+    @PostMapping("/loans/{id}/return-images")
+    public ResponseEntity<Map<String, Object>> returnImages(@PathVariable long id,
+            @RequestBody ImageFeaturesRequest request) {
+        return registerImages(id, ImageHandoverService.HANDOVER_RETURN, request, 200);
+    }
+
+    private ResponseEntity<Map<String, Object>> registerImages(long id, String type,
+            ImageFeaturesRequest request, int successStatus) {
+        List<ImageHandoverService.ImageFeature> features = request.features() == null
+                ? List.of()
+                : request.features().stream()
+                        .map(f -> new ImageHandoverService.ImageFeature(f.key(), f.value())).toList();
+        String[] parts = new String[features.size() * 2 + 3];
+        parts[0] = request.requestId();
+        parts[1] = String.valueOf(id);
+        parts[2] = type;
+        for (int i = 0; i < features.size(); i++) {
+            parts[3 + i * 2] = features.get(i).key();
+            parts[4 + i * 2] = features.get(i).value();
+        }
+        String fingerprint = IdempotencyService.fingerprint(parts);
+        return respond(idempotencyService.execute(request.requestId(), "IMAGES_" + type, fingerprint,
+                () -> new ApiResult(successStatus,
+                        imageHandoverService.registerFeatures(request.requestId(), id, type, features))));
+    }
+
+    /**
+     * 合同差异工单列表（含差异明细）。
+     */
+    @GetMapping("/loans/{id}/difference-orders")
+    public List<Map<String, Object>> differenceOrders(@PathVariable long id) {
+        return imageHandoverService.orders(id);
+    }
+
+    /**
+     * 差异工单闭环：闭环后合同方可结案。
+     */
+    @PostMapping("/difference-orders/{id}/resolve")
+    public ResponseEntity<Map<String, Object>> resolveDifferenceOrder(@PathVariable long id,
+            @RequestBody ResolveDiffOrderRequest request) {
+        String fingerprint = IdempotencyService.fingerprint(request.requestId(),
+                String.valueOf(id), request.resolvedBy());
+        return respond(idempotencyService.execute(request.requestId(), "RESOLVE_DIFF_ORDER", fingerprint,
+                () -> new ApiResult(200,
+                        imageHandoverService.resolveOrder(id, request.resolvedBy()))));
     }
 
     /**
