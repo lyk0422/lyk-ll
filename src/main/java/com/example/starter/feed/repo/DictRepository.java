@@ -34,6 +34,22 @@ public class DictRepository {
     public record DrugDict(String code, String name, BigDecimal maxRatio, int withdrawalDays, boolean active) {
     }
 
+    /** 治疗性兽药目录行（合成兽药目录，直报专用）。 */
+    public record TreatmentDrugDict(String code, String name, int withdrawalDays, boolean active) {
+    }
+
+    /**
+     * 按药品名称查合成兽药目录（仅有效目录可受理）；目录外名称返回空。
+     */
+    public Optional<TreatmentDrugDict> findActiveTreatmentDrugByName(String name) {
+        List<TreatmentDrugDict> list = jdbc.query(
+                "SELECT code, name, withdrawal_days, active FROM treatment_drug WHERE name = ? AND active = TRUE",
+                (rs, n) -> new TreatmentDrugDict(rs.getString("code"), rs.getString("name"),
+                        rs.getInt("withdrawal_days"), rs.getBoolean("active")),
+                name);
+        return list.stream().findFirst();
+    }
+
     public Optional<DrugDict> findDrug(String code) {
         List<DrugDict> list = jdbc.query(
                 "SELECT code, name, max_ratio, withdrawal_days, active FROM drug_additive WHERE code = ?",

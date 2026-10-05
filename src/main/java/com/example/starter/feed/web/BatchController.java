@@ -6,6 +6,7 @@ import com.example.starter.feed.dto.FeedingRecordRequest;
 import com.example.starter.feed.dto.FeedingRecordResponse;
 import com.example.starter.feed.dto.ProductionRequest;
 import com.example.starter.feed.dto.ProductionResponse;
+import com.example.starter.feed.dto.SlaughterApplicationTrailResponse;
 import com.example.starter.feed.dto.SlaughterRequest;
 import com.example.starter.feed.dto.SlaughterResponse;
 import com.example.starter.feed.service.BatchService;
@@ -61,5 +62,11 @@ public class BatchController {
     public ResponseEntity<SlaughterResponse> slaughter(@Valid @RequestBody SlaughterRequest request) {
         IdempotencyService.Result<SlaughterResponse> result = batchService.applySlaughter(request);
         return ResponseEntity.status(result.httpStatus()).body(result.response());
+    }
+
+    /** 查询批次出栏申请台账（含自动撤销记录，保留可查）。 */
+    @GetMapping("/batches/{batchNo}/slaughter-applications")
+    public SlaughterApplicationTrailResponse slaughterApplications(@PathVariable String batchNo) {
+        return batchService.listSlaughterApplications(batchNo);
     }
 }

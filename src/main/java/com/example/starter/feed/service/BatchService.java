@@ -3,12 +3,15 @@ package com.example.starter.feed.service;
 import com.example.starter.feed.domain.AlertType;
 import com.example.starter.feed.domain.BatchStatus;
 import com.example.starter.feed.domain.FormulaStatus;
+import com.example.starter.feed.domain.SlaughterApplicationStatus;
 import com.example.starter.feed.dto.BatchCreateRequest;
 import com.example.starter.feed.dto.BatchStatusResponse;
 import com.example.starter.feed.dto.FeedingRecordRequest;
 import com.example.starter.feed.dto.FeedingRecordResponse;
 import com.example.starter.feed.dto.ProductionRequest;
 import com.example.starter.feed.dto.ProductionResponse;
+import com.example.starter.feed.dto.SlaughterApplicationTrailResponse;
+import com.example.starter.feed.dto.SlaughterApplicationView;
 import com.example.starter.feed.dto.SlaughterRequest;
 import com.example.starter.feed.dto.SlaughterResponse;
 import com.example.starter.feed.repo.AlertRepository;
@@ -16,6 +19,7 @@ import com.example.starter.feed.repo.BatchRepository;
 import com.example.starter.feed.repo.DictRepository;
 import com.example.starter.feed.repo.FormulaRepository;
 import com.example.starter.feed.repo.ProductionRepository;
+import com.example.starter.feed.repo.SlaughterApplicationRepository;
 import com.example.starter.feed.web.ApiException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -31,6 +35,8 @@ import java.util.Optional;
 
 /**
  * 养殖批次：登记、含药配方投产与休药期合并、含药饲喂（含迟到告警）、出栏判定。
+ * 出栏申请逐条落账：未来时刻批准为 SCHEDULED 预约（可被治疗直报重算撤销），
+ * 非未来时刻批准即核销出栏（终态）。
  */
 @Service
 public class BatchService {
@@ -43,7 +49,9 @@ public class BatchService {
     private final ProductionRepository productionRepository;
     private final DictRepository dictRepository;
     private final AlertRepository alertRepository;
+    private final SlaughterApplicationRepository slaughterApplicationRepository;
     private final IdempotencyService idempotencyService;
+    private final WithdrawalRecalcService withdrawalRecalcService;
     private final Clock clock;
 
     public BatchService(BatchRepository batchRepository,
@@ -51,14 +59,18 @@ public class BatchService {
                         ProductionRepository productionRepository,
                         DictRepository dictRepository,
                         AlertRepository alertRepository,
+                        SlaughterApplicationRepository slaughterApplicationRepository,
                         IdempotencyService idempotencyService,
+                        WithdrawalRecalcService withdrawalRecalcService,
                         Clock clock) {
         this.batchRepository = batchRepository;
         this.formulaRepository = formulaRepository;
         this.productionRepository = productionRepository;
         this.dictRepository = dictRepository;
         this.alertRepository = alertRepository;
+        this.slaughterApplicationRepository = slaughterApplicationRepository;
         this.idempotencyService = idempotencyService;
+        this.withdrawalRecalcService = withdrawalRecalcService;
         this.clock = clock;
     }
 
@@ -144,11 +156,8 @@ public class BatchService {
             }
         }
 
-        Merged merged = recomputeBatchWithdrawal(batch.id());
-        batchRepository.updateWithdrawal(batch.id(),
-                merged == null ? null : merged.latestFeed(),
-                merged == null ? null : merged.untilDate(),
-                merged == null ? null : merged.maxDays());
+        WithdrawalCalculator.MergedWithdrawal merged =
+                withdrawalRecalcService.recomputeAndApply(batch.id());
 
         BatchRepository.BatchRow refreshed = batchRepository.get(request.batchNo());
         return new ProductionResponse(
@@ -199,11 +208,7 @@ public class BatchService {
                             + " v" + request.version() + "），仅记录事件并告警");
             alerted = true;
         } else {
-            Merged merged = recomputeBatchWithdrawal(batch.id());
-            batchRepository.updateWithdrawal(batch.id(),
-                    merged == null ? null : merged.latestFeed(),
-                    merged == null ? null : merged.untilDate(),
-                    merged == null ? null : merged.maxDays());
+            withdrawalRecalcService.recomputeAndApply(batch.id());
         }
 
         return new FeedingRecordResponse(request.batchNo(), request.formulaCode(), request.version(),
@@ -213,6 +218,8 @@ public class BatchService {
     /**
      * 出栏申请（requestId 幂等）：休药期内拒绝并提示最早合法出栏时刻；
      * 重复出栏（终态）返回幂等成功；无休药义务的批次随时可出栏。
+     * 申请时刻在未来时批准为 SCHEDULED 预约（批次保持饲养中，可被治疗直报重算撤销）；
+     * 非未来时刻批准即核销出栏（终态）。每次申请均落台账，撤销记录保留可查。
      */
     public IdempotencyService.Result<SlaughterResponse> applySlaughter(SlaughterRequest request) {
         IdempotencyService.Result<SlaughterResponse> result = idempotencyService.execute(
@@ -238,69 +245,60 @@ public class BatchService {
 
         // 已出栏终态：重复出栏申请返回幂等成功。
         if (BatchStatus.SLAUGHTERED.name().equals(batch.status())) {
+            slaughterApplicationRepository.insert(request.requestId(), batch.id(), request.applyAtUtc(),
+                    true, SlaughterApplicationStatus.EXECUTED.name(), null);
             return IdempotencyService.Outcome.ok(new SlaughterResponse(
                     batch.batchNo(), true, false, BatchStatus.SLAUGHTERED.name(),
                     earliest, null, batch.slaughteredAtUtc(), request.applyAtUtc()));
         }
 
-        boolean approved;
-        String rejectReason = null;
-        Instant slaughteredAt = null;
         if (earliest != null && request.applyAtUtc().isBefore(earliest)) {
             // 恰满休药天数当日 24:00 前申请，一律拒绝。
-            approved = false;
-            rejectReason = "休药期未满，拒绝出栏；最早合法出栏时刻(UTC)=" + earliest
+            String rejectReason = "休药期未满，拒绝出栏；最早合法出栏时刻(UTC)=" + earliest
                     + "（届满日 " + batch.withdrawalUntilDate() + " 当日 24:00 之后）";
-        } else {
-            approved = true;
+            slaughterApplicationRepository.insert(request.requestId(), batch.id(), request.applyAtUtc(),
+                    false, SlaughterApplicationStatus.REJECTED.name(), rejectReason);
+            SlaughterResponse rejected = new SlaughterResponse(
+                    batch.batchNo(), false, false, BatchStatus.FEEDING.name(),
+                    earliest, rejectReason, null, request.applyAtUtc());
+            // 休药期内拒绝为确定性的首次结果，以 422 落库，重放返回同一拒绝结果。
+            return new IdempotencyService.Outcome(rejected, 422);
         }
 
-        String status = BatchStatus.FEEDING.name();
-        if (approved) {
-            int updated = batchRepository.markSlaughteredIfFeeding(batch.id(), request.applyAtUtc());
-            if (updated == 0) {
-                throw ApiException.conflict("批次状态已被并发改变，请重新申请");
-            }
-            slaughteredAt = request.applyAtUtc();
-            status = BatchStatus.SLAUGHTERED.name();
+        // 申请时刻在未来：批准为预约申请，批次保持饲养中，暂不核销；
+        // 后续治疗直报重算若与新最早出栏日冲突将自动撤销该预约。
+        if (request.applyAtUtc().isAfter(clock.instant())) {
+            slaughterApplicationRepository.insert(request.requestId(), batch.id(), request.applyAtUtc(),
+                    true, SlaughterApplicationStatus.SCHEDULED.name(), null);
+            return IdempotencyService.Outcome.ok(new SlaughterResponse(
+                    batch.batchNo(), true, false, BatchStatus.FEEDING.name(),
+                    earliest, null, null, request.applyAtUtc()));
         }
 
-        SlaughterResponse response = new SlaughterResponse(
-                batch.batchNo(), approved, false, status,
-                earliest, rejectReason, slaughteredAt, request.applyAtUtc());
-        // 休药期内拒绝为确定性的首次结果，以 422 落库，重放返回同一拒绝结果。
-        return new IdempotencyService.Outcome(response, approved ? 200 : 422);
+        int updated = batchRepository.markSlaughteredIfFeeding(batch.id(), request.applyAtUtc());
+        if (updated == 0) {
+            throw ApiException.conflict("批次状态已被并发改变，请重新申请");
+        }
+        slaughterApplicationRepository.insert(request.requestId(), batch.id(), request.applyAtUtc(),
+                true, SlaughterApplicationStatus.EXECUTED.name(), null);
+        return IdempotencyService.Outcome.ok(new SlaughterResponse(
+                batch.batchNo(), true, false, BatchStatus.SLAUGHTERED.name(),
+                earliest, null, request.applyAtUtc(), request.applyAtUtc()));
     }
 
     /**
-     * 按批次全部含药饲喂事件逐支复算合并休药期：
-     * 最晚末次饲喂时刻 + 各药物最大休药天数（仅统计非迟到事件；迟到事件不影响已冻结义务）。
+     * 查询批次出栏申请台账（含 REVOKED 自动撤销记录，保留可查）。
      */
-    private Merged recomputeBatchWithdrawal(long batchId) {
-        List<ProductionRepository.FeedingRow> feedings =
-                productionRepository.findFeedingsByBatch(batchId);
-        Instant latestFeed = null;
-        int maxDays = 0;
-        for (ProductionRepository.FeedingRow feeding : feedings) {
-            if (feeding.late()) {
-                continue;
-            }
-            List<ProductionRepository.DrugSnapshotRow> snapshots =
-                    productionRepository.findSnapshots(feeding.productionId());
-            int feedingMaxDays = snapshots.stream()
-                    .mapToInt(ProductionRepository.DrugSnapshotRow::withdrawalDays)
-                    .max().orElse(0);
-            // 合并口径：各药物取最大休药天数；饲喂时刻取最晚一次。
-            maxDays = Math.max(maxDays, feedingMaxDays);
-            if (latestFeed == null || feeding.feedAtUtc().isAfter(latestFeed)) {
-                latestFeed = feeding.feedAtUtc();
-            }
-        }
-        if (latestFeed == null) {
-            return null;
-        }
-        LocalDate untilDate = WithdrawalCalculator.withdrawalUntilDate(latestFeed, maxDays);
-        return new Merged(latestFeed, maxDays, untilDate);
+    @Transactional(readOnly = true)
+    public SlaughterApplicationTrailResponse listSlaughterApplications(String batchNo) {
+        BatchRepository.BatchRow batch = batchRepository.get(batchNo);
+        List<SlaughterApplicationView> applications = slaughterApplicationRepository
+                .findByBatch(batch.id()).stream()
+                .map(row -> new SlaughterApplicationView(
+                        row.id(), row.requestId(), row.applyAtUtc(), row.approved(), row.status(),
+                        row.rejectReason(), row.revokedAtUtc(), row.revokeReason()))
+                .toList();
+        return new SlaughterApplicationTrailResponse(batch.batchNo(), applications);
     }
 
     private Instant earliest(LocalDate untilDate) {
@@ -317,9 +315,5 @@ public class BatchService {
                 earliest(row.withdrawalUntilDate()),
                 row.governingWithdrawalDays(),
                 row.slaughteredAtUtc());
-    }
-
-    /** 合并休药期中间结果。 */
-    private record Merged(Instant latestFeed, int maxDays, LocalDate untilDate) {
     }
 }

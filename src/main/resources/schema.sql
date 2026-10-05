@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS compliance_alert (
     detail VARCHAR(1024) NOT NULL,
     created_at_utc TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-COMMENT ON COLUMN compliance_alert.alert_type IS '告警类型：LATE_MEDICATED_FEEDING 出栏后迟到含药饲喂';
+COMMENT ON COLUMN compliance_alert.alert_type IS '告警类型：LATE_MEDICATED_FEEDING 出栏后迟到含药饲喂 / LATE_TREATMENT_REPORT 出栏核销后迟到治疗用药直报';
 COMMENT ON COLUMN compliance_alert.batch_no IS '涉事养殖批次号';
 COMMENT ON COLUMN compliance_alert.feeding_id IS '关联迟到饲喂记录主键；无则 NULL';
 COMMENT ON COLUMN compliance_alert.detail IS '告警详情';
@@ -183,6 +183,79 @@ CREATE TABLE IF NOT EXISTS idempotent_request (
     created_at_utc TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE idempotent_request IS 'requestId 幂等表：同键同参返回首次结果，同键异参返回 409 且不改变状态';
-COMMENT ON COLUMN idempotent_request.request_kind IS '请求类型：FORMULA_SUBMIT 配方提交 / SLAUGHTER_APPLY 出栏申请';
+COMMENT ON COLUMN idempotent_request.request_kind IS '请求类型：FORMULA_SUBMIT 配方提交 / SLAUGHTER_APPLY 出栏申请 / TREATMENT_REPORT 治疗用药直报';
 COMMENT ON COLUMN idempotent_request.fingerprint IS 'SHA-256 指纹，覆盖 requestId 与全部业务字段';
 COMMENT ON COLUMN idempotent_request.response_json IS '首次响应内容快照（JSON）';
+
+CREATE TABLE IF NOT EXISTS treatment_drug (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    code VARCHAR(64) NOT NULL UNIQUE,
+    name VARCHAR(128) NOT NULL UNIQUE,
+    withdrawal_days INT NOT NULL,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at_utc TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE treatment_drug IS '合成兽药目录（治疗性用药直报专用，不参与饲料配方校验）';
+COMMENT ON COLUMN treatment_drug.code IS '治疗性兽药编码（合成目录）';
+COMMENT ON COLUMN treatment_drug.name IS '治疗性兽药名称；直报按名称受理，目录外名称拒绝受理';
+COMMENT ON COLUMN treatment_drug.withdrawal_days IS '该治疗药休药天数（按 UTC 日历日计）';
+COMMENT ON COLUMN treatment_drug.active IS '目录是否有效；仅有效目录可受理';
+
+CREATE TABLE IF NOT EXISTS treatment_report (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id VARCHAR(64) NOT NULL UNIQUE,
+    batch_id BIGINT NOT NULL,
+    administered_at_utc TIMESTAMP(3) NOT NULL,
+    max_withdrawal_days INT NOT NULL,
+    confirmer_a VARCHAR(64) NOT NULL,
+    confirmer_b VARCHAR(64) NOT NULL,
+    late BOOLEAN NOT NULL DEFAULT FALSE,
+    fingerprint VARCHAR(128) NOT NULL,
+    created_at_utc TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (batch_id, administered_at_utc)
+);
+COMMENT ON TABLE treatment_report IS '治疗性用药直报：受理后触发批次休药期重算；同一批次同一给药时刻仅允许一条直报（唯一约束）';
+COMMENT ON COLUMN treatment_report.request_id IS '直报幂等键 requestId';
+COMMENT ON COLUMN treatment_report.batch_id IS '养殖批次主键';
+COMMENT ON COLUMN treatment_report.administered_at_utc IS '最晚给药时刻（UTC），休药期重算起算点之一';
+COMMENT ON COLUMN treatment_report.max_withdrawal_days IS '本次直报药品中的最大休药天数（单位：UTC 日）';
+COMMENT ON COLUMN treatment_report.confirmer_a IS '第一名确认人（养殖端人员标识）';
+COMMENT ON COLUMN treatment_report.confirmer_b IS '第二名确认人；须与第一人不同，单人直报不生效';
+COMMENT ON COLUMN treatment_report.late IS '是否为出栏核销后迟到的直报；迟到只记事件并告警，不改变出栏终态与休药字段';
+COMMENT ON COLUMN treatment_report.fingerprint IS '直报指纹（SHA-256，覆盖 requestId 与全部业务字段）';
+
+CREATE TABLE IF NOT EXISTS treatment_report_drug (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    report_id BIGINT NOT NULL,
+    drug_code VARCHAR(64) NOT NULL,
+    drug_name VARCHAR(128) NOT NULL,
+    withdrawal_days INT NOT NULL,
+    UNIQUE (report_id, drug_code)
+);
+COMMENT ON TABLE treatment_report_drug IS '直报药品明细快照：受理时刻合成兽药目录中的名称与休药天数';
+COMMENT ON COLUMN treatment_report_drug.report_id IS '直报主键';
+COMMENT ON COLUMN treatment_report_drug.drug_code IS '治疗性兽药编码';
+COMMENT ON COLUMN treatment_report_drug.drug_name IS '受理时兽药名称快照';
+COMMENT ON COLUMN treatment_report_drug.withdrawal_days IS '受理时目录中的休药天数快照（UTC 日）';
+
+CREATE TABLE IF NOT EXISTS slaughter_application (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id VARCHAR(64) NOT NULL UNIQUE,
+    batch_id BIGINT NOT NULL,
+    apply_at_utc TIMESTAMP(3) NOT NULL,
+    approved BOOLEAN NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    reject_reason VARCHAR(1024),
+    revoked_at_utc TIMESTAMP(3),
+    revoke_reason VARCHAR(1024),
+    created_at_utc TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE slaughter_application IS '出栏申请台账；撤销记录保留可查';
+COMMENT ON COLUMN slaughter_application.request_id IS '出栏申请幂等键 requestId';
+COMMENT ON COLUMN slaughter_application.batch_id IS '养殖批次主键';
+COMMENT ON COLUMN slaughter_application.apply_at_utc IS '申请出栏时刻（UTC）；未来时刻批准后为 SCHEDULED 预约，不立即核销';
+COMMENT ON COLUMN slaughter_application.approved IS '是否批准';
+COMMENT ON COLUMN slaughter_application.status IS 'SCHEDULED 已批准预约 / EXECUTED 已核销出栏（终态）/ REJECTED 休药期内拒绝 / REVOKED 被休药期重算自动撤销';
+COMMENT ON COLUMN slaughter_application.reject_reason IS '拒绝原因；批准为 NULL';
+COMMENT ON COLUMN slaughter_application.revoked_at_utc IS '自动撤销时刻（UTC）；未撤销为 NULL';
+COMMENT ON COLUMN slaughter_application.revoke_reason IS '自动撤销原因（治疗直报重算后与新最早出栏日冲突）';

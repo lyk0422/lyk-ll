@@ -46,6 +46,9 @@ class FeedComplianceIntegrationTest {
     void clean() {
         jdbc.update("DELETE FROM idempotent_request");
         jdbc.update("DELETE FROM compliance_alert");
+        jdbc.update("DELETE FROM treatment_report_drug");
+        jdbc.update("DELETE FROM treatment_report");
+        jdbc.update("DELETE FROM slaughter_application");
         jdbc.update("DELETE FROM feeding_record_drug");
         jdbc.update("DELETE FROM feeding_record");
         jdbc.update("DELETE FROM production_drug_snapshot");
