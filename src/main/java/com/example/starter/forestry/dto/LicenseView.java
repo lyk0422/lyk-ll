@@ -1,5 +1,6 @@
 package com.example.starter.forestry.dto;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 
 /**
@@ -11,6 +12,8 @@ import java.time.LocalDate;
  * @param subplotId      小班 ID
  * @param speciesCode    树种编码
  * @param quotaYear      限额年度
+ * @param treeCount      证载采伐株数，单位株
+ * @param volume         证载采伐蓄积量（复核口径），单位立方米
  * @param status         证件状态：ISSUED / HARVESTED / VOID
  * @param issueDate      发证日期（UTC）
  * @param expireDate     采伐期限截止日 = 发证日 + 90 天（UTC 日界）
@@ -23,6 +26,8 @@ public record LicenseView(
         String subplotId,
         String speciesCode,
         Integer quotaYear,
+        Integer treeCount,
+        BigDecimal volume,
         String status,
         LocalDate issueDate,
         LocalDate expireDate,

@@ -20,7 +20,8 @@ import com.example.starter.forestry.web.ApiException;
 class LicenseNinetyDaysTest extends AbstractForestryTest {
 
     private LicenseView issue() {
-        return issueLicense("d90", "OP-D", "SP-001", "PINUS_MASSONIANA", "MAIN", new BigDecimal("20.00"));
+        return issueLicense("d90", "OP-D", "SP-001", "PINUS_MASSONIANA", "MAIN",
+                40, new BigDecimal("20.00"));
     }
 
     @Test

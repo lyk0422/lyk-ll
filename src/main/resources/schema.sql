@@ -14,24 +14,35 @@ CREATE TABLE IF NOT EXISTS forest_subplot (
     CONSTRAINT uk_subplot_code UNIQUE (subplot_code)
 );
 
--- 年度采伐限额（按树种分档）
+-- 合成蓄积表：按树种+林龄给出单株蓄积，用于复核申请填报的蓄积设计值
+CREATE TABLE IF NOT EXISTS species_volume_table (
+    species_code     VARCHAR(32)   NOT NULL,         -- 树种编码
+    stand_age        INT           NOT NULL,         -- 林龄，单位：年
+    volume_per_tree  DECIMAL(10,4) NOT NULL,         -- 单株蓄积，单位：立方米/株
+    PRIMARY KEY (species_code, stand_age)
+);
+
+-- 年度采伐限额（按树种分档，株数与蓄积双口径；任一口径达限即判满）
 CREATE TABLE IF NOT EXISTS annual_quota (
     id           BIGINT       NOT NULL AUTO_INCREMENT,
     species_code VARCHAR(32)  NOT NULL,              -- 树种编码（限额档位）
     quota_year   INT          NOT NULL,              -- 限额年度
-    total_volume DECIMAL(14,2) NOT NULL,             -- 年度采伐限额，单位：立方米
+    total_trees  INT          NOT NULL,              -- 年度采伐株数限额，单位：株
+    total_volume DECIMAL(14,2) NOT NULL,             -- 年度采伐蓄积限额，单位：立方米
     PRIMARY KEY (id),
     CONSTRAINT uk_quota_tier UNIQUE (species_code, quota_year)
 );
 
--- 限额台账：发证占用（HOLD）为正，逾期作废释放（RELEASE）为负
+-- 限额台账（双口径）：发证占用（HOLD）为正，逾期作废释放（RELEASE）为负；
+-- 补植验收合格不回写释放，台账仅由发证与逾期作废驱动
 CREATE TABLE IF NOT EXISTS quota_ledger (
     id             BIGINT       NOT NULL AUTO_INCREMENT,
     species_code   VARCHAR(32)  NOT NULL,            -- 树种编码（限额档位）
     quota_year     INT          NOT NULL,            -- 限额年度
     application_id VARCHAR(64)  NOT NULL,            -- 关联申请单 ID
     license_id     VARCHAR(64),                      -- 关联采伐证 ID（释放时回填）
-    volume         DECIMAL(14,2) NOT NULL,           -- 占用为正、释放为负，单位：立方米
+    trees          INT          NOT NULL,            -- 株数：占用为正、释放为负，单位：株
+    volume         DECIMAL(14,2) NOT NULL,           -- 蓄积：占用为正、释放为负，单位：立方米
     action         VARCHAR(16)  NOT NULL,            -- HOLD 占用 / RELEASE 释放
     created_date   DATE         NOT NULL,            -- 记账日期（UTC）
     PRIMARY KEY (id)
@@ -47,8 +58,11 @@ CREATE TABLE IF NOT EXISTS harvest_application (
     species_code  VARCHAR(32)  NOT NULL,             -- 树种编码（限额档位）
     quota_year    INT          NOT NULL,             -- 申请归属限额年度
     harvest_type  VARCHAR(16)  NOT NULL,             -- MAIN 主伐 / TENDING 抚育 / REFORMATION 改造
-    volume        DECIMAL(14,2) NOT NULL,            -- 申请采伐蓄积量，单位：立方米
-    status        VARCHAR(24)  NOT NULL,             -- 申请状态机状态
+    tree_count    INT          NOT NULL,             -- 申请采伐株数，单位：株
+    design_volume DECIMAL(14,2) NOT NULL,            -- 申请人填报的蓄积设计值，单位：立方米
+    checked_volume DECIMAL(14,2) NOT NULL,           -- 系统按合成蓄积表复核的蓄积，单位：立方米
+    correction_used TINYINT(1) NOT NULL DEFAULT 0,   -- 是否已使用补正机会：1 是 0 否（仅一次机会）
+    status        VARCHAR(32)  NOT NULL,             -- 申请状态机状态
     license_id    VARCHAR(64),                       -- 已发采伐证 ID，未发证为空
     reject_reason VARCHAR(255),                      -- 拒绝原因，未拒绝为空
     archived      TINYINT(1)   NOT NULL DEFAULT 0,   -- 是否归档（终态）：1 是 0 否
@@ -69,7 +83,8 @@ CREATE TABLE IF NOT EXISTS harvest_license (
     subplot_id     VARCHAR(64)  NOT NULL,            -- 小班 ID
     species_code   VARCHAR(32)  NOT NULL,            -- 树种编码（限额档位）
     quota_year     INT          NOT NULL,            -- 限额年度
-    volume         DECIMAL(14,2) NOT NULL,            -- 证载采伐蓄积量，单位：立方米
+    tree_count     INT          NOT NULL,            -- 证载采伐株数，单位：株
+    volume         DECIMAL(14,2) NOT NULL,            -- 证载采伐蓄积量（复核口径），单位：立方米
     status         VARCHAR(16)  NOT NULL,            -- ISSUED 有效 / HARVESTED 已采伐 / VOID 逾期作废
     issue_date     DATE         NOT NULL,            -- 发证日期（UTC）
     expire_date    DATE         NOT NULL,            -- 采伐期限截止日（发证日 + 90 天，含当日）
@@ -110,7 +125,7 @@ CREATE TABLE IF NOT EXISTS restriction_list (
 
 -- 幂等请求记录：指纹覆盖 requestId 与全部业务字段，保存首次响应
 CREATE TABLE IF NOT EXISTS idempotent_request (
-    operation     VARCHAR(24) NOT NULL,              -- APPLY / ISSUE / CONFIRM / ACCEPTANCE
+    operation     VARCHAR(24) NOT NULL,              -- APPLY / CORRECT / ISSUE / CONFIRM / ACCEPTANCE
     request_id    VARCHAR(64) NOT NULL,              -- 幂等键
     fingerprint   VARCHAR(128) NOT NULL,             -- 业务字段指纹（SHA-256 摘要）
     status        VARCHAR(16) NOT NULL,              -- PENDING 处理中 / DONE 已完成（并发同键等待 PENDING）
@@ -139,12 +154,24 @@ COMMENT ON COLUMN forest_subplot.forest_category IS '林种：COMMERCIAL 商品�
 COMMENT ON COLUMN forest_subplot.protected_zone IS '是否禁伐区：1 是（申请一律拒绝）；0 否';
 COMMENT ON COLUMN forest_subplot.stand_age IS '当前林龄，单位：年';
 COMMENT ON COLUMN forest_subplot.mature_age IS '成熟龄，单位：年；主伐林龄须不低于此值，恰达成熟龄合法';
-COMMENT ON TABLE annual_quota IS '年度采伐限额，按树种+年度分档，单位：立方米';
-COMMENT ON TABLE quota_ledger IS '限额占用/释放台账：HOLD 发证占用为正，RELEASE 逾期作废释放为负';
-COMMENT ON TABLE harvest_application IS '采伐申请单，状态：申请-审核-发证-采伐确认-更新验收';
-COMMENT ON COLUMN harvest_application.status IS 'SUBMITTED 已申请；REVIEW_PASSED 审核通过；REVIEW_REJECTED 审核拒绝；LICENSED 已发证；HARVESTED 已采伐；RENEWAL_DONE 更新通过；RENEWAL_FAILED 更新失败限批；LICENSE_VOID 证件逾期作废；ARCHIVED 已归档（终态）';
+COMMENT ON TABLE species_volume_table IS '合成蓄积表：按树种+林龄给单株蓄积（立方米/株），用于复核申请蓄积设计值';
+COMMENT ON COLUMN species_volume_table.volume_per_tree IS '单株蓄积，单位：立方米/株；复核蓄积=单株蓄积×申请株数';
+COMMENT ON TABLE annual_quota IS '年度采伐限额，按树种+年度分档；株数与蓄积双口径，任一口径达限即判满，恰达合法';
+COMMENT ON COLUMN annual_quota.total_trees IS '年度采伐株数限额，单位：株';
+COMMENT ON COLUMN annual_quota.total_volume IS '年度采伐蓄积限额，单位：立方米';
+COMMENT ON TABLE quota_ledger IS '双口径限额台账：HOLD 发证占用为正，RELEASE 逾期作废释放为负；补植验收合格不计回释放';
+COMMENT ON COLUMN quota_ledger.trees IS '株数口径：占用为正、释放为负，单位：株';
+COMMENT ON COLUMN quota_ledger.volume IS '蓄积口径：占用为正、释放为负，单位：立方米';
+COMMENT ON TABLE harvest_application IS '采伐申请单，状态：申请（蓄积复核/补正）-审核-发证-采伐确认-更新验收';
+COMMENT ON COLUMN harvest_application.tree_count IS '申请采伐株数，单位：株；株数口径限额按此占用';
+COMMENT ON COLUMN harvest_application.design_volume IS '申请人填报的蓄积设计值，单位：立方米；与复核口径不一致进入一次补正';
+COMMENT ON COLUMN harvest_application.checked_volume IS '系统按合成蓄积表复核的蓄积=单株蓄积×株数，单位：立方米；蓄积口径限额按此占用';
+COMMENT ON COLUMN harvest_application.correction_used IS '是否已使用补正机会：1 是 0 否；补正后仍不一致按撤回处理';
+COMMENT ON COLUMN harvest_application.status IS 'VOLUME_CORRECTION_PENDING 待补正（设计值与复核不一致，未受理）；SUBMITTED 已申请；REVIEW_PASSED 审核通过；REVIEW_REJECTED 审核拒绝；WITHDRAWN 补正后仍不一致按撤回；LICENSED 已发证；HARVESTED 已采伐；RENEWAL_DONE 更新通过；RENEWAL_FAILED 更新失败限批；LICENSE_VOID 证件逾期作废；ARCHIVED 已归档（终态）';
 COMMENT ON COLUMN harvest_application.archived IS '是否归档终态：1 是（迟到数据仅记录事件）；0 否';
 COMMENT ON TABLE harvest_license IS '采伐许可证；ISSUED 有效；HARVESTED 已完成采伐确认（唯一成功终态）；VOID 逾期作废';
+COMMENT ON COLUMN harvest_license.tree_count IS '证载采伐株数，单位：株';
+COMMENT ON COLUMN harvest_license.volume IS '证载采伐蓄积量（复核口径），单位：立方米';
 COMMENT ON COLUMN harvest_license.expire_date IS '采伐期限截止日=发证日+90 个自然日（UTC），恰在第 90 日确认有效';
 COMMENT ON TABLE renewal_obligation IS '迹地更新义务；PENDING 待验收；REPLANTING 补植中；PASSED 通过；FAILED 失败（触发限批）';
 COMMENT ON COLUMN renewal_obligation.deadline IS '首次更新期限：采伐确认翌年 12 月 31 日（UTC）';

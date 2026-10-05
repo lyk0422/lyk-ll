@@ -18,12 +18,19 @@ import com.example.starter.forestry.web.ApiException;
 class EligibilityTest extends AbstractForestryTest {
 
     private ApplyRequest req(String requestId, String subplotId, String harvestType) {
-        return new ApplyRequest(requestId, "OP-E", subplotId,
-                switch (subplotId) {
-                    case "SP-001", "SP-003", "SP-005" -> "PINUS_MASSONIANA";
-                    default -> "CUNNINGHAMIA";
-                },
-                harvestType, new BigDecimal("10.00"));
+        // 各小班按合成蓄积表换算的（株数, 设计蓄积），保证设计值与复核口径一致
+        return switch (subplotId) {
+            case "SP-001" -> new ApplyRequest(requestId, "OP-E", subplotId,
+                    "PINUS_MASSONIANA", harvestType, 20, new BigDecimal("10.00"));
+            case "SP-002" -> new ApplyRequest(requestId, "OP-E", subplotId,
+                    "CUNNINGHAMIA", harvestType, 25, new BigDecimal("10.00"));
+            case "SP-003" -> new ApplyRequest(requestId, "OP-E", subplotId,
+                    "PINUS_MASSONIANA", harvestType, 100, new BigDecimal("10.00"));
+            case "SP-004" -> new ApplyRequest(requestId, "OP-E", subplotId,
+                    "CUNNINGHAMIA", harvestType, 10, new BigDecimal("8.00"));
+            default -> new ApplyRequest(requestId, "OP-E", subplotId,
+                    "PINUS_MASSONIANA", harvestType, 10, new BigDecimal("6.00"));
+        };
     }
 
     @Test

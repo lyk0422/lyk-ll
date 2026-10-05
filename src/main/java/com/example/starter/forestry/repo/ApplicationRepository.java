@@ -1,5 +1,6 @@
 package com.example.starter.forestry.repo;
 
+import java.math.BigDecimal;
 import java.sql.Date;
 import java.time.LocalDate;
 import java.util.List;
@@ -22,7 +23,8 @@ public class ApplicationRepository {
     }
 
     private static final String COLUMNS = """
-            id, request_id, operator_id, subplot_id, species_code, quota_year, harvest_type, volume,
+            id, request_id, operator_id, subplot_id, species_code, quota_year, harvest_type,
+            tree_count, design_volume, checked_volume, correction_used,
             status, license_id, reject_reason, archived, created_date, reviewed_date, archived_date
             """;
 
@@ -35,7 +37,10 @@ public class ApplicationRepository {
                 rs.getString("species_code"),
                 rs.getInt("quota_year"),
                 rs.getString("harvest_type"),
-                rs.getBigDecimal("volume"),
+                rs.getInt("tree_count"),
+                rs.getBigDecimal("design_volume"),
+                rs.getBigDecimal("checked_volume"),
+                rs.getBoolean("correction_used"),
                 rs.getString("status"),
                 rs.getString("license_id"),
                 rs.getString("reject_reason"),
@@ -49,11 +54,13 @@ public class ApplicationRepository {
         jdbc.update("""
                         INSERT INTO harvest_application
                             (id, request_id, operator_id, subplot_id, species_code, quota_year, harvest_type,
-                             volume, status, license_id, reject_reason, archived, created_date, reviewed_date, archived_date)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             tree_count, design_volume, checked_volume, correction_used,
+                             status, license_id, reject_reason, archived, created_date, reviewed_date, archived_date)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                 po.id(), po.requestId(), po.operatorId(), po.subplotId(), po.speciesCode(), po.quotaYear(),
-                po.harvestType(), po.volume(), po.status(), po.licenseId(), po.rejectReason(),
+                po.harvestType(), po.treeCount(), po.designVolume(), po.checkedVolume(), po.correctionUsed(),
+                po.status(), po.licenseId(), po.rejectReason(),
                 po.archived(), Date.valueOf(po.createdDate()),
                 po.reviewedDate() == null ? null : Date.valueOf(po.reviewedDate()),
                 po.archivedDate() == null ? null : Date.valueOf(po.archivedDate()));
@@ -78,6 +85,19 @@ public class ApplicationRepository {
                          WHERE id = ?
                         """,
                 status, rejectReason, Date.valueOf(reviewedDate), id);
+    }
+
+    /**
+     * 完成蓄积设计值补正：记录补正后设计值、标记补正机会已用并迁移状态
+     * （补正一致转 SUBMITTED，仍不一致转 WITHDRAWN）。
+     */
+    public void completeCorrection(String id, String status, BigDecimal correctedDesignVolume) {
+        jdbc.update("""
+                        UPDATE harvest_application
+                           SET status = ?, design_volume = ?, correction_used = 1
+                         WHERE id = ?
+                        """,
+                status, correctedDesignVolume, id);
     }
 
     public void attachLicense(String id, String licenseId, String status) {

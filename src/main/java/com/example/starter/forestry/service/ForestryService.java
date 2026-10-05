@@ -1,6 +1,7 @@
 package com.example.starter.forestry.service;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.List;
@@ -20,13 +21,18 @@ import com.example.starter.forestry.dto.AcceptanceRequest;
 import com.example.starter.forestry.dto.ApplicationView;
 import com.example.starter.forestry.dto.ApplyRequest;
 import com.example.starter.forestry.dto.ConfirmRequest;
+import com.example.starter.forestry.dto.CorrectionRequest;
 import com.example.starter.forestry.dto.IssueRequest;
 import com.example.starter.forestry.dto.LicenseView;
+import com.example.starter.forestry.dto.QuotaLedgerView;
 import com.example.starter.forestry.dto.RenewalView;
 import com.example.starter.forestry.dto.ReviewRequest;
 import com.example.starter.forestry.po.ApplicationPO;
 import com.example.starter.forestry.po.IdempotentRecordPO;
 import com.example.starter.forestry.po.LicensePO;
+import com.example.starter.forestry.po.QuotaHeldPO;
+import com.example.starter.forestry.po.QuotaLedgerEntryPO;
+import com.example.starter.forestry.po.QuotaTierPO;
 import com.example.starter.forestry.po.RenewalPO;
 import com.example.starter.forestry.po.SubplotPO;
 import com.example.starter.forestry.repo.ApplicationRepository;
@@ -37,6 +43,7 @@ import com.example.starter.forestry.repo.QuotaRepository;
 import com.example.starter.forestry.repo.RenewalRepository;
 import com.example.starter.forestry.repo.RestrictionRepository;
 import com.example.starter.forestry.repo.SubplotRepository;
+import com.example.starter.forestry.repo.VolumeTableRepository;
 import com.example.starter.forestry.support.BusinessClock;
 import com.example.starter.forestry.support.Fingerprints;
 import com.example.starter.forestry.web.ApiException;
@@ -47,12 +54,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  *
  * <p>关键口径（全部日期取 UTC 日界）：
  * <ul>
- *   <li>限额按树种+年度分档，发证时串行校验；恰达限额合法，超出整笔拒绝且不占用。</li>
+ *   <li>申请须附小班蓄积设计值，系统按合成蓄积表复核（单株蓄积×株数）；
+ *       不一致不予受理，允许一次补正，补正后仍不一致按撤回处理，不生成证照。</li>
+ *   <li>限额按树种+年度分档，株数与蓄积双口径控制：任一口径累计达限判满，
+ *       恰达合法，超出整笔拒绝；双口径判定与受理（发证落库）在同一事务内完成。</li>
  *   <li>生态公益林、禁伐区一律拒绝；主伐林龄须 ≥ 成熟龄，恰达合法。</li>
  *   <li>采伐期限 = 发证日 + 90 个自然日，第 90 日确认有效；逾期证件自动作废、限额当日释放。</li>
  *   <li>更新期限为采伐确认翌年 12 月 31 日；合格率 = 合格株数/总株数，≥ 0.85 合格，恰达合法。</li>
- *   <li>首次验收不合格给一次补植机会，补植期限 6 个月月末（含当日）；仍不合格列入限批名单 1 年。</li>
- *   <li>申请/发证/采伐确认/验收以 (operation, requestId) 幂等：指纹覆盖全部业务字段；
+ *   <li>首次验收不合格给一次补植机会，补植期限 6 个月月末（含当日）；仍不合格列入限批名单 1 年；
+ *       补植验收合格后补植株数不计回限额释放。</li>
+ *   <li>申请/补正/发证/采伐确认/验收以 (operation, requestId) 幂等：指纹覆盖全部业务字段；
  *       同键同参返回首次结果，同键异参 409 且不产生任何业务副作用。</li>
  * </ul>
  */
@@ -71,6 +82,7 @@ public class ForestryService {
     private final ApplicationRepository applicationRepository;
     private final SubplotRepository subplotRepository;
     private final QuotaRepository quotaRepository;
+    private final VolumeTableRepository volumeTableRepository;
     private final LicenseRepository licenseRepository;
     private final RenewalRepository renewalRepository;
     private final RestrictionRepository restrictionRepository;
@@ -83,6 +95,7 @@ public class ForestryService {
     public ForestryService(ApplicationRepository applicationRepository,
                            SubplotRepository subplotRepository,
                            QuotaRepository quotaRepository,
+                           VolumeTableRepository volumeTableRepository,
                            LicenseRepository licenseRepository,
                            RenewalRepository renewalRepository,
                            RestrictionRepository restrictionRepository,
@@ -94,6 +107,7 @@ public class ForestryService {
         this.applicationRepository = applicationRepository;
         this.subplotRepository = subplotRepository;
         this.quotaRepository = quotaRepository;
+        this.volumeTableRepository = volumeTableRepository;
         this.licenseRepository = licenseRepository;
         this.renewalRepository = renewalRepository;
         this.restrictionRepository = restrictionRepository;
@@ -109,14 +123,16 @@ public class ForestryService {
     // ------------------------------------------------------------------
 
     /**
-     * 提交采伐申请。静态资格校验（限批/禁伐/公益林/成熟龄）在此完成；
-     * 限额余额在发证时串行校验。
+     * 提交采伐申请。静态资格校验（限批/禁伐/公益林/成熟龄）在此完成，
+     * 并按合成蓄积表复核蓄积设计值：一致则受理（SUBMITTED），不一致则
+     * 不予受理并挂起为待补正（VOLUME_CORRECTION_PENDING）。限额余额在发证时串行校验。
      */
     public ApplicationView apply(ApplyRequest request) {
         HarvestType harvestType = parseHarvestType(request.harvestType());
         String fingerprint = Fingerprints.sha256(String.join("|",
                 request.requestId(), request.operatorId(), request.subplotId(), request.speciesCode(),
-                request.harvestType(), request.volume().stripTrailingZeros().toPlainString()));
+                request.harvestType(), request.treeCount().toString(),
+                request.designVolume().stripTrailingZeros().toPlainString()));
 
         return withIdempotency(IdempotentOperation.APPLY, request.requestId(), fingerprint,
                 "APPLICATION", ApplicationView.class, () -> doApply(request, harvestType));
@@ -147,10 +163,26 @@ public class ForestryService {
             throw rejection("STAND_AGE_NOT_MATURE",
                     "主伐林龄 " + subplot.standAge() + " 低于成熟龄 " + subplot.matureAge());
         }
-        if (quotaRepository.findTotal(subplot.speciesCode(), today.getYear()) == null) {
+        if (quotaRepository.findTier(subplot.speciesCode(), today.getYear()) == null) {
             throw rejection("QUOTA_TIER_NOT_FOUND",
                     "年度限额档位不存在: " + subplot.speciesCode() + " / " + today.getYear());
         }
+
+        // 蓄积设计值复核：按合成蓄积表 单株蓄积 × 申请株数 计算复核口径
+        BigDecimal volumePerTree = volumeTableRepository.findVolumePerTree(
+                subplot.speciesCode(), subplot.standAge());
+        if (volumePerTree == null) {
+            throw rejection("VOLUME_TABLE_MISSING",
+                    "合成蓄积表缺少档位，无法复核: " + subplot.speciesCode()
+                            + " / 林龄 " + subplot.standAge());
+        }
+        BigDecimal checked = volumePerTree
+                .multiply(BigDecimal.valueOf(request.treeCount()))
+                .setScale(2, RoundingMode.HALF_UP);
+        // 设计与复核口径不一致：拒绝受理，挂起待一次补正
+        String status = request.designVolume().compareTo(checked) == 0
+                ? ApplicationStatus.SUBMITTED.name()
+                : ApplicationStatus.VOLUME_CORRECTION_PENDING.name();
 
         ApplicationPO po = new ApplicationPO(
                 "APP-" + UUID.randomUUID(),
@@ -160,11 +192,46 @@ public class ForestryService {
                 subplot.speciesCode(),
                 today.getYear(),
                 harvestType.name(),
-                request.volume(),
-                ApplicationStatus.SUBMITTED.name(),
+                request.treeCount(),
+                request.designVolume(),
+                checked,
+                false,
+                status,
                 null, null, false, today, null, null);
         applicationRepository.insert(po);
         return toApplicationView(po);
+    }
+
+    /**
+     * 蓄积设计值补正（仅一次机会）：补正值与复核口径一致则受理（SUBMITTED）；
+     * 仍不一致按撤回处理（WITHDRAWN），不生成证照。
+     */
+    public ApplicationView correct(String applicationId, CorrectionRequest request) {
+        String fingerprint = Fingerprints.sha256(String.join("|",
+                request.requestId(), applicationId,
+                request.designVolume().stripTrailingZeros().toPlainString()));
+        return withIdempotency(IdempotentOperation.CORRECT, request.requestId(), fingerprint,
+                "APPLICATION", ApplicationView.class, () -> doCorrect(applicationId, request));
+    }
+
+    private ApplicationView doCorrect(String applicationId, CorrectionRequest request) {
+        ApplicationPO app = mustFindApplication(applicationId);
+        if (app.archived()) {
+            recordLateEvent(app.id(), app.licenseId(), "CORRECTION",
+                    "designVolume=" + request.designVolume());
+            throw ApiException.conflict("APPLICATION_ARCHIVED", "申请已归档，迟到补正仅记录事件");
+        }
+        if (!ApplicationStatus.VOLUME_CORRECTION_PENDING.name().equals(app.status())) {
+            throw ApiException.conflict("INVALID_STATUS",
+                    "当前状态 " + app.status() + " 不允许蓄积设计值补正");
+        }
+        // 补正判定沿用申请时固化的复核口径，保证可复算、结果稳定
+        boolean consistent = request.designVolume().compareTo(app.checkedVolume()) == 0;
+        String target = consistent
+                ? ApplicationStatus.SUBMITTED.name()
+                : ApplicationStatus.WITHDRAWN.name();
+        applicationRepository.completeCorrection(app.id(), target, request.designVolume());
+        return toApplicationView(applicationRepository.findById(app.id()));
     }
 
     /**
@@ -197,7 +264,8 @@ public class ForestryService {
     }
 
     /**
-     * 发证：同一限额档位串行校验（行锁），同一小班同时刻只允许一张有效证。
+     * 发证：同一限额档位串行校验（行锁），株数与蓄积双口径任一超限整笔拒绝；
+     * 双口径判定与受理落库在同一事务内完成。同一小班同时刻只允许一张有效证。
      */
     public LicenseView issue(IssueRequest request) {
         String fingerprint = Fingerprints.sha256(request.requestId() + "|" + request.applicationId());
@@ -220,16 +288,24 @@ public class ForestryService {
             throw ApiException.badRequest("OPERATOR_RESTRICTED", "经营主体处于限批期内，禁止发证");
         }
 
-        // 锁定限额档位行：同树种同年度发证全局串行，杜绝并发合计超限
-        BigDecimal total = quotaRepository.findTotalForUpdate(app.speciesCode(), app.quotaYear());
-        if (total == null) {
+        // 锁定限额档位行：同树种同年度发证全局串行，杜绝并发合计超限（双口径同锁判定）
+        QuotaTierPO tier = quotaRepository.findTierForUpdate(app.speciesCode(), app.quotaYear());
+        if (tier == null) {
             throw ApiException.badRequest("QUOTA_TIER_NOT_FOUND",
                     "年度限额档位不存在: " + app.speciesCode() + " / " + app.quotaYear());
         }
-        BigDecimal held = quotaRepository.sumHeld(app.speciesCode(), app.quotaYear());
-        if (held.add(app.volume()).compareTo(total) > 0) {
+        QuotaHeldPO held = quotaRepository.sumHeld(app.speciesCode(), app.quotaYear());
+        // 株数口径：恰达合法，超出整笔拒绝
+        if (held.trees() + app.treeCount() > tier.totalTrees()) {
             throw ApiException.conflict("QUOTA_EXCEEDED",
-                    "超出年度采伐限额：已占 " + held + " + 本笔 " + app.volume() + " > 限额 " + total);
+                    "超出年度采伐株数限额：已占 " + held.trees() + " + 本笔 " + app.treeCount()
+                            + " > 限额 " + tier.totalTrees());
+        }
+        // 蓄积口径：恰达合法，超出整笔拒绝
+        if (held.volume().add(app.checkedVolume()).compareTo(tier.totalVolume()) > 0) {
+            throw ApiException.conflict("QUOTA_EXCEEDED",
+                    "超出年度采伐蓄积限额：已占 " + held.volume() + " + 本笔 " + app.checkedVolume()
+                            + " > 限额 " + tier.totalVolume());
         }
 
         // 锁定小班行：同一小班同时刻只允许一张有效证
@@ -242,10 +318,11 @@ public class ForestryService {
         LicensePO license = new LicensePO(
                 "LIC-" + UUID.randomUUID(),
                 app.id(), app.operatorId(), app.subplotId(), app.speciesCode(), app.quotaYear(),
-                app.volume(), LicenseStatus.ISSUED.name(), today, expireDate, null, null);
+                app.treeCount(), app.checkedVolume(),
+                LicenseStatus.ISSUED.name(), today, expireDate, null, null);
         licenseRepository.insert(license);
         quotaRepository.appendLedger(app.speciesCode(), app.quotaYear(), app.id(), license.id(),
-                app.volume(), "HOLD", today);
+                app.treeCount(), app.checkedVolume(), "HOLD", today);
         applicationRepository.attachLicense(app.id(), license.id(), ApplicationStatus.LICENSED.name());
         return toLicenseView(license);
     }
@@ -291,7 +368,8 @@ public class ForestryService {
                 }
                 applicationRepository.updateStatus(app.id(), ApplicationStatus.LICENSE_VOID.name());
                 quotaRepository.appendLedger(license.speciesCode(), license.quotaYear(),
-                        app.id(), license.id(), license.volume().negate(), "RELEASE", today);
+                        app.id(), license.id(), -license.treeCount(), license.volume().negate(),
+                        "RELEASE", today);
                 return true;
             });
             if (Boolean.TRUE.equals(voided)) {
@@ -326,7 +404,8 @@ public class ForestryService {
 
     /**
      * 更新验收提交：首次不合格进入补植（提交本身作为首次结果提交并缓存），
-     * 补植验收仍不合格则列入限批名单。
+     * 补植验收仍不合格则列入限批名单。补植验收合格后补植株数不计回限额释放，
+     * 台账仅由发证占用与逾期作废释放驱动。
      */
     public RenewalView acceptance(AcceptanceRequest request) {
         if (request.qualifiedCount() > request.totalCount()) {
@@ -356,7 +435,7 @@ public class ForestryService {
         boolean qualified = request.qualifiedCount().longValue() * 100
                 >= request.totalCount().longValue() * PASS_RATE_PERCENT;
         BigDecimal rate = BigDecimal.valueOf(request.qualifiedCount())
-                .divide(BigDecimal.valueOf(request.totalCount()), 4, java.math.RoundingMode.HALF_UP);
+                .divide(BigDecimal.valueOf(request.totalCount()), 4, RoundingMode.HALF_UP);
 
         switch (RenewalStatus.valueOf(renewal.status())) {
             case PENDING -> {
@@ -389,6 +468,7 @@ public class ForestryService {
                     throw ApiException.conflict("RENEWAL_STATE_CHANGED", "更新状态已被并发改变，请重试");
                 }
                 if (qualified) {
+                    // 补植验收合格：补植株数不计回限额释放（不写 RELEASE 台账）
                     applicationRepository.updateStatus(app.id(), ApplicationStatus.RENEWAL_DONE.name());
                 } else {
                     // 补植仍不合格：经营主体列入限批名单，期限 1 年（含截止当日）
@@ -439,7 +519,7 @@ public class ForestryService {
                         ApplicationStatus.LICENSE_VOID.name());
                 quotaRepository.appendLedger(license.speciesCode(), license.quotaYear(),
                         license.applicationId(), license.id(),
-                        license.volume().negate(), "RELEASE", today);
+                        -license.treeCount(), license.volume().negate(), "RELEASE", today);
                 count++;
             }
             return count;
@@ -464,6 +544,31 @@ public class ForestryService {
             throw ApiException.notFound("RENEWAL_NOT_FOUND", "更新义务不存在: " + applicationId);
         }
         return toRenewalView(renewal);
+    }
+
+    /**
+     * 双口径限额台账（按树种+年度档位）：持有量由台账明细逐笔复算，
+     * 明细按记账顺序稳定排序，重复查询结果一致。
+     */
+    public QuotaLedgerView quotaLedger(String speciesCode, int year) {
+        QuotaTierPO tier = quotaRepository.findTier(speciesCode, year);
+        if (tier == null) {
+            throw ApiException.notFound("QUOTA_TIER_NOT_FOUND",
+                    "年度限额档位不存在: " + speciesCode + " / " + year);
+        }
+        List<QuotaLedgerEntryPO> rows = quotaRepository.listLedgerEntries(speciesCode, year);
+        long heldTrees = 0;
+        BigDecimal heldVolume = BigDecimal.ZERO;
+        List<QuotaLedgerView.Entry> entries = new java.util.ArrayList<>(rows.size());
+        for (QuotaLedgerEntryPO row : rows) {
+            heldTrees += row.trees();
+            heldVolume = heldVolume.add(row.volume());
+            entries.add(new QuotaLedgerView.Entry(
+                    row.applicationId(), row.licenseId(), row.trees(), row.volume(),
+                    row.action(), row.createdDate()));
+        }
+        return new QuotaLedgerView(speciesCode, year, tier.totalTrees(), tier.totalVolume(),
+                heldTrees, heldVolume, List.copyOf(entries));
     }
 
     // ------------------------------------------------------------------
@@ -628,14 +733,15 @@ public class ForestryService {
     private ApplicationView toApplicationView(ApplicationPO po) {
         return new ApplicationView(
                 po.id(), po.status(), po.operatorId(), po.subplotId(), po.speciesCode(),
-                po.quotaYear(), po.harvestType(), po.volume(), po.licenseId(),
-                po.rejectReason(), po.createdDate(), po.archivedDate());
+                po.quotaYear(), po.harvestType(), po.treeCount(), po.designVolume(), po.checkedVolume(),
+                po.licenseId(), po.rejectReason(), po.createdDate(), po.archivedDate());
     }
 
     private LicenseView toLicenseView(LicensePO po) {
         return new LicenseView(
                 po.id(), po.applicationId(), po.operatorId(), po.subplotId(), po.speciesCode(),
-                po.quotaYear(), po.status(), po.issueDate(), po.expireDate(), po.harvestDate());
+                po.quotaYear(), po.treeCount(), po.volume(), po.status(),
+                po.issueDate(), po.expireDate(), po.harvestDate());
     }
 
     private RenewalView toRenewalView(RenewalPO po) {

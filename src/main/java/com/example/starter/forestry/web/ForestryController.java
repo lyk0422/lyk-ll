@@ -13,8 +13,10 @@ import com.example.starter.forestry.dto.AcceptanceRequest;
 import com.example.starter.forestry.dto.ApplicationView;
 import com.example.starter.forestry.dto.ApplyRequest;
 import com.example.starter.forestry.dto.ConfirmRequest;
+import com.example.starter.forestry.dto.CorrectionRequest;
 import com.example.starter.forestry.dto.IssueRequest;
 import com.example.starter.forestry.dto.LicenseView;
+import com.example.starter.forestry.dto.QuotaLedgerView;
 import com.example.starter.forestry.dto.RenewalView;
 import com.example.starter.forestry.dto.ReviewRequest;
 import com.example.starter.forestry.service.ForestryService;
@@ -44,6 +46,15 @@ public class ForestryController {
     public ApplicationView review(@PathVariable("id") String applicationId,
                                   @Valid @RequestBody ReviewRequest request) {
         return service.review(applicationId, request);
+    }
+
+    /**
+     * 蓄积设计值补正（仅一次机会）：补正一致进入受理，仍不一致按撤回处理。
+     */
+    @PostMapping("/applications/{id}/volume-correction")
+    public ApplicationView correct(@PathVariable("id") String applicationId,
+                                   @Valid @RequestBody CorrectionRequest request) {
+        return service.correct(applicationId, request);
     }
 
     @PostMapping("/licenses")
@@ -88,5 +99,14 @@ public class ForestryController {
     @GetMapping("/renewals/{applicationId}")
     public RenewalView getRenewal(@PathVariable("applicationId") String applicationId) {
         return service.getRenewal(applicationId);
+    }
+
+    /**
+     * 双口径限额台账（按树种+年度档位）：株数与蓄积持有量可由台账明细复算，重复查询稳定。
+     */
+    @GetMapping("/quota-tiers/{speciesCode}/{year}/ledger")
+    public QuotaLedgerView quotaLedger(@PathVariable("speciesCode") String speciesCode,
+                                       @PathVariable("year") int year) {
+        return service.quotaLedger(speciesCode, year);
     }
 }
