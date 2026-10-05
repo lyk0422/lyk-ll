@@ -8,6 +8,9 @@ import com.example.starter.feed.dto.ProductionRequest;
 import com.example.starter.feed.dto.ProductionResponse;
 import com.example.starter.feed.dto.SlaughterRequest;
 import com.example.starter.feed.dto.SlaughterResponse;
+import com.example.starter.feed.dto.SlaughterRevocationResponse;
+import com.example.starter.feed.dto.TreatmentReportRequest;
+import com.example.starter.feed.dto.TreatmentReportResponse;
 import com.example.starter.feed.service.BatchService;
 import com.example.starter.feed.service.IdempotencyService;
 import jakarta.validation.Valid;
@@ -19,8 +22,10 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.List;
+
 /**
- * 养殖批次接口：登记、投产、含药饲喂、出栏申请、休药期跟踪。
+ * 养殖批次接口：登记、投产、含药饲喂、出栏申请、休药期跟踪、治疗性用药直报。
  */
 @RestController
 @RequestMapping("/api")
@@ -61,5 +66,22 @@ public class BatchController {
     public ResponseEntity<SlaughterResponse> slaughter(@Valid @RequestBody SlaughterRequest request) {
         IdempotencyService.Result<SlaughterResponse> result = batchService.applySlaughter(request);
         return ResponseEntity.status(result.httpStatus()).body(result.response());
+    }
+
+    /**
+     * 治疗性用药直报（requestId 幂等）：须两名养殖端人员确认；
+     * 受理后触发休药期重算并同事务撤销冲突的已批准出栏申请。
+     */
+    @PostMapping("/treatment-reports")
+    public ResponseEntity<TreatmentReportResponse> reportTreatment(
+            @Valid @RequestBody TreatmentReportRequest request) {
+        IdempotencyService.Result<TreatmentReportResponse> result = batchService.reportTreatment(request);
+        return ResponseEntity.status(result.httpStatus()).body(result.response());
+    }
+
+    /** 查询批次出栏申请撤销记录（撤销审计，保留可查）。 */
+    @GetMapping("/batches/{batchNo}/slaughter-revocations")
+    public List<SlaughterRevocationResponse> listSlaughterRevocations(@PathVariable String batchNo) {
+        return batchService.listSlaughterRevocations(batchNo);
     }
 }

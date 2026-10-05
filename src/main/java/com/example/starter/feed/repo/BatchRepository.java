@@ -98,4 +98,12 @@ public class BatchRepository {
                         + "WHERE id = ? AND status = 'FEEDING'",
                 Timestamp.from(slaughteredAtUtc), batchId);
     }
+
+    /**
+     * 治疗直报撤销已批准（尚未到计划出栏时刻）的出栏申请时，将批次恢复为饲养中并清空出栏时刻。
+     */
+    public void clearSlaughter(long batchId) {
+        jdbc.update("UPDATE herd_batch SET status = 'FEEDING', slaughtered_at_utc = NULL WHERE id = ?",
+                batchId);
+    }
 }

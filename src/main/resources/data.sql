@@ -22,3 +22,9 @@ MERGE INTO drug_allowed_species (drug_code, species) KEY(drug_code, species) VAL
 -- 配伍禁忌（无序对，按编码字典序存放）：恩诺沙星 与 泰乐菌素 禁止同方。
 MERGE INTO contraindication (drug_a_code, drug_b_code) KEY(drug_a_code, drug_b_code) VALUES
     ('DRG-ENRO', 'DRG-TYLO');
+
+-- 治疗性兽药目录（合成数据）：直报按药品名称受理，目录外名称拒绝。
+MERGE INTO vet_drug_catalog (code, name, withdrawal_days, active) KEY(code) VALUES
+    ('VET-CEFT', '合成头孢噻呋注射液', 4, TRUE),
+    ('VET-FLOX', '合成氟苯尼考注射液', 10, TRUE),
+    ('VET-TILM', '合成替米考星注射液', 12, TRUE);

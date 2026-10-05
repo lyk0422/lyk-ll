@@ -11,11 +11,16 @@ import com.example.starter.feed.dto.ProductionRequest;
 import com.example.starter.feed.dto.ProductionResponse;
 import com.example.starter.feed.dto.SlaughterRequest;
 import com.example.starter.feed.dto.SlaughterResponse;
+import com.example.starter.feed.dto.SlaughterRevocationResponse;
+import com.example.starter.feed.dto.TreatmentReportRequest;
+import com.example.starter.feed.dto.TreatmentReportResponse;
 import com.example.starter.feed.repo.AlertRepository;
 import com.example.starter.feed.repo.BatchRepository;
 import com.example.starter.feed.repo.DictRepository;
 import com.example.starter.feed.repo.FormulaRepository;
 import com.example.starter.feed.repo.ProductionRepository;
+import com.example.starter.feed.repo.SlaughterApplicationRepository;
+import com.example.starter.feed.repo.TreatmentReportRepository;
 import com.example.starter.feed.web.ApiException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -24,25 +29,31 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 /**
- * 养殖批次：登记、含药配方投产与休药期合并、含药饲喂（含迟到告警）、出栏判定。
+ * 养殖批次：登记、含药配方投产与休药期合并、含药饲喂（含迟到告警）、出栏判定、
+ * 治疗性用药直报（双人确认、休药期重算、冲突出栏申请同事务撤销）。
  */
 @Service
 public class BatchService {
 
     /** 幂等请求类型：出栏申请。 */
     public static final String KIND_SLAUGHTER_APPLY = "SLAUGHTER_APPLY";
+    /** 幂等请求类型：治疗性用药直报。 */
+    public static final String KIND_TREATMENT_REPORT = "TREATMENT_REPORT";
 
     private final BatchRepository batchRepository;
     private final FormulaRepository formulaRepository;
     private final ProductionRepository productionRepository;
     private final DictRepository dictRepository;
     private final AlertRepository alertRepository;
+    private final TreatmentReportRepository treatmentReportRepository;
+    private final SlaughterApplicationRepository slaughterApplicationRepository;
     private final IdempotencyService idempotencyService;
     private final Clock clock;
 
@@ -51,6 +62,8 @@ public class BatchService {
                         ProductionRepository productionRepository,
                         DictRepository dictRepository,
                         AlertRepository alertRepository,
+                        TreatmentReportRepository treatmentReportRepository,
+                        SlaughterApplicationRepository slaughterApplicationRepository,
                         IdempotencyService idempotencyService,
                         Clock clock) {
         this.batchRepository = batchRepository;
@@ -58,6 +71,8 @@ public class BatchService {
         this.productionRepository = productionRepository;
         this.dictRepository = dictRepository;
         this.alertRepository = alertRepository;
+        this.treatmentReportRepository = treatmentReportRepository;
+        this.slaughterApplicationRepository = slaughterApplicationRepository;
         this.idempotencyService = idempotencyService;
         this.clock = clock;
     }
@@ -238,6 +253,9 @@ public class BatchService {
 
         // 已出栏终态：重复出栏申请返回幂等成功。
         if (BatchStatus.SLAUGHTERED.name().equals(batch.status())) {
+            // 台账登记该已批准申请（以实际出栏时刻为准），供后续治疗直报冲突判定。
+            slaughterApplicationRepository.insertApproved(
+                    request.requestId(), batch.id(), batch.batchNo(), batch.slaughteredAtUtc());
             return IdempotencyService.Outcome.ok(new SlaughterResponse(
                     batch.batchNo(), true, false, BatchStatus.SLAUGHTERED.name(),
                     earliest, null, batch.slaughteredAtUtc(), request.applyAtUtc()));
@@ -261,6 +279,9 @@ public class BatchService {
             if (updated == 0) {
                 throw ApiException.conflict("批次状态已被并发改变，请重新申请");
             }
+            // 台账登记已批准申请；治疗直报重算后冲突时同事务撤销并保留记录。
+            slaughterApplicationRepository.insertApproved(
+                    request.requestId(), batch.id(), batch.batchNo(), request.applyAtUtc());
             slaughteredAt = request.applyAtUtc();
             status = BatchStatus.SLAUGHTERED.name();
         }
@@ -275,6 +296,7 @@ public class BatchService {
     /**
      * 按批次全部含药饲喂事件逐支复算合并休药期：
      * 最晚末次饲喂时刻 + 各药物最大休药天数（仅统计非迟到事件；迟到事件不影响已冻结义务）。
+     * 合并非迟到的治疗性用药直报：给药时刻参与最晚时刻合并，目录快照休药天数参与最大天数合并。
      */
     private Merged recomputeBatchWithdrawal(long batchId) {
         List<ProductionRepository.FeedingRow> feedings =
@@ -294,6 +316,14 @@ public class BatchService {
             maxDays = Math.max(maxDays, feedingMaxDays);
             if (latestFeed == null || feeding.feedAtUtc().isAfter(latestFeed)) {
                 latestFeed = feeding.feedAtUtc();
+            }
+        }
+        // 治疗直报（非迟到）并入同一合并口径：最晚给药时刻 + 最大休药天数。
+        for (TreatmentReportRepository.TreatmentRow treatment
+                : treatmentReportRepository.findEffectiveByBatch(batchId)) {
+            maxDays = Math.max(maxDays, treatment.withdrawalDays());
+            if (latestFeed == null || treatment.administeredAtUtc().isAfter(latestFeed)) {
+                latestFeed = treatment.administeredAtUtc();
             }
         }
         if (latestFeed == null) {
@@ -317,6 +347,141 @@ public class BatchService {
                 earliest(row.withdrawalUntilDate()),
                 row.governingWithdrawalDays(),
                 row.slaughteredAtUtc());
+    }
+
+    /**
+     * 治疗性用药直报（requestId 幂等）：
+     * 两名不同养殖端人员确认方可生效；目录外药品拒绝受理且不改变原出栏日；
+     * 受理后按最大休药天数与最晚给药时刻重算合并休药期，原最早出栏日作废；
+     * 已批准且与新最早出栏日冲突的出栏申请在同一事务内撤销并保留撤销记录；
+     * 出栏核销终态后的迟到直报只记事件并告警，不改变终态。
+     */
+    public IdempotencyService.Result<TreatmentReportResponse> reportTreatment(TreatmentReportRequest request) {
+        IdempotencyService.Result<TreatmentReportResponse> result = idempotencyService.execute(
+                request.requestId(),
+                KIND_TREATMENT_REPORT,
+                request,
+                () -> doReportTreatment(request),
+                TreatmentReportResponse.class);
+        if (result.replayed() && !result.response().replayed()) {
+            TreatmentReportResponse r = result.response();
+            return new IdempotencyService.Result<>(
+                    new TreatmentReportResponse(r.requestId(), r.batchNo(), r.accepted(), r.rejectReason(),
+                            r.late(), r.alerted(), true, r.drugName(), r.withdrawalDays(),
+                            r.administeredAtUtc(), r.withdrawalUntilDate(), r.earliestSlaughterUtc(),
+                            r.governingWithdrawalDays(), r.revokedSlaughterRequestIds()),
+                    result.httpStatus(), true);
+        }
+        return result;
+    }
+
+    private IdempotencyService.Outcome doReportTreatment(TreatmentReportRequest request) {
+        // 行锁串行化同一批次的并发直报/饲喂/出栏。
+        BatchRepository.BatchRow batch = batchRepository.lockAndGet(request.batchNo());
+
+        // 双人确认：恰好两名不同养殖端人员；单人直报不生效且不改变任何状态。
+        List<String> confirmers = request.confirmedBy() == null ? List.of() : request.confirmedBy();
+        long distinctConfirmers = confirmers.stream()
+                .filter(c -> c != null && !c.isBlank())
+                .distinct()
+                .count();
+        if (confirmers.size() != 2 || distinctConfirmers != 2) {
+            return new IdempotencyService.Outcome(
+                    rejectedTreatment(request, "治疗直报须两名不同养殖端人员确认，单人直报不生效"), 422);
+        }
+
+        // 目录外药品拒绝受理，且不改变原出栏日。
+        Optional<DictRepository.VetDrugDict> drugOpt = dictRepository.findVetDrugByName(request.drugName());
+        if (drugOpt.isEmpty()) {
+            return new IdempotencyService.Outcome(
+                    rejectedTreatment(request, "兽药目录外的药品名称，拒绝受理: " + request.drugName()), 422);
+        }
+        DictRepository.VetDrugDict drug = drugOpt.get();
+
+        Instant now = clock.instant();
+        boolean slaughtered = BatchStatus.SLAUGHTERED.name().equals(batch.status());
+        // 出栏核销终态（计划出栏时刻已到）后迟到的直报：只记事件并告警，终态语义不变。
+        boolean late = slaughtered && batch.slaughteredAtUtc() != null
+                && !batch.slaughteredAtUtc().isAfter(now);
+
+        long reportId;
+        try {
+            reportId = treatmentReportRepository.insert(
+                    request.requestId(), batch.id(), batch.batchNo(), drug.code(), drug.name(),
+                    drug.withdrawalDays(), request.administeredAtUtc(),
+                    confirmers.get(0), confirmers.get(1), late, FingerprintUtil.sha256(request));
+        } catch (DuplicateKeyException e) {
+            // 同一批次同一给药时刻只允许一条进行中直报。
+            throw ApiException.conflict("同一批次同一给药时刻已存在进行中直报: "
+                    + request.batchNo() + " " + request.administeredAtUtc());
+        }
+
+        if (late) {
+            alertRepository.insert(AlertType.LATE_TREATMENT_REPORT.name(), batch.batchNo(), null,
+                    "批次已于 " + batch.slaughteredAtUtc() + " 出栏核销（终态），出栏后收到迟到治疗用药直报（药品 "
+                            + request.drugName() + "，给药时刻 " + request.administeredAtUtc()
+                            + "，直报编号 " + reportId + "），仅记录事件并告警，不改变出栏终态");
+            return IdempotencyService.Outcome.ok(new TreatmentReportResponse(
+                    request.requestId(), batch.batchNo(), true, null, true, true, false,
+                    drug.name(), drug.withdrawalDays(), request.administeredAtUtc(),
+                    batch.withdrawalUntilDate(), earliest(batch.withdrawalUntilDate()),
+                    batch.governingWithdrawalDays(), List.of()));
+        }
+
+        // 重算合并休药期（含本次直报）：原最早出栏日作废。
+        Merged merged = recomputeBatchWithdrawal(batch.id());
+        batchRepository.updateWithdrawal(batch.id(),
+                merged == null ? null : merged.latestFeed(),
+                merged == null ? null : merged.untilDate(),
+                merged == null ? null : merged.maxDays());
+        Instant newEarliest = merged == null ? null
+                : WithdrawalCalculator.earliestSlaughter(merged.untilDate());
+
+        // 已批准但计划出栏时刻尚在未来的申请：与新最早出栏日冲突时在同一事务内撤销。
+        List<String> revokedRequestIds = new ArrayList<>();
+        if (slaughtered && newEarliest != null) {
+            List<SlaughterApplicationRepository.ApplicationRow> approved =
+                    slaughterApplicationRepository.findApprovedByBatch(batch.id());
+            for (SlaughterApplicationRepository.ApplicationRow application : approved) {
+                if (application.applyAtUtc().isBefore(newEarliest)) {
+                    slaughterApplicationRepository.markRevoked(application.id());
+                    slaughterApplicationRepository.insertRevocation(
+                            application.id(), application.requestId(), batch.id(), batch.batchNo(),
+                            application.applyAtUtc(), newEarliest, reportId,
+                            "治疗用药直报触发休药期重算，新最早合法出栏时刻 " + newEarliest
+                                    + " 晚于已批准出栏时刻 " + application.applyAtUtc() + "，自动撤销该申请");
+                    revokedRequestIds.add(application.requestId());
+                }
+            }
+            if (!revokedRequestIds.isEmpty()) {
+                // 撤销后批次恢复饲养中，等待新休药期届满后重新申请出栏。
+                batchRepository.clearSlaughter(batch.id());
+            }
+        }
+
+        return IdempotencyService.Outcome.ok(new TreatmentReportResponse(
+                request.requestId(), batch.batchNo(), true, null, false, false, false,
+                drug.name(), drug.withdrawalDays(), request.administeredAtUtc(),
+                merged == null ? null : merged.untilDate(), newEarliest,
+                merged == null ? null : merged.maxDays(), List.copyOf(revokedRequestIds)));
+    }
+
+    /**
+     * 查询批次出栏申请撤销记录（撤销审计，保留可查）。
+     */
+    @Transactional(readOnly = true)
+    public List<SlaughterRevocationResponse> listSlaughterRevocations(String batchNo) {
+        if (!batchRepository.exists(batchNo)) {
+            throw ApiException.notFound("养殖批次不存在: " + batchNo);
+        }
+        return slaughterApplicationRepository.findRevocationsByBatchNo(batchNo);
+    }
+
+    private TreatmentReportResponse rejectedTreatment(TreatmentReportRequest request, String reason) {
+        return new TreatmentReportResponse(
+                request.requestId(), request.batchNo(), false, reason, false, false, false,
+                null, null, request.administeredAtUtc(),
+                null, null, null, List.of());
     }
 
     /** 合并休药期中间结果。 */
