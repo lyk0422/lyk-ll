@@ -2,9 +2,12 @@ package com.example.starter.flood.web;
 
 import com.example.starter.flood.service.PlanService;
 import com.example.starter.flood.web.dto.PlanRequest;
+import com.example.starter.flood.web.dto.PlanVersionView;
 import com.example.starter.flood.web.dto.PlanView;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -28,5 +31,13 @@ public class PlanController {
     @ResponseStatus(HttpStatus.CREATED)
     public PlanView create(@Valid @RequestBody PlanRequest request) {
         return planService.create(request);
+    }
+
+    /**
+     * 处置链全部方案版本（旧版本留痕可查）。
+     */
+    @GetMapping("/{planNo}/versions")
+    public java.util.List<PlanVersionView> versions(@PathVariable String planNo) {
+        return planService.listVersions(planNo);
     }
 }

@@ -23,6 +23,14 @@ public class RoutingPO {
     public String dryBeachJudgment;
     public String phreaticJudgment;
     public String dangerJudgment;
+    /** 演算版本号：同一处置链内自 1 递增。 */
+    public Integer version;
+    /** MANUAL 静态演算 / ROLLING 滚动重算。 */
+    public String triggerType;
+    /** 入库洪水过程线 JSON，仅滚动版本有值。 */
+    public String inflowHydrograph;
+    /** 滚动重算的上一版本演算主键。 */
+    public Long prevRoutingId;
     public String inputSnapshot;
     public String criterion;
     public LocalDateTime createdAt;

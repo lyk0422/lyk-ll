@@ -12,3 +12,4 @@ spring:
 flood-control:
   sign-timeout-minutes: 15
   receipt-deviation-ratio: 0.10
+  rolling-interval-minutes: 30

@@ -118,6 +118,12 @@ public class RoutingService {
         po.dryBeachJudgment = dryBeach.name();
         po.phreaticJudgment = phreatic.name();
         po.dangerJudgment = danger.name();
+        // 版本号按处置链递增：静态演算同样占用一个版本，滚动重算在其上继续累加
+        RoutingPO latest = routingRepository.findLatestByWarningId(warning.id);
+        po.version = latest == null ? 1 : latest.version + 1;
+        po.triggerType = "MANUAL";
+        po.inflowHydrograph = null;
+        po.prevRoutingId = null;
         po.inputSnapshot = jsonSupport.toJson(snapshot(request, currentStorage, maxStorage,
                 availableCapacity));
         po.criterion = CRITERION;

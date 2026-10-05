@@ -223,7 +223,15 @@ public class OrderService {
         orderRepository.addEvent(order.id, "RECEIPTED", now,
                 "实际总泄量 " + actualTotal + " m3/s，偏差比例 " + ratio.toPlainString()
                         + (consistent ? "（一致）" : "（超阈值，原因：" + storedReason + "）"));
-        planRepository.markCompleted(plan.id, now);
+        int completed = planRepository.markCompleted(plan.id, now);
+        if (completed == 0) {
+            // 指令钉住的方案已被新版本取代（SUPERSEDED）：若当前生效方案未下指令
+            // （人工确认维持在途指令），随本次回执一并闭环，保证处置链可归档
+            PlanPO active = planRepository.findActiveByPond(plan.pondId);
+            if (active != null && orderRepository.findByPlanId(active.id) == null) {
+                planRepository.markCompleted(active.id, now);
+            }
+        }
         idempotentRepository.bindRef(request.requestId(), order.id);
 
         OrderPO saved = orderRepository.findByNo(orderNo);

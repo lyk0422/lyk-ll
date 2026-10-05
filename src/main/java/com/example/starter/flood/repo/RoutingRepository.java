@@ -42,6 +42,11 @@ public class RoutingRepository {
             po.dryBeachJudgment = rs.getString("dry_beach_judgment");
             po.phreaticJudgment = rs.getString("phreatic_judgment");
             po.dangerJudgment = rs.getString("danger_judgment");
+            po.version = rs.getInt("version");
+            po.triggerType = rs.getString("trigger_type");
+            po.inflowHydrograph = rs.getString("inflow_hydrograph");
+            long prevRoutingId = rs.getLong("prev_routing_id");
+            po.prevRoutingId = rs.wasNull() ? null : prevRoutingId;
             po.inputSnapshot = rs.getString("input_snapshot");
             po.criterion = rs.getString("criterion");
             Timestamp created = rs.getTimestamp("created_at");
@@ -55,12 +60,14 @@ public class RoutingRepository {
                 "INSERT INTO flood_routing(routing_no, pond_id, warning_id, request_id, "
                         + "current_water_level, current_storage, max_storage, available_capacity, "
                         + "design_flood_volume, capacity_judgment, dry_beach_length, phreatic_depth, "
-                        + "dry_beach_judgment, phreatic_judgment, danger_judgment, input_snapshot, "
-                        + "criterion, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        + "dry_beach_judgment, phreatic_judgment, danger_judgment, version, "
+                        + "trigger_type, inflow_hydrograph, prev_routing_id, input_snapshot, "
+                        + "criterion, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 po.routingNo, po.pondId, po.warningId, po.requestId,
                 po.currentWaterLevel, po.currentStorage, po.maxStorage, po.availableCapacity,
                 po.designFloodVolume, po.capacityJudgment, po.dryBeachLength, po.phreaticDepth,
-                po.dryBeachJudgment, po.phreaticJudgment, po.dangerJudgment, po.inputSnapshot,
+                po.dryBeachJudgment, po.phreaticJudgment, po.dangerJudgment, po.version,
+                po.triggerType, po.inflowHydrograph, po.prevRoutingId, po.inputSnapshot,
                 po.criterion, Timestamp.valueOf(po.createdAt));
     }
 
@@ -80,5 +87,24 @@ public class RoutingRepository {
         List<RoutingPO> list = jdbcTemplate.query(
                 "SELECT * FROM flood_routing WHERE request_id = ?", MAPPER, requestId);
         return list.isEmpty() ? null : list.get(0);
+    }
+
+    /**
+     * 查询处置链最新版本演算（滚动重算的基准版本）。
+     */
+    public RoutingPO findLatestByWarningId(Long warningId) {
+        List<RoutingPO> list = jdbcTemplate.query(
+                "SELECT * FROM flood_routing WHERE warning_id = ? ORDER BY version DESC, id DESC "
+                        + "LIMIT 1", MAPPER, warningId);
+        return list.isEmpty() ? null : list.get(0);
+    }
+
+    /**
+     * 查询处置链全部演算版本（旧版本保留可查，按版本号升序）。
+     */
+    public List<RoutingPO> findByWarningIdOrderByVersion(Long warningId) {
+        return jdbcTemplate.query(
+                "SELECT * FROM flood_routing WHERE warning_id = ? ORDER BY version, id",
+                MAPPER, warningId);
     }
 }

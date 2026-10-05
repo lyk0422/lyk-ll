@@ -14,6 +14,8 @@ public class WarningPO {
     public String rainSummary;
     /** ACTIVE / ARCHIVED。 */
     public String status;
+    /** 预警级别：BLUE / YELLOW / ORANGE / RED。 */
+    public String warningLevel;
     public String requestId;
     public LocalDateTime openedAt;
     public LocalDateTime archivedAt;

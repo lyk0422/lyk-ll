@@ -74,13 +74,24 @@ CREATE TABLE IF NOT EXISTS warning_chain (
     title VARCHAR(200) NOT NULL,
     rain_summary VARCHAR(1024),
     status VARCHAR(20) NOT NULL,
+    warning_level VARCHAR(20) NOT NULL DEFAULT 'ORANGE',
     request_id VARCHAR(64) NOT NULL,
     opened_at TIMESTAMP NOT NULL,
     archived_at TIMESTAMP
 );
 COMMENT ON TABLE warning_chain IS '降雨预警/险情处置链：险情报送与方案在同一链上，终态为 ARCHIVED';
 COMMENT ON COLUMN warning_chain.status IS '处置链状态：ACTIVE 生效中；ARCHIVED 已归档（终态）';
+COMMENT ON COLUMN warning_chain.warning_level IS '预警级别：BLUE/YELLOW/ORANGE/RED，滚动演算泄流能力不足时自动逐级提升，RED 封顶';
 COMMENT ON COLUMN warning_chain.request_id IS '创建预警的幂等键';
+
+CREATE TABLE IF NOT EXISTS warning_event (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    warning_id BIGINT NOT NULL,
+    event_type VARCHAR(30) NOT NULL,
+    event_time TIMESTAMP NOT NULL,
+    detail VARCHAR(1024)
+);
+COMMENT ON TABLE warning_event IS '处置链事件流（预警级别提升等），留痕可查';
 
 CREATE UNIQUE INDEX IF NOT EXISTS uk_warning_no ON warning_chain (warning_no);
 CREATE UNIQUE INDEX IF NOT EXISTS uk_warning_request ON warning_chain (request_id);
@@ -102,20 +113,29 @@ CREATE TABLE IF NOT EXISTS flood_routing (
     dry_beach_judgment VARCHAR(20),
     phreatic_judgment VARCHAR(20),
     danger_judgment VARCHAR(20) NOT NULL,
+    version INT NOT NULL DEFAULT 1,
+    trigger_type VARCHAR(20) NOT NULL DEFAULT 'MANUAL',
+    inflow_hydrograph CLOB,
+    prev_routing_id BIGINT,
     input_snapshot CLOB NOT NULL,
     criterion VARCHAR(512) NOT NULL,
     created_at TIMESTAMP NOT NULL
 );
-COMMENT ON TABLE flood_routing IS '调洪演算记录：输入快照、判定口径可复算';
+COMMENT ON TABLE flood_routing IS '调洪演算记录：输入快照、判定口径可复算；滚动演算按处置链递增版本，旧版本保留可查';
 COMMENT ON COLUMN flood_routing.available_capacity IS '当前水位反查的可用调洪库容，立方米';
-COMMENT ON COLUMN flood_routing.design_flood_volume IS '设计洪水量，立方米';
+COMMENT ON COLUMN flood_routing.design_flood_volume IS '设计洪水量，立方米；滚动版本为本次过程线时段洪量';
 COMMENT ON COLUMN flood_routing.capacity_judgment IS '库容判定：SAFE 不足安全 / CRITICAL 恰等临界 / RELEASE_REQUIRED 超出须泄流';
 COMMENT ON COLUMN flood_routing.danger_judgment IS '综合判定：SAFE 安全 / CRITICAL 临界 / RELEASE_REQUIRED 须泄流 / DANGER 险（双指标任一低于下限）';
-COMMENT ON COLUMN flood_routing.input_snapshot IS '演算全部输入字段快照（JSON），供复算';
+COMMENT ON COLUMN flood_routing.version IS '演算版本号：同一处置链内自 1 递增，滚动重算生成新版本';
+COMMENT ON COLUMN flood_routing.trigger_type IS '触发方式：MANUAL 静态演算 / ROLLING 滚动重算（恰满滚动周期触发）';
+COMMENT ON COLUMN flood_routing.inflow_hydrograph IS '入库洪水过程线 JSON（分钟偏移+流量 m3/s），仅滚动版本有值';
+COMMENT ON COLUMN flood_routing.prev_routing_id IS '滚动重算的上一版本演算主键，静态首版本为空';
+COMMENT ON COLUMN flood_routing.input_snapshot IS '演算全部输入字段快照（JSON），供任一版本单独复算';
 COMMENT ON COLUMN flood_routing.criterion IS '判定口径文字说明（边界口径）';
 
 CREATE UNIQUE INDEX IF NOT EXISTS uk_routing_no ON flood_routing (routing_no);
 CREATE UNIQUE INDEX IF NOT EXISTS uk_routing_request ON flood_routing (request_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_routing_version ON flood_routing (warning_id, version);
 
 CREATE TABLE IF NOT EXISTS release_plan (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -128,25 +148,31 @@ CREATE TABLE IF NOT EXISTS release_plan (
     total_release DECIMAL(14, 3) NOT NULL,
     downstream_safe_release DECIMAL(14, 3) NOT NULL,
     status VARCHAR(20) NOT NULL,
+    version INT NOT NULL DEFAULT 1,
     active_key BIGINT,
     created_at TIMESTAMP NOT NULL,
     completed_at TIMESTAMP,
+    superseded_at TIMESTAMP,
     archived_at TIMESTAMP
 );
-COMMENT ON TABLE release_plan IS '泄流方案：同一尾矿库同时刻只允许一个执行中方案';
+COMMENT ON TABLE release_plan IS '泄流方案：同一尾矿库同时刻只允许一个执行中方案；泄流能力不足时自动追加新版本，旧版本保留可查';
 COMMENT ON COLUMN release_plan.openings IS '孔口组合 JSON：名称、开度(米)、泄量(立方米每秒)';
 COMMENT ON COLUMN release_plan.total_release IS '方案总泄量，立方米每秒，恰等下游安全泄量合法';
-COMMENT ON COLUMN release_plan.status IS 'EFFECTIVE 生效中 / COMPLETED 已回执完成 / ARCHIVED 已归档终态';
+COMMENT ON COLUMN release_plan.status IS 'EFFECTIVE 生效中 / SUPERSEDED 已被新版本取代 / COMPLETED 已回执完成 / ARCHIVED 已归档终态';
+COMMENT ON COLUMN release_plan.version IS '方案版本号：同一处置链内自 1 递增，自动追加生成新版本';
 COMMENT ON COLUMN release_plan.active_key IS '执行中唯一约束位：执行中为 pond_id，否则为空，空值可多行';
+COMMENT ON COLUMN release_plan.superseded_at IS '被新版本取代的时刻（Asia/Shanghai），空值表示未被取代';
 
 CREATE UNIQUE INDEX IF NOT EXISTS uk_plan_no ON release_plan (plan_no);
 CREATE UNIQUE INDEX IF NOT EXISTS uk_plan_request ON release_plan (request_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uk_plan_active ON release_plan (active_key);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_plan_version ON release_plan (warning_id, version);
 
 CREATE TABLE IF NOT EXISTS release_order (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     order_no VARCHAR(64) NOT NULL,
     plan_id BIGINT NOT NULL,
+    plan_version INT,
     status VARCHAR(20) NOT NULL,
     issued_at TIMESTAMP NOT NULL,
     sign_deadline TIMESTAMP NOT NULL,
@@ -163,7 +189,8 @@ CREATE TABLE IF NOT EXISTS release_order (
     deviation_reason VARCHAR(1024),
     receipt_request_id VARCHAR(64)
 );
-COMMENT ON TABLE release_order IS '泄流指令链：下达→签收→执行→回执，签收时限恰 15 分钟升级';
+COMMENT ON TABLE release_order IS '泄流指令链：下达→签收→执行→回执，签收时限恰 15 分钟升级；指令只认创建时的方案版本';
+COMMENT ON COLUMN release_order.plan_version IS '指令创建时钉住的方案版本号，新方案版本不溯及在途指令';
 COMMENT ON COLUMN release_order.status IS 'ISSUED 下达 / SIGNED 签收 / EXECUTING 执行 / RECEIPTED 回执 / ESCALATED 已升级值班领导';
 COMMENT ON COLUMN release_order.sign_deadline IS '签收时限=下达时刻+15 分钟，恰满未签收即升级';
 COMMENT ON COLUMN release_order.deviation_ratio IS '回执偏差比例=|实际-方案|/方案，恰 0.10 视为一致';
@@ -203,6 +230,29 @@ CREATE TABLE IF NOT EXISTS late_reading_event (
     payload CLOB NOT NULL
 );
 COMMENT ON TABLE late_reading_event IS '迟到读数事件：处置链归档后送达的读数只登记事件，不入读数表';
+
+CREATE TABLE IF NOT EXISTS order_conflict_advice (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    advice_no VARCHAR(64) NOT NULL,
+    order_id BIGINT NOT NULL,
+    new_plan_id BIGINT NOT NULL,
+    suggestion CLOB NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    request_id VARCHAR(64) NOT NULL,
+    decision VARCHAR(30),
+    confirm_note VARCHAR(1024),
+    confirmed_by VARCHAR(64),
+    created_at TIMESTAMP NOT NULL,
+    confirmed_at TIMESTAMP
+);
+COMMENT ON TABLE order_conflict_advice IS '在途指令与新方案版本冲突的替代建议：人工确认留痕可查';
+COMMENT ON COLUMN order_conflict_advice.suggestion IS '替代建议内容 JSON：在途指令、新旧方案版本与建议动作';
+COMMENT ON COLUMN order_conflict_advice.status IS 'PENDING 待确认 / CONFIRMED 已人工确认（终态）';
+COMMENT ON COLUMN order_conflict_advice.request_id IS '建议生成来源（滚动演算 requestId），非确认幂等键';
+COMMENT ON COLUMN order_conflict_advice.decision IS '人工决策：ACCEPT_NEW_VERSION 按新版本下达 / KEEP_CURRENT 维持在途指令';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_advice_no ON order_conflict_advice (advice_no);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_advice_order ON order_conflict_advice (order_id);
 
 CREATE TABLE IF NOT EXISTS idempotent_request (
     request_id VARCHAR(64) NOT NULL,

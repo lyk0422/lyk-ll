@@ -60,4 +60,49 @@ public class StorageCurveCalculator {
         }
         return last.storage();
     }
+
+    /**
+     * 由蓄水量反查库水位（滚动演算重算水位用）：恰等于曲线上的点时取该点，
+     * 否则按蓄水量分段线性插值；蓄水量越界时钳制到端点水位。
+     *
+     * @param points 该库全部曲线点（无需预排序）
+     * @param storage 蓄水量，立方米
+     * @return 库水位标高，米（保留 4 位小数，四舍五入）
+     */
+    public BigDecimal levelAt(List<CurvePoint> points, BigDecimal storage) {
+        if (points == null || points.isEmpty()) {
+            throw new IllegalArgumentException("库容曲线为空，无法反查水位");
+        }
+        List<CurvePoint> sorted = points.stream()
+                .sorted(Comparator.comparing(CurvePoint::storage))
+                .toList();
+        CurvePoint first = sorted.get(0);
+        CurvePoint last = sorted.get(sorted.size() - 1);
+        if (storage.compareTo(first.storage()) <= 0) {
+            return first.waterLevel();
+        }
+        if (storage.compareTo(last.storage()) >= 0) {
+            return last.waterLevel();
+        }
+        for (int i = 0; i < sorted.size() - 1; i++) {
+            CurvePoint low = sorted.get(i);
+            CurvePoint high = sorted.get(i + 1);
+            int cmpLow = storage.compareTo(low.storage());
+            int cmpHigh = storage.compareTo(high.storage());
+            if (cmpLow == 0) {
+                return low.waterLevel();
+            }
+            if (cmpHigh == 0) {
+                return high.waterLevel();
+            }
+            if (cmpLow > 0 && cmpHigh < 0) {
+                BigDecimal ratio = storage.subtract(low.storage())
+                        .divide(high.storage().subtract(low.storage()), 12, RoundingMode.HALF_UP);
+                return low.waterLevel()
+                        .add(high.waterLevel().subtract(low.waterLevel()).multiply(ratio))
+                        .setScale(4, RoundingMode.HALF_UP);
+            }
+        }
+        return last.waterLevel();
+    }
 }

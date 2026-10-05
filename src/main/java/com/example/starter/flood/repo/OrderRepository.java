@@ -33,6 +33,8 @@ public class OrderRepository {
             po.id = rs.getLong("id");
             po.orderNo = rs.getString("order_no");
             po.planId = rs.getLong("plan_id");
+            int planVersion = rs.getInt("plan_version");
+            po.planVersion = rs.wasNull() ? null : planVersion;
             po.status = rs.getString("status");
             po.issuedAt = toLdt(rs.getTimestamp("issued_at"));
             po.signDeadline = toLdt(rs.getTimestamp("sign_deadline"));
@@ -60,29 +62,35 @@ public class OrderRepository {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbcTemplate.update(connection -> {
             PreparedStatement ps = connection.prepareStatement(
-                    "INSERT INTO release_order(order_no, plan_id, status, issued_at, sign_deadline, "
-                            + "signed_at, signer, escalated_at, escalated_to, executed_at, executor, "
+                    "INSERT INTO release_order(order_no, plan_id, plan_version, status, issued_at, "
+                            + "sign_deadline, signed_at, signer, escalated_at, escalated_to, "
+                            + "executed_at, executor, "
                             + "receipted_at, actual_openings, actual_total_release, deviation_ratio, "
                             + "deviation_reason, receipt_request_id) "
-                            + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     Statement.RETURN_GENERATED_KEYS);
             ps.setString(1, po.orderNo);
             ps.setLong(2, po.planId);
-            ps.setString(3, po.status);
-            ps.setTimestamp(4, Timestamp.valueOf(po.issuedAt));
-            ps.setTimestamp(5, Timestamp.valueOf(po.signDeadline));
-            ps.setTimestamp(6, po.signedAt == null ? null : Timestamp.valueOf(po.signedAt));
-            ps.setString(7, po.signer);
-            ps.setTimestamp(8, po.escalatedAt == null ? null : Timestamp.valueOf(po.escalatedAt));
-            ps.setString(9, po.escalatedTo);
-            ps.setTimestamp(10, po.executedAt == null ? null : Timestamp.valueOf(po.executedAt));
-            ps.setString(11, po.executor);
-            ps.setTimestamp(12, po.receiptedAt == null ? null : Timestamp.valueOf(po.receiptedAt));
-            ps.setString(13, po.actualOpenings);
-            ps.setBigDecimal(14, po.actualTotalRelease);
-            ps.setBigDecimal(15, po.deviationRatio);
-            ps.setString(16, po.deviationReason);
-            ps.setString(17, po.receiptRequestId);
+            if (po.planVersion == null) {
+                ps.setObject(3, null);
+            } else {
+                ps.setInt(3, po.planVersion);
+            }
+            ps.setString(4, po.status);
+            ps.setTimestamp(5, Timestamp.valueOf(po.issuedAt));
+            ps.setTimestamp(6, Timestamp.valueOf(po.signDeadline));
+            ps.setTimestamp(7, po.signedAt == null ? null : Timestamp.valueOf(po.signedAt));
+            ps.setString(8, po.signer);
+            ps.setTimestamp(9, po.escalatedAt == null ? null : Timestamp.valueOf(po.escalatedAt));
+            ps.setString(10, po.escalatedTo);
+            ps.setTimestamp(11, po.executedAt == null ? null : Timestamp.valueOf(po.executedAt));
+            ps.setString(12, po.executor);
+            ps.setTimestamp(13, po.receiptedAt == null ? null : Timestamp.valueOf(po.receiptedAt));
+            ps.setString(14, po.actualOpenings);
+            ps.setBigDecimal(15, po.actualTotalRelease);
+            ps.setBigDecimal(16, po.deviationRatio);
+            ps.setString(17, po.deviationReason);
+            ps.setString(18, po.receiptRequestId);
             return ps;
         }, keyHolder);
         Number key = keyHolder.getKey();
@@ -94,6 +102,12 @@ public class OrderRepository {
     public OrderPO findByNo(String orderNo) {
         List<OrderPO> list = jdbcTemplate.query(
                 "SELECT * FROM release_order WHERE order_no = ?", MAPPER, orderNo);
+        return list.isEmpty() ? null : list.get(0);
+    }
+
+    public OrderPO findById(Long id) {
+        List<OrderPO> list = jdbcTemplate.query(
+                "SELECT * FROM release_order WHERE id = ?", MAPPER, id);
         return list.isEmpty() ? null : list.get(0);
     }
 

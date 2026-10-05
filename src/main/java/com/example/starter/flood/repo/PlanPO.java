@@ -16,11 +16,15 @@ public class PlanPO {
     public String openings;
     public BigDecimal totalRelease;
     public BigDecimal downstreamSafeRelease;
-    /** EFFECTIVE / COMPLETED / ARCHIVED。 */
+    /** EFFECTIVE / SUPERSEDED / COMPLETED / ARCHIVED。 */
     public String status;
+    /** 方案版本号：同一处置链内自 1 递增。 */
+    public Integer version;
     /** 执行中唯一约束位：执行中为 pondId，否则为 null。 */
     public Long activeKey;
     public LocalDateTime createdAt;
     public LocalDateTime completedAt;
+    /** 被新版本取代的时刻，空值表示未被取代。 */
+    public LocalDateTime supersededAt;
     public LocalDateTime archivedAt;
 }

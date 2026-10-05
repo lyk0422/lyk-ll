@@ -56,12 +56,16 @@ public class ReviewService {
         }
 
         LocalDateTime now = LocalDateTime.now(clock);
-        PlanPO plan = planRepository.findByWarningId(warning.id);
-        OrderPO order = plan == null ? null : orderRepository.findByPlanId(plan.id);
-        if (plan != null && "EFFECTIVE".equals(plan.status)) {
-            throw FloodControlException.business("PLAN_STILL_EFFECTIVE",
-                    "方案 " + plan.planNo + " 仍在执行中（未回执闭环），不能归档");
+        // 处置链可能存在多个方案版本（滚动追加）：任一版本仍生效则禁止归档，归档覆盖全部版本
+        java.util.List<PlanPO> plans = planRepository.findAllByWarningId(warning.id);
+        PlanPO plan = plans.isEmpty() ? null : plans.get(plans.size() - 1);
+        for (PlanPO p : plans) {
+            if ("EFFECTIVE".equals(p.status)) {
+                throw FloodControlException.business("PLAN_STILL_EFFECTIVE",
+                        "方案 " + p.planNo + " 仍在执行中（未回执闭环），不能归档");
+            }
         }
+        OrderPO order = plan == null ? null : orderRepository.findByPlanId(plan.id);
 
         int warningRows = warningRepository.markArchived(warning.id, now);
         if (warningRows == 0) {
@@ -70,8 +74,8 @@ public class ReviewService {
             return new ReviewView(archived.warningNo, archived.status,
                     reviewRepository.findNoteByWarningId(archived.id), true, archived.archivedAt);
         }
-        if (plan != null) {
-            planRepository.markArchived(plan.id, now);
+        for (PlanPO p : plans) {
+            planRepository.markArchived(p.id, now);
         }
         reviewRepository.insert(warning.id, plan == null ? null : plan.id,
                 order == null ? null : order.id, request.note(), now);

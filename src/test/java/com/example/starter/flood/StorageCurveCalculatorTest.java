@@ -49,4 +49,22 @@ class StorageCurveCalculatorTest {
         assertThatThrownBy(() -> calculator.storageAt(curve, new BigDecimal("179")))
                 .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    @DisplayName("蓄水量反查水位：曲线上点精确取值，区间内线性插值（780000 m3 -> 204.5m）")
+    void levelAtExactAndInterpolation() {
+        assertThat(calculator.levelAt(curve, new BigDecimal("600000")))
+                .isEqualByComparingTo("200");
+        assertThat(calculator.levelAt(curve, new BigDecimal("780000")))
+                .isEqualByComparingTo("204.5000");
+    }
+
+    @Test
+    @DisplayName("蓄水量越界反查水位：钳制到端点水位（滚动演算洪峰越限场景）")
+    void levelAtClampedToEndpoints() {
+        assertThat(calculator.levelAt(curve, new BigDecimal("-1")))
+                .isEqualByComparingTo("180");
+        assertThat(calculator.levelAt(curve, new BigDecimal("1104000")))
+                .isEqualByComparingTo("210");
+    }
 }

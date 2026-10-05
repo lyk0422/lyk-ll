@@ -122,6 +122,7 @@ public class PlanService {
         plan.totalRelease = totalRelease;
         plan.downstreamSafeRelease = pond.downstreamSafeRelease;
         plan.status = "EFFECTIVE";
+        plan.version = planRepository.maxVersionByWarningId(warning.id) + 1;
         plan.activeKey = pond.id;
         plan.createdAt = now;
         try {
@@ -135,6 +136,8 @@ public class PlanService {
         OrderPO order = new OrderPO();
         order.orderNo = noGenerator.next("ZL");
         order.planId = plan.id;
+        // 指令钉住创建时的方案版本：后续新版本不溯及在途指令
+        order.planVersion = plan.version;
         order.status = OrderStatus.ISSUED.name();
         order.issuedAt = now;
         order.signDeadline = now.plusMinutes(properties.getSignTimeoutMinutes());
@@ -156,6 +159,22 @@ public class PlanService {
             throw FloodControlException.notFound("泄流方案不存在: " + planNo);
         }
         return plan;
+    }
+
+    /**
+     * 查询方案所在处置链的全部版本（旧版本留痕可查，按版本号升序）。
+     */
+    public List<com.example.starter.flood.web.dto.PlanVersionView> listVersions(String planNo) {
+        PlanPO plan = requireByNo(planNo);
+        return planRepository.findAllByWarningId(plan.warningId).stream()
+                .map(p -> {
+                    OrderPO order = orderRepository.findByPlanId(p.id);
+                    return new com.example.starter.flood.web.dto.PlanVersionView(
+                            p.planNo, p.version, p.status, p.totalRelease,
+                            order == null ? null : order.orderNo,
+                            p.createdAt, p.supersededAt, p.archivedAt);
+                })
+                .toList();
     }
 
     /**

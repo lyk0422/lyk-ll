@@ -70,6 +70,7 @@ public class WarningService {
         po.title = request.title();
         po.rainSummary = request.rainSummary();
         po.status = ChainStatus.ACTIVE.name();
+        po.warningLevel = com.example.starter.flood.domain.WarningLevel.ORANGE.name();
         po.requestId = request.requestId();
         po.openedAt = now;
         warningRepository.insert(po);
@@ -104,6 +105,20 @@ public class WarningService {
      */
     public WarningPO findWarning(Long id) {
         return warningRepository.findById(id);
+    }
+
+    /**
+     * 查询处置链事件流（预警级别提升等留痕）。
+     */
+    public java.util.List<com.example.starter.flood.web.dto.WarningEventView> listEvents(
+            String warningNo) {
+        WarningPO warning = requireByNo(warningNo);
+        return warningRepository.findEvents(warning.id).stream()
+                .map(row -> new com.example.starter.flood.web.dto.WarningEventView(
+                        (String) row.get("event_type"),
+                        ((java.sql.Timestamp) row.get("event_time")).toLocalDateTime(),
+                        (String) row.get("detail")))
+                .toList();
     }
 
     private Map<String, Object> fingerprintFields(WarningRequest request) {
