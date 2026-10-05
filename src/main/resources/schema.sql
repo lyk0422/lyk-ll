@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS quota (
     quota_year   INT           NOT NULL,
     quota_kg     DECIMAL(14,3) NOT NULL,
     used_kg      DECIMAL(14,3) NOT NULL DEFAULT 0,
+    alert_triggered BOOLEAN    NOT NULL DEFAULT FALSE,
     version      INT           NOT NULL DEFAULT 0,
     CONSTRAINT uq_quota_vessel_species_year UNIQUE (vessel_code, species_code, quota_year)
 );
@@ -39,8 +40,9 @@ COMMENT ON TABLE quota IS '年度配额台账：船＋鱼种＋UTC 年度';
 COMMENT ON COLUMN quota.vessel_code IS '渔船编号';
 COMMENT ON COLUMN quota.species_code IS '鱼种编号';
 COMMENT ON COLUMN quota.quota_year IS '配额年度（UTC）';
-COMMENT ON COLUMN quota.quota_kg IS '年度核定配额（千克）';
-COMMENT ON COLUMN quota.used_kg IS '已核销扣减重量（千克）';
+COMMENT ON COLUMN quota.quota_kg IS '年度核定配额（千克，不含结转）';
+COMMENT ON COLUMN quota.used_kg IS '已核销扣减重量（千克，不含结转核销）';
+COMMENT ON COLUMN quota.alert_triggered IS '产地预警标志：TRUE 已触发（该额度不得结转），FALSE 正常';
 COMMENT ON COLUMN quota.version IS '乐观锁版本号';
 
 -- 航次台账：DEPARTED→(IN_REVIEW)→DISCHARGED→CLOSED；frozen=TRUE 表示该船复核期间余额冻结
@@ -257,3 +259,67 @@ COMMENT ON COLUMN idempotency_record.operation IS '操作类型';
 COMMENT ON COLUMN idempotency_record.fingerprint IS '业务参数指纹（SHA-256 十六进制）';
 COMMENT ON COLUMN idempotency_record.response_json IS '首次成功结果快照（JSON），受理中为空';
 COMMENT ON COLUMN idempotency_record.created_at IS '首次受理时刻（UTC）';
+
+-- 跨船配额调剂单：同鱼种同年度，双方确认后生效；确认时限 48 小时（UTC），恰满未确认自动失效
+CREATE TABLE IF NOT EXISTS quota_transfer (
+    id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+    from_vessel    VARCHAR(32)   NOT NULL,
+    to_vessel      VARCHAR(32)   NOT NULL,
+    species_code   VARCHAR(32)   NOT NULL,
+    quota_year     INT           NOT NULL,
+    amount_kg      DECIMAL(14,3) NOT NULL,
+    status         VARCHAR(12)   NOT NULL,
+    from_confirmed BOOLEAN       NOT NULL DEFAULT FALSE,
+    to_confirmed   BOOLEAN       NOT NULL DEFAULT FALSE,
+    created_at     TIMESTAMP(6)  NOT NULL,
+    expires_at     TIMESTAMP(6)  NOT NULL,
+    effective_at   TIMESTAMP(6)  NULL,
+    version        INT           NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_transfer_vessels ON quota_transfer (from_vessel, to_vessel, species_code, status);
+COMMENT ON TABLE quota_transfer IS '跨船配额调剂单：同鱼种同年度，双方确认后生效';
+COMMENT ON COLUMN quota_transfer.from_vessel IS '调出渔船编号';
+COMMENT ON COLUMN quota_transfer.to_vessel IS '调入渔船编号';
+COMMENT ON COLUMN quota_transfer.species_code IS '鱼种编号';
+COMMENT ON COLUMN quota_transfer.quota_year IS '配额年度（UTC）';
+COMMENT ON COLUMN quota_transfer.amount_kg IS '调剂量（千克），不得超过调出船剩余额度';
+COMMENT ON COLUMN quota_transfer.status IS '调剂单状态：PENDING 待确认 / EFFECTIVE 已生效 / EXPIRED 已失效';
+COMMENT ON COLUMN quota_transfer.from_confirmed IS '调出方确认标志：TRUE 已确认';
+COMMENT ON COLUMN quota_transfer.to_confirmed IS '调入方确认标志：TRUE 已确认';
+COMMENT ON COLUMN quota_transfer.created_at IS '发起时刻（UTC）';
+COMMENT ON COLUMN quota_transfer.expires_at IS '确认截止时刻（UTC，发起后 48 小时，恰满未确认自动失效）';
+COMMENT ON COLUMN quota_transfer.effective_at IS '生效时刻（UTC），未生效为空';
+COMMENT ON COLUMN quota_transfer.version IS '乐观锁版本号';
+
+-- 调剂在途护栏：同船同鱼种同时刻只允许一张进行中调剂单（数据库级唯一受理）
+CREATE TABLE IF NOT EXISTS transfer_pending_guard (
+    vessel_code  VARCHAR(32) NOT NULL,
+    species_code VARCHAR(32) NOT NULL,
+    transfer_id  BIGINT      NOT NULL,
+    CONSTRAINT pk_transfer_guard PRIMARY KEY (vessel_code, species_code)
+);
+COMMENT ON TABLE transfer_pending_guard IS '调剂在途护栏：同船同鱼种同时刻至多一张进行中调剂单';
+COMMENT ON COLUMN transfer_pending_guard.vessel_code IS '渔船编号（调出方与调入方各占一行）';
+COMMENT ON COLUMN transfer_pending_guard.species_code IS '鱼种编号';
+COMMENT ON COLUMN transfer_pending_guard.transfer_id IS '进行中的调剂单主键';
+
+-- 年度结转台账：上年未用配额按不超过年度配额 20% 结转至次年，次年核销优先扣减
+CREATE TABLE IF NOT EXISTS quota_carryover (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    vessel_code  VARCHAR(32)   NOT NULL,
+    species_code VARCHAR(32)   NOT NULL,
+    from_year    INT           NOT NULL,
+    to_year      INT           NOT NULL,
+    amount_kg    DECIMAL(14,3) NOT NULL,
+    used_kg      DECIMAL(14,3) NOT NULL DEFAULT 0,
+    created_at   TIMESTAMP(6)  NOT NULL,
+    CONSTRAINT uq_carryover_vessel_species_year UNIQUE (vessel_code, species_code, from_year)
+);
+COMMENT ON TABLE quota_carryover IS '年度结转台账：上年未用配额结转至次年（次年台账单列、优先核销）';
+COMMENT ON COLUMN quota_carryover.vessel_code IS '渔船编号';
+COMMENT ON COLUMN quota_carryover.species_code IS '鱼种编号';
+COMMENT ON COLUMN quota_carryover.from_year IS '结转来源年度（UTC）';
+COMMENT ON COLUMN quota_carryover.to_year IS '结转目标年度（UTC，来源年度次年）';
+COMMENT ON COLUMN quota_carryover.amount_kg IS '结转额度（千克，不超过来源年度核定配额的 20%）';
+COMMENT ON COLUMN quota_carryover.used_kg IS '结转额度已核销扣减量（千克，次年优先核销）';
+COMMENT ON COLUMN quota_carryover.created_at IS '结转受理时刻（UTC）';

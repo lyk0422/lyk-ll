@@ -1,5 +1,7 @@
 package com.example.starter.fishery.api;
 
+import com.example.starter.fishery.api.dto.CarryoverRequest;
+import com.example.starter.fishery.api.dto.CarryoverResponse;
 import com.example.starter.fishery.api.dto.DepartureRequest;
 import com.example.starter.fishery.api.dto.DepartureResponse;
 import com.example.starter.fishery.api.dto.LandingRequest;
@@ -12,7 +14,11 @@ import com.example.starter.fishery.api.dto.ReviewDecisionRequest;
 import com.example.starter.fishery.api.dto.ReviewDecisionResponse;
 import com.example.starter.fishery.api.dto.SettlementRequest;
 import com.example.starter.fishery.api.dto.SettlementResponse;
+import com.example.starter.fishery.api.dto.TransferConfirmRequest;
+import com.example.starter.fishery.api.dto.TransferCreateRequest;
+import com.example.starter.fishery.api.dto.TransferResponse;
 import com.example.starter.fishery.service.FisheryService;
+import com.example.starter.fishery.service.QuotaAdjustmentService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -34,9 +40,11 @@ import java.util.List;
 public class FisheryController {
 
     private final FisheryService service;
+    private final QuotaAdjustmentService adjustmentService;
 
-    public FisheryController(FisheryService service) {
+    public FisheryController(FisheryService service, QuotaAdjustmentService adjustmentService) {
         this.service = service;
+        this.adjustmentService = adjustmentService;
     }
 
     @PostMapping("/departures")
@@ -78,5 +86,28 @@ public class FisheryController {
     public List<QuotaView> quotas(@RequestParam(required = false) String vesselCode,
                                   @RequestParam(required = false) Integer year) {
         return service.quotas(vesselCode, year);
+    }
+
+    @PostMapping("/transfers")
+    @ResponseStatus(HttpStatus.CREATED)
+    public TransferResponse createTransfer(@Valid @RequestBody TransferCreateRequest request) {
+        return adjustmentService.createTransfer(request);
+    }
+
+    @PostMapping("/transfers/{transferId}/confirm")
+    public TransferResponse confirmTransfer(@PathVariable Long transferId,
+                                            @Valid @RequestBody TransferConfirmRequest request) {
+        return adjustmentService.confirmTransfer(transferId, request);
+    }
+
+    @GetMapping("/transfers/{transferId}")
+    public TransferResponse transfer(@PathVariable Long transferId) {
+        return adjustmentService.getTransfer(transferId);
+    }
+
+    @PostMapping("/carryovers")
+    @ResponseStatus(HttpStatus.CREATED)
+    public CarryoverResponse carryover(@Valid @RequestBody CarryoverRequest request) {
+        return adjustmentService.carryover(request);
     }
 }

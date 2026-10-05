@@ -18,6 +18,8 @@ import com.example.starter.fishery.api.dto.ReviewDecisionResponse;
 import com.example.starter.fishery.api.dto.SettlementRequest;
 import com.example.starter.fishery.api.dto.SettlementResponse;
 import com.example.starter.fishery.api.dto.WeightLineView;
+import com.example.starter.fishery.db.CarryoverRepository;
+import com.example.starter.fishery.db.CarryoverRow;
 import com.example.starter.fishery.db.CatalogRepository;
 import com.example.starter.fishery.db.IdempotencyRepository;
 import com.example.starter.fishery.db.IdempotencyRepository.AcquireResult;
@@ -84,6 +86,7 @@ public class FisheryService {
     private final LandingRepository landingRepo;
     private final ReviewRepository reviewRepo;
     private final QuotaRepository quotaRepo;
+    private final CarryoverRepository carryoverRepo;
     private final CatalogRepository catalogRepo;
     private final IdempotencyRepository idempotencyRepo;
     private final ObjectMapper objectMapper;
@@ -91,13 +94,15 @@ public class FisheryService {
 
     public FisheryService(TripRepository tripRepo, LogbookRepository logbookRepo,
                           LandingRepository landingRepo, ReviewRepository reviewRepo,
-                          QuotaRepository quotaRepo, CatalogRepository catalogRepo,
+                          QuotaRepository quotaRepo, CarryoverRepository carryoverRepo,
+                          CatalogRepository catalogRepo,
                           IdempotencyRepository idempotencyRepo, ObjectMapper objectMapper, Clock clock) {
         this.tripRepo = tripRepo;
         this.logbookRepo = logbookRepo;
         this.landingRepo = landingRepo;
         this.reviewRepo = reviewRepo;
         this.quotaRepo = quotaRepo;
+        this.carryoverRepo = carryoverRepo;
         this.catalogRepo = catalogRepo;
         this.idempotencyRepo = idempotencyRepo;
         this.objectMapper = objectMapper;
@@ -143,8 +148,11 @@ public class FisheryService {
             }
             QuotaRow quota = quotaRepo.findForUpdate(request.vesselCode(), entry.getKey(), year)
                     .orElse(null);
-            BigDecimal quotaLimit = quota == null ? BigDecimal.ZERO : quota.quotaKg();
-            BigDecimal used = quota == null ? BigDecimal.ZERO : quota.usedKg();
+            // 可用额度含上年结转（结转额度在次年台账单列），已用含结转核销。
+            BigDecimal quotaLimit = (quota == null ? BigDecimal.ZERO : quota.quotaKg())
+                    .add(carryoverRepo.sumAmountForYear(request.vesselCode(), entry.getKey(), year));
+            BigDecimal used = (quota == null ? BigDecimal.ZERO : quota.usedKg())
+                    .add(carryoverRepo.sumUsedForYear(request.vesselCode(), entry.getKey(), year));
             BigDecimal cumulative = used.add(entry.getValue());
             if (cumulative.compareTo(quotaLimit) > 0) {
                 throw new BusinessRuleException("申报量使渔船 " + request.vesselCode() + " 鱼种 "
@@ -426,12 +434,36 @@ public class FisheryService {
                     .orElse(null);
             BigDecimal quotaLimit = quota == null ? BigDecimal.ZERO : quota.quotaKg();
             BigDecimal used = quota == null ? BigDecimal.ZERO : quota.usedKg();
-            if (used.add(amount).compareTo(quotaLimit) > 0) {
+            // 结转额度次年优先核销：可用额度 = 年度配额剩余 + 结转剩余。
+            List<CarryoverRow> carryovers = carryoverRepo.findUsableForYear(
+                    trip.vesselCode(), entry.getKey(), year);
+            BigDecimal carryoverRemaining = carryovers.stream()
+                    .map(c -> c.amountKg().subtract(c.usedKg()))
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+            BigDecimal totalAvailable = quotaLimit.subtract(used).add(carryoverRemaining);
+            if (amount.compareTo(totalAvailable) > 0) {
                 throw new BusinessRuleException("核销使渔船 " + trip.vesselCode() + " 鱼种 "
                         + entry.getKey() + " 累计 " + used.add(amount).toPlainString()
-                        + "kg 超过配额 " + quotaLimit.toPlainString() + "kg，核销整笔回滚");
+                        + "kg 超过可用额度 " + quotaLimit.add(carryoverRemaining).toPlainString()
+                        + "kg（含结转 " + carryoverRemaining.toPlainString() + "kg），核销整笔回滚");
             }
-            quotaRepo.deductLocked(quota, amount);
+            // 先扣结转额度（逐行持锁），不足部分再扣年度配额。
+            BigDecimal toDeduct = amount;
+            for (CarryoverRow carryover : carryovers) {
+                if (toDeduct.signum() <= 0) {
+                    break;
+                }
+                CarryoverRow locked = carryoverRepo.findByIdForUpdate(carryover.id()).orElseThrow();
+                BigDecimal available = locked.amountKg().subtract(locked.usedKg());
+                BigDecimal portion = toDeduct.min(available);
+                if (portion.signum() > 0) {
+                    carryoverRepo.deductLocked(locked, portion);
+                    toDeduct = toDeduct.subtract(portion);
+                }
+            }
+            if (toDeduct.signum() > 0) {
+                quotaRepo.deductLocked(quota, toDeduct);
+            }
             quotaRepo.insertSettlement(tripCode, trip.vesselCode(), year, entry.getKey(), amount, now);
             deducted.add(new WeightLineView(entry.getKey(), amount.setScale(3, RoundingMode.HALF_UP)));
         }
@@ -607,10 +639,11 @@ public class FisheryService {
                         deducted.getOrDefault(code, BigDecimal.ZERO).setScale(3, RoundingMode.HALF_UP)))
                 .toList();
 
-        // 台账复算：used_kg 必须等于该船该年度全部核销明细合计。
+        // 台账复算：used_kg 加结转已核销必须等于该船该年度全部核销明细合计。
         boolean ledgerConsistent = quotaRepo.findByVesselYear(trip.vesselCode(), year).stream()
-                .allMatch(q -> q.usedKg().compareTo(
-                        quotaRepo.sumSettled(trip.vesselCode(), q.speciesCode(), year)) == 0);
+                .allMatch(q -> q.usedKg()
+                        .add(carryoverRepo.sumUsedForYear(trip.vesselCode(), q.speciesCode(), year))
+                        .compareTo(quotaRepo.sumSettled(trip.vesselCode(), q.speciesCode(), year)) == 0);
         boolean hasDeduction = !deducted.isEmpty();
         // 不得出现余额已扣而航次未结案。
         boolean settledAndClosed = !hasDeduction || trip.status() == TripStatus.CLOSED;
@@ -632,7 +665,9 @@ public class FisheryService {
                 : quotaRepo.findByVesselYear(vesselCode, year);
         return rows.stream()
                 .map(q -> new QuotaView(q.vesselCode(), q.speciesCode(), q.year(), q.quotaKg(),
-                        q.usedKg(), q.quotaKg().subtract(q.usedKg())))
+                        q.usedKg(), q.quotaKg().subtract(q.usedKg()),
+                        carryoverRepo.sumAmountForYear(q.vesselCode(), q.speciesCode(), q.year()),
+                        carryoverRepo.sumUsedForYear(q.vesselCode(), q.speciesCode(), q.year())))
                 .toList();
     }
 

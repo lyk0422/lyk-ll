@@ -49,6 +49,42 @@ public abstract class AbstractFisheryTest {
         return registerVessel(vessel, java.util.Map.of(species, new BigDecimal(quota)));
     }
 
+    /** 为已注册渔船追加指定年度配额（千克）。 */
+    protected void addQuota(String vessel, String species, int year, String quotaKg) {
+        jdbc.update("INSERT INTO quota(vessel_code, species_code, quota_year, quota_kg, used_kg, version) "
+                + "VALUES (?, ?, ?, ?, 0, 0)", vessel, species, year, new BigDecimal(quotaKg));
+    }
+
+    /** 直接设置某年度配额已核销量（白盒构造年度末场景）。 */
+    protected void setUsedQuota(String vessel, String species, int year, String usedKg) {
+        jdbc.update("UPDATE quota SET used_kg = ? "
+                        + "WHERE vessel_code = ? AND species_code = ? AND quota_year = ?",
+                new BigDecimal(usedKg), vessel, species, year);
+    }
+
+    /** 直接设置某年度配额产地预警标志（白盒构造预警场景）。 */
+    protected void setQuotaAlert(String vessel, String species, int year, boolean alert) {
+        jdbc.update("UPDATE quota SET alert_triggered = ? "
+                        + "WHERE vessel_code = ? AND species_code = ? AND quota_year = ?",
+                alert, vessel, species, year);
+    }
+
+    /** 查询某年度配额核定量的台账值。 */
+    protected BigDecimal quotaKg(String vessel, String species, int year) {
+        BigDecimal quota = jdbc.queryForObject(
+                "SELECT quota_kg FROM quota WHERE vessel_code = ? AND species_code = ? AND quota_year = ?",
+                BigDecimal.class, vessel, species, year);
+        return quota == null ? null : quota.stripTrailingZeros();
+    }
+
+    /** 查询某年度配额已核销量的台账值。 */
+    protected BigDecimal usedQuota(String vessel, String species, int year) {
+        BigDecimal used = jdbc.queryForObject(
+                "SELECT used_kg FROM quota WHERE vessel_code = ? AND species_code = ? AND quota_year = ?",
+                BigDecimal.class, vessel, species, year);
+        return used == null ? null : used.stripTrailingZeros();
+    }
+
     protected DepartureRequest departureRequest(String tripCode, String vessel, Instant departAt,
                                                 String species, String kg) {
         return new DepartureRequest(newRequestId(), tripCode, vessel, departAt,
@@ -129,6 +165,10 @@ public abstract class AbstractFisheryTest {
             String in = String.join("','", registeredVessels);
             String vesselExpr = "'" + in + "'";
             String tripExpr = "SELECT trip_code FROM trip WHERE vessel_code IN (" + vesselExpr + ")";
+            jdbc.update("DELETE FROM transfer_pending_guard WHERE vessel_code IN (" + vesselExpr + ")");
+            jdbc.update("DELETE FROM quota_transfer WHERE from_vessel IN (" + vesselExpr + ") "
+                    + "OR to_vessel IN (" + vesselExpr + ")");
+            jdbc.update("DELETE FROM quota_carryover WHERE vessel_code IN (" + vesselExpr + ")");
             jdbc.update("DELETE FROM settlement WHERE vessel_code IN (" + vesselExpr + ")");
             jdbc.update("DELETE FROM review_case WHERE vessel_code IN (" + vesselExpr + ")");
             jdbc.update("DELETE FROM late_log_event WHERE vessel_code IN (" + vesselExpr + ")");

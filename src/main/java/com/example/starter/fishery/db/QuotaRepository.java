@@ -17,7 +17,7 @@ import java.util.Optional;
 public class QuotaRepository {
 
     private static final String QUOTA_COLUMNS =
-            "vessel_code, species_code, quota_year, quota_kg, used_kg, version";
+            "vessel_code, species_code, quota_year, quota_kg, used_kg, alert_triggered, version";
 
     private static final RowMapper<QuotaRow> QUOTA_MAPPER = (rs, n) -> new QuotaRow(
             rs.getString("vessel_code"),
@@ -25,6 +25,7 @@ public class QuotaRepository {
             rs.getInt("quota_year"),
             rs.getBigDecimal("quota_kg"),
             rs.getBigDecimal("used_kg"),
+            rs.getBoolean("alert_triggered"),
             rs.getInt("version"));
 
     private static final RowMapper<SettlementRow> SETTLEMENT_MAPPER = (rs, n) -> new SettlementRow(
@@ -120,5 +121,30 @@ public class QuotaRepository {
                         + "WHERE vessel_code = ? AND species_code = ? AND quota_year = ?",
                 BigDecimal.class, vesselCode, speciesCode, year);
         return sum == null ? BigDecimal.ZERO : sum;
+    }
+
+    /** 新增年度配额（次年额度初始化用，允许核定量为 0）。 */
+    public void insertIfAbsent(String vesselCode, String speciesCode, int year, BigDecimal quotaKg) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(1) FROM quota WHERE vessel_code = ? AND species_code = ? AND quota_year = ?",
+                Integer.class, vesselCode, speciesCode, year);
+        if (count == null || count == 0) {
+            insert(vesselCode, speciesCode, year, quotaKg);
+        }
+    }
+
+    /**
+     * 在已持有的配额行锁上调整核定配额（调剂量，正数增、负数减）；
+     * 调用方须先校验调出方扣减后 quota_kg 仍不小于 used_kg。
+     */
+    public void adjustQuotaLocked(QuotaRow quota, BigDecimal deltaKg) {
+        int updated = jdbc.update(
+                "UPDATE quota SET quota_kg = quota_kg + ?, version = version + 1 "
+                        + "WHERE vessel_code = ? AND species_code = ? AND quota_year = ? AND version = ?",
+                deltaKg, quota.vesselCode(), quota.speciesCode(), quota.year(), quota.version());
+        if (updated != 1) {
+            throw new IllegalStateException("配额台账乐观锁冲突: " + quota.vesselCode()
+                    + "/" + quota.speciesCode() + "/" + quota.year());
+        }
     }
 }
