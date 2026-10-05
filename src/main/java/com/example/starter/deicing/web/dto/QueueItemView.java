@@ -23,6 +23,7 @@ public record QueueItemView(
         Instant scheduledStart,
         Instant scheduledEnd,
         Instant actualStart,
+        Instant actualEnd,
         Integer hotMinutes,
         String hotRiskReason,
         Instant earliestReassignTime,

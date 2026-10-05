@@ -17,6 +17,9 @@ public enum RequestStatus {
     /** 前序延误导致无法按计划满足起飞/HOT 约束，等待航班重排起飞时刻。 */
     HOT_RISK,
 
+    /** 两步法受理时库存不足，转入人工确认队列（未预占库存，不参与出队）。 */
+    MANUAL_REVIEW,
+
     /** 终态：已起飞。 */
     TAKEN_OFF,
 

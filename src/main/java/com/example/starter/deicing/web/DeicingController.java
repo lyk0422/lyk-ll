@@ -4,7 +4,9 @@ import com.example.starter.deicing.service.DeicingService;
 import com.example.starter.deicing.db.TimetableRepository;
 import com.example.starter.deicing.web.dto.ApplicationRequest;
 import com.example.starter.deicing.web.dto.CancelRequest;
+import com.example.starter.deicing.web.dto.CompleteJobRequest;
 import com.example.starter.deicing.web.dto.DequeueRequest;
+import com.example.starter.deicing.web.dto.ManualConfirmRequest;
 import com.example.starter.deicing.web.dto.MutationResponse;
 import com.example.starter.deicing.web.dto.QueueItemView;
 import com.example.starter.deicing.web.dto.RescheduleRequest;
@@ -59,6 +61,18 @@ public class DeicingController {
     @PostMapping("/jobs/start")
     public MutationResponse startJob(@Valid @RequestBody StartJobRequest request) {
         return deicingService.startJob(request.requestId());
+    }
+
+    /** 作业完成登记：一步法按实际作业时长结算扣减库存（同事务）。 */
+    @PostMapping("/jobs/complete")
+    public MutationResponse completeJob(@Valid @RequestBody CompleteJobRequest request) {
+        return deicingService.completeJob(request.requestId(), request.actualEndTime());
+    }
+
+    /** 人工确认：库存补足后将待确认的两步法申请转入排队。 */
+    @PostMapping("/manual-confirmations")
+    public MutationResponse confirmManual(@Valid @RequestBody ManualConfirmRequest request) {
+        return deicingService.confirmManual(request.requestId());
     }
 
     /** 实际起飞回报，判定两步法 HOT 是否有效。 */

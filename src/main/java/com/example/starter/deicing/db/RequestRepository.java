@@ -20,7 +20,7 @@ public class RequestRepository {
     private static final String COLUMNS = """
             id, request_id, flight_number, stand_code, deicing_type, required_bays,
             duration_minutes, target_takeoff_time, deadline, status, scheduled_start,
-            scheduled_end, actual_start, hot_minutes, hot_risk_reason,
+            scheduled_end, actual_start, actual_end, hot_minutes, hot_risk_reason,
             earliest_reassign_time, actual_takeoff_time, fingerprint, created_at, updated_at
             """;
 
@@ -48,6 +48,7 @@ public class RequestRepository {
         po.setScheduledStart(RowMappers.instant(rs, "scheduled_start"));
         po.setScheduledEnd(RowMappers.instant(rs, "scheduled_end"));
         po.setActualStart(RowMappers.instant(rs, "actual_start"));
+        po.setActualEnd(RowMappers.instant(rs, "actual_end"));
         int hot = rs.getInt("hot_minutes");
         po.setHotMinutes(rs.wasNull() ? null : hot);
         po.setHotRiskReason(rs.getString("hot_risk_reason"));
@@ -88,13 +89,14 @@ public class RequestRepository {
     }
 
     /**
-     * 统计航班未终结（排队/已排定/作业中/HOT 风险）的记录数。
+     * 统计航班未终结（排队/已排定/作业中/HOT 风险/人工确认）的记录数。
      */
     public int countActiveByFlight(String flightNumber) {
         Integer count = jdbcTemplate.queryForObject("""
                         SELECT COUNT(*) FROM deicing_request
                         WHERE flight_number = ?
-                          AND status IN ('QUEUED', 'SCHEDULED', 'IN_PROGRESS', 'HOT_RISK')
+                          AND status IN ('QUEUED', 'SCHEDULED', 'IN_PROGRESS', 'HOT_RISK',
+                                         'MANUAL_REVIEW')
                         """,
                 Integer.class, flightNumber);
         return count == null ? 0 : count;
@@ -122,6 +124,17 @@ public class RequestRepository {
                         WHERE request_id = ?
                         """,
                 status.name(), Timestamp.from(actualStart), Timestamp.from(updatedAt), requestId);
+    }
+
+    /**
+     * 作业完成登记：写入实际完成时刻；库存结算在同一事务内由调用方完成。
+     */
+    public void updateActualEnd(String requestId, Instant actualEnd, Instant updatedAt) {
+        jdbcTemplate.update("""
+                        UPDATE deicing_request SET actual_end = ?, updated_at = ?
+                        WHERE request_id = ?
+                        """,
+                Timestamp.from(actualEnd), Timestamp.from(updatedAt), requestId);
     }
 
     public void updateTakeoffResult(String requestId, RequestStatus status, Instant actualTakeoffTime,

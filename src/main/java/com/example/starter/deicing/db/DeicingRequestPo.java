@@ -32,6 +32,8 @@ public class DeicingRequestPo {
     private Instant scheduledEnd;
     /** 实际作业开始时刻（UTC），空表示尚未开始。 */
     private Instant actualStart;
+    /** 实际作业完成时刻（UTC），空表示尚未登记完成；一步法据此结算库存。 */
+    private Instant actualEnd;
     /** 两步法防冰液保持时间（分钟），一步法为空。 */
     private Integer hotMinutes;
     /** HOT 风险成因，{@link com.example.starter.deicing.service.HotRiskReason} 名称，空表示无风险。 */
@@ -155,6 +157,14 @@ public class DeicingRequestPo {
 
     public void setActualStart(Instant actualStart) {
         this.actualStart = actualStart;
+    }
+
+    public Instant getActualEnd() {
+        return actualEnd;
+    }
+
+    public void setActualEnd(Instant actualEnd) {
+        this.actualEnd = actualEnd;
     }
 
     public Integer getHotMinutes() {

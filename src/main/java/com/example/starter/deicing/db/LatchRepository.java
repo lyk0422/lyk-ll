@@ -34,4 +34,12 @@ public class LatchRepository {
         jdbcTemplate.queryForObject("SELECT id FROM schedule_latch WHERE id = 1 FOR UPDATE",
                 Integer.class);
     }
+
+    /**
+     * 锁定全局库存闩锁，串行化预占、结算与借用。必须在事务内调用。
+     */
+    public void lockInventory() {
+        jdbcTemplate.queryForObject("SELECT id FROM inventory_latch WHERE id = 1 FOR UPDATE",
+                Integer.class);
+    }
 }

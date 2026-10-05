@@ -28,6 +28,7 @@ public class ViewMapper {
                 po.getScheduledStart(),
                 po.getScheduledEnd(),
                 po.getActualStart(),
+                po.getActualEnd(),
                 po.getHotMinutes(),
                 po.getHotRiskReason(),
                 po.getEarliestReassignTime(),

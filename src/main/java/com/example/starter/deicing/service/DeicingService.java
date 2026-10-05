@@ -44,6 +44,7 @@ public class DeicingService {
     private final SchedulingCalculator calculator;
     private final ViewMapper viewMapper;
     private final TimeSource timeSource;
+    private final InventoryService inventoryService;
 
     public DeicingService(RequestRepository requestRepository,
                           AllocationRepository allocationRepository,
@@ -52,7 +53,8 @@ public class DeicingService {
                           LatchRepository latchRepository,
                           SchedulingCalculator calculator,
                           ViewMapper viewMapper,
-                          TimeSource timeSource) {
+                          TimeSource timeSource,
+                          InventoryService inventoryService) {
         this.requestRepository = requestRepository;
         this.allocationRepository = allocationRepository;
         this.bayRepository = bayRepository;
@@ -61,6 +63,7 @@ public class DeicingService {
         this.calculator = calculator;
         this.viewMapper = viewMapper;
         this.timeSource = timeSource;
+        this.inventoryService = inventoryService;
     }
 
     /**
@@ -115,7 +118,14 @@ public class DeicingService {
             po.setDurationMinutes(request.durationMinutes());
             po.setTargetTakeoffTime(request.targetTakeoffTime());
             po.setDeadline(request.targetTakeoffTime().minusSeconds(request.durationMinutes() * 60L));
-            po.setStatus(RequestStatus.QUEUED);
+            // 两步法：受理时按车位占用时长与配比预占库存，预占与受理在同一事务内；
+            // 库存不足转人工确认队列（MANUAL_REVIEW），不静默降级为普通排队
+            boolean reserved = true;
+            if (request.type() == DeicingType.TWO_STEP) {
+                reserved = inventoryService.tryReserve(request.requestId(),
+                        request.requiredBays(), request.durationMinutes());
+            }
+            po.setStatus(reserved ? RequestStatus.QUEUED : RequestStatus.MANUAL_REVIEW);
             po.setHotMinutes(hotMinutes);
             po.setFingerprint(fingerprint);
             po.setCreatedAt(now);
@@ -140,6 +150,10 @@ public class DeicingService {
     @Transactional
     public MutationResponse dequeue(String requestId) {
         DeicingRequestPo po = mustFind(requestId);
+        if (po.getStatus() == RequestStatus.MANUAL_REVIEW) {
+            throw ApiException.conflict("申请 " + requestId
+                    + " 库存不足待人工确认，确认前不得出队");
+        }
         if (po.getStatus() != RequestStatus.QUEUED && po.getStatus() != RequestStatus.HOT_RISK) {
             return mutationReplay(po);
         }
@@ -250,10 +264,65 @@ public class DeicingService {
                     .map(DeicingAllocationPo::getBayCode).toList();
             return MutationResponse.of(viewMapper.toView(stored), false, bays);
         }
-        if (po.getStatus() == RequestStatus.QUEUED || po.getStatus() == RequestStatus.HOT_RISK) {
+        if (po.getStatus() == RequestStatus.QUEUED || po.getStatus() == RequestStatus.HOT_RISK
+                || po.getStatus() == RequestStatus.MANUAL_REVIEW) {
             throw ApiException.conflict("申请 " + requestId + " 尚未完成出队排定，不能开始作业");
         }
         return mutationReplay(po);
+    }
+
+    /**
+     * 作业完成登记：一步法按实际作业时长结算扣减库存，两步法将预占转消耗，
+     * 结算与作业完成记录在同一事务内完成；重复登记幂等返回首次结果。
+     */
+    @Transactional
+    public MutationResponse completeJob(String requestId, Instant actualEndTime) {
+        DeicingRequestPo po = mustFind(requestId);
+        if (po.getActualEnd() != null) {
+            return mutationReplay(po);
+        }
+        if (po.getStatus() == RequestStatus.CANCELLED) {
+            throw ApiException.conflict("申请 " + requestId + " 已取消，不能登记作业完成");
+        }
+        if (po.getActualStart() == null) {
+            throw ApiException.conflict("申请 " + requestId + " 作业尚未开始，不能登记完成");
+        }
+        if (actualEndTime.isBefore(po.getActualStart())) {
+            throw ApiException.badRequest("作业完成时刻早于实际开始时刻");
+        }
+        long actualMinutes = Math.max(1L,
+                (Duration.between(po.getActualStart(), actualEndTime).toSeconds() + 59) / 60);
+        if (po.getType() == DeicingType.ONE_STEP) {
+            inventoryService.settleOneStep(requestId, po.getRequiredBays(), actualMinutes);
+        } else {
+            inventoryService.consumeReservations(requestId);
+        }
+        requestRepository.updateActualEnd(requestId, actualEndTime, timeSource.now());
+        DeicingRequestPo stored = mustFind(requestId);
+        List<String> bays = allocationRepository.findByRequestId(requestId).stream()
+                .map(DeicingAllocationPo::getBayCode).toList();
+        return MutationResponse.of(viewMapper.toView(stored), false, bays);
+    }
+
+    /**
+     * 人工确认：库存补足后将 MANUAL_REVIEW 的两步法申请重新预占并转入排队；
+     * 库存仍不足时 409 并保持人工确认队列，不静默降级。
+     */
+    @Transactional
+    public MutationResponse confirmManual(String requestId) {
+        DeicingRequestPo po = mustFind(requestId);
+        if (po.getStatus() != RequestStatus.MANUAL_REVIEW) {
+            return mutationReplay(po);
+        }
+        boolean reserved = inventoryService.tryReserve(requestId, po.getRequiredBays(),
+                po.getDurationMinutes());
+        if (!reserved) {
+            throw ApiException.conflict("库存仍不足，保持人工确认队列："
+                    + inventoryService.insufficientHint(po.getRequiredBays(),
+                    po.getDurationMinutes()));
+        }
+        requestRepository.updateStatus(requestId, RequestStatus.QUEUED, timeSource.now());
+        return mutationReplay(mustFind(requestId));
     }
 
     /**
@@ -276,9 +345,10 @@ public class DeicingService {
                     viewMapper.hotDeadline(po));
         }
         if (po.getStatus() == RequestStatus.QUEUED || po.getStatus() == RequestStatus.HOT_RISK
+                || po.getStatus() == RequestStatus.MANUAL_REVIEW
                 || po.getStatus() == RequestStatus.SCHEDULED) {
             throw ApiException.conflict("申请 " + requestId
-                    + " 除冰作业尚未开始/处于 HOT 风险，不得放行起飞");
+                    + " 除冰作业尚未开始/处于 HOT 风险/待人工确认，不得放行起飞");
         }
         if (po.getScheduledEnd() == null || actualTakeoffTime.isBefore(po.getScheduledEnd())) {
             throw ApiException.badRequest("实际起飞时刻早于除冰完成时刻");
@@ -297,6 +367,10 @@ public class DeicingService {
         }
 
         Instant now = timeSource.now();
+        // 两步法：起飞判定进入终态时，若预占尚未随作业完成转消耗，在此一并结转
+        if (po.getType() == DeicingType.TWO_STEP) {
+            inventoryService.consumeReservations(requestId);
+        }
         requestRepository.updateTakeoffResult(requestId, nextStatus, actualTakeoffTime, now);
         allocationRepository.updateStatusByRequest(requestId, nextStatus.name());
         DeicingRequestPo stored = mustFind(requestId);
@@ -319,6 +393,12 @@ public class DeicingService {
             return mutationReplay(po);
         }
         Instant now = timeSource.now();
+        // 作业未开始：释放预占；作业已开始：除冰液已投入使用，预占转消耗
+        if (po.getActualStart() == null) {
+            inventoryService.releaseReservations(requestId);
+        } else {
+            inventoryService.consumeReservations(requestId);
+        }
         requestRepository.updateStatus(requestId, RequestStatus.CANCELLED, now);
         allocationRepository.deleteByRequest(requestId);
         return mutationReplay(mustFind(requestId));
@@ -472,7 +552,7 @@ public class DeicingService {
 
     private static int statusGroup(RequestStatus status) {
         return switch (status) {
-            case QUEUED, SCHEDULED, IN_PROGRESS, HOT_RISK -> 0;
+            case QUEUED, SCHEDULED, IN_PROGRESS, HOT_RISK, MANUAL_REVIEW -> 0;
             case TAKEN_OFF, HOT_EXPIRED, CANCELLED -> 1;
         };
     }

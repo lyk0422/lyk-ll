@@ -46,6 +46,19 @@ class DeicingConcurrencyH2Test {
     void cleanUp() {
         jdbcTemplate.update("DELETE FROM deicing_allocation");
         jdbcTemplate.update("DELETE FROM deicing_request");
+        jdbcTemplate.update("DELETE FROM inventory_consumption");
+        jdbcTemplate.update("DELETE FROM inventory_reservation");
+        jdbcTemplate.update("DELETE FROM tank_borrow_open");
+        jdbcTemplate.update("DELETE FROM borrow_order");
+        jdbcTemplate.update("DELETE FROM fluid_batch");
+        jdbcTemplate.update("""
+                INSERT INTO fluid_batch (batch_no, fluid_code, quantity_in, quantity_available, expiry_time)
+                VALUES ('BATCH-T1-SEED', 'TYPE_I', 100000, 100000, '2027-06-30 00:00:00')
+                """);
+        jdbcTemplate.update("""
+                INSERT INTO fluid_batch (batch_no, fluid_code, quantity_in, quantity_available, expiry_time)
+                VALUES ('BATCH-T4-SEED', 'TYPE_IV', 100000, 100000, '2027-06-30 00:00:00')
+                """);
         timeSource.pin(Clock.fixed(T0, ZoneOffset.UTC));
     }
 
