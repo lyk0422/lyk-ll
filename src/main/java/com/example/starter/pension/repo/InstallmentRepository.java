@@ -42,4 +42,12 @@ public interface InstallmentRepository {
      * @return 1 表示本次完成出款；0 表示期次已出款
      */
     int markPaidIfNotYet(long installmentId, int attempts, OffsetDateTime paidAt);
+
+    /**
+     * 因继承申领受理而终止计划全部未出款期次（PENDING/FAILED → TERMINATED）；
+     * 已出款期次不回溯。
+     *
+     * @return 被终止的期次数量
+     */
+    int terminateUnpaidByPlan(long planId);
 }

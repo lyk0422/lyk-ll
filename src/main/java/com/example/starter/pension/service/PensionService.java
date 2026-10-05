@@ -1,6 +1,9 @@
 package com.example.starter.pension.service;
 
 import com.example.starter.pension.api.ContributionRequest;
+import com.example.starter.pension.api.InheritanceApplyRequest;
+import com.example.starter.pension.api.InheritanceCompleteResponse;
+import com.example.starter.pension.api.InheritanceResponse;
 import com.example.starter.pension.api.MemberUpsertRequest;
 import com.example.starter.pension.api.PaymentInstructionRequest;
 import com.example.starter.pension.api.PaymentResultResponse;
@@ -45,4 +48,21 @@ public interface PensionService {
      * 对已结清计划重复结清返回幂等成功。
      */
     SettleResponse settle(String planNo);
+
+    /**
+     * 受理继承申领：继承人自成员身故日起 180 个自然日（UTC 日界，含第 180 日）内可申请。
+     * 继承金额=账户余额+未支付分期本金，申报额与两项合计勾稽不一致即拒绝；
+     * 受理即在同事务内终止进行中计划的剩余分期（已支付部分不回溯），并与支付计划互斥。
+     * 以 requestId 幂等：同键同参返回首次结果，同键异参返回 409。
+     */
+    InheritanceResponse applyInheritance(InheritanceApplyRequest request);
+
+    /** 查询继承申领（含勾稽明细，可回源表复算）。 */
+    InheritanceResponse getInheritance(String claimNo);
+
+    /**
+     * 完成继承支付（终态）：出款、继承台账入账与状态变更同一事务；
+     * 重复完成返回幂等成功。
+     */
+    InheritanceCompleteResponse completeInheritance(String claimNo);
 }

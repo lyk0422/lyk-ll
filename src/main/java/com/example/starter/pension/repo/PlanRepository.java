@@ -32,6 +32,16 @@ public interface PlanRepository {
     /** 查询占用某成员进行中槽位的计划数量（0 或 1，唯一索引兜底）。 */
     long countActiveByMember(long memberId);
 
+    /** 查询某成员当前进行中的计划（占用成员槽位的唯一计划）；无为空。 */
+    Optional<PlanRow> findActiveByMember(long memberId);
+
+    /**
+     * 因继承申领受理而终止计划（终态）：置 TERMINATED、释放成员占用、记录终止时间。
+     *
+     * @return 受影响行数；0 表示计划已处于终态
+     */
+    int markTerminated(long planId, OffsetDateTime terminatedAt);
+
     /** 查询某成员的全部历史计划数量（含已结清），用于区分首次申请与补发。 */
     long countByMember(long memberId);
 

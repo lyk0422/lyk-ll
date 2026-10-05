@@ -10,5 +10,7 @@ public enum MemberStatus {
     /** 离职。 */
     RESIGNED,
     /** 退休。 */
-    RETIRED
+    RETIRED,
+    /** 身故。 */
+    DECEASED
 }

@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS payout_plan (
     original_plan_no         VARCHAR(48),
     supplementary            BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at               TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    settled_at               TIMESTAMP
+    settled_at               TIMESTAMP,
+    terminated_at            TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_plan_no ON payout_plan (plan_no);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_plan_request_id ON payout_plan (request_id);
@@ -71,12 +72,13 @@ COMMENT ON COLUMN payout_plan.enterprise_amount_cents IS '快照冻结的企业�
 COMMENT ON COLUMN payout_plan.vested_enterprise_cents IS '按司龄档位归属的企业缴费金额，单位：分，不足 1 分舍去';
 COMMENT ON COLUMN payout_plan.vested_total_cents IS '归属权益快照总额=个人+归属企业，单位：分，计划分期总额必须等于该值';
 COMMENT ON COLUMN payout_plan.unvested_return_cents IS '结算时划回企业账户的未归属企业缴费金额，单位：分';
-COMMENT ON COLUMN payout_plan.status IS '计划状态：ACCEPTED 已受理 / IN_PROGRESS 支付中 / SETTLED 已结清（终态）';
+COMMENT ON COLUMN payout_plan.status IS '计划状态：ACCEPTED 已受理 / IN_PROGRESS 支付中 / SETTLED 已结清（终态）/ TERMINATED 被继承申领终止（终态）';
 COMMENT ON COLUMN payout_plan.active_member_id IS '进行中计划占用的成员 ID；结清后置 NULL，配合唯一索引保证同一成员并发唯一受理';
 COMMENT ON COLUMN payout_plan.enterprise_returned IS '未归属企业缴费是否已划回企业账户；TRUE 后不得重复划转';
 COMMENT ON COLUMN payout_plan.original_plan_no IS '补发计划引用的原计划号；NULL 表示原始支付申请';
 COMMENT ON COLUMN payout_plan.supplementary IS '是否为结清后补缴历史缴费触发的补发计划';
 COMMENT ON COLUMN payout_plan.settled_at IS '计划结清时间（UTC）；未结清为 NULL';
+COMMENT ON COLUMN payout_plan.terminated_at IS '计划被继承申领终止的时间（UTC）；未终止为 NULL，终止后剩余期次不再出款';
 
 CREATE TABLE IF NOT EXISTS payout_installment (
     id          BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -92,7 +94,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_installment_seq ON payout_installment (plan
 COMMENT ON COLUMN payout_installment.seq_no IS '期次序号，从 1 开始';
 COMMENT ON COLUMN payout_installment.due_date IS '该期到期日，按月初 UTC 日历日';
 COMMENT ON COLUMN payout_installment.amount_cents IS '该期应付金额，单位：分，尾差归入最后一期';
-COMMENT ON COLUMN payout_installment.status IS '期次状态：PENDING 待付 / PAID 已出款 / FAILED 出款失败可重试';
+COMMENT ON COLUMN payout_installment.status IS '期次状态：PENDING 待付 / PAID 已出款 / FAILED 出款失败可重试 / TERMINATED 被继承申领终止（终态，不再出款）';
 COMMENT ON COLUMN payout_installment.attempts IS '出款尝试次数，失败重试累加';
 COMMENT ON COLUMN payout_installment.paid_at IS '实际出款时间（UTC），未出款为 NULL';
 
@@ -127,3 +129,78 @@ COMMENT ON COLUMN account_ledger.installment_id IS '成员出款对应期次 ID�
 COMMENT ON COLUMN account_ledger.account IS '记账账户：MEMBER 成员收款账户 / ENTERPRISE 企业账户';
 COMMENT ON COLUMN account_ledger.movement_type IS '账务类型：MEMBER_PAYOUT 个人支付出款 / ENTERPRISE_RETURN 未归属企业缴费划回';
 COMMENT ON COLUMN account_ledger.amount_cents IS '记账金额，单位：分';
+
+CREATE TABLE IF NOT EXISTS inheritance_claim (
+    id                         BIGINT AUTO_INCREMENT PRIMARY KEY,
+    claim_no                   VARCHAR(48)  NOT NULL,
+    request_id                 VARCHAR(64)  NOT NULL,
+    member_id                  BIGINT       NOT NULL,
+    heir_name                  VARCHAR(128) NOT NULL,
+    death_date                 DATE         NOT NULL,
+    apply_date                 DATE         NOT NULL,
+    fingerprint                VARCHAR(64)  NOT NULL,
+    account_balance_cents      BIGINT       NOT NULL,
+    unpaid_installment_cents   BIGINT       NOT NULL,
+    inheritance_amount_cents   BIGINT       NOT NULL,
+    terminated_plan_id         BIGINT,
+    status                     VARCHAR(16)  NOT NULL DEFAULT 'ACCEPTED',
+    active_member_id           BIGINT,
+    created_at                 TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at               TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_claim_no ON inheritance_claim (claim_no);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_claim_request_id ON inheritance_claim (request_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_claim_active_member ON inheritance_claim (active_member_id);
+COMMENT ON COLUMN inheritance_claim.claim_no IS '继承申领号，全局唯一';
+COMMENT ON COLUMN inheritance_claim.request_id IS '继承申领幂等键 requestId，全局唯一';
+COMMENT ON COLUMN inheritance_claim.heir_name IS '继承人姓名（合成数据）';
+COMMENT ON COLUMN inheritance_claim.death_date IS '成员身故日，按 UTC 日历日；申请窗口自该日起 180 个自然日（含第 180 日）';
+COMMENT ON COLUMN inheritance_claim.apply_date IS '继承申请日，按 UTC 日历日，用于 180 日窗口判定';
+COMMENT ON COLUMN inheritance_claim.fingerprint IS '申请指纹：SHA-256(requestId 与全部业务字段)，用于同键异参冲突判定';
+COMMENT ON COLUMN inheritance_claim.account_balance_cents IS '受理时账户余额快照=成员未冻结缴费总额，单位：分';
+COMMENT ON COLUMN inheritance_claim.unpaid_installment_cents IS '受理时未支付分期本金之和（PENDING/FAILED 期次），单位：分';
+COMMENT ON COLUMN inheritance_claim.inheritance_amount_cents IS '继承支付额=账户余额+未支付分期本金，单位：分，须与两项合计勾稽一致';
+COMMENT ON COLUMN inheritance_claim.terminated_plan_id IS '因受理继承而被终止的进行中计划 ID；无进行中计划为 NULL';
+COMMENT ON COLUMN inheritance_claim.status IS '申领状态：ACCEPTED 已受理 / COMPLETED 继承支付完成（终态）';
+COMMENT ON COLUMN inheritance_claim.active_member_id IS '申领占用的成员 ID，全程不释放，配合唯一索引保证同一成员并发唯一受理且与支付计划互斥';
+COMMENT ON COLUMN inheritance_claim.completed_at IS '继承支付完成时间（UTC）；未完成为 NULL';
+
+CREATE TABLE IF NOT EXISTS inheritance_recon (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    claim_id     BIGINT      NOT NULL,
+    component    VARCHAR(24) NOT NULL,
+    source_type  VARCHAR(24) NOT NULL,
+    source_id    BIGINT      NOT NULL,
+    amount_cents BIGINT      NOT NULL,
+    created_at   TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_recon_source ON inheritance_recon (component, source_type, source_id);
+COMMENT ON COLUMN inheritance_recon.component IS '勾稽组成：ACCOUNT_BALANCE 账户余额 / UNPAID_INSTALLMENT 未支付分期本金';
+COMMENT ON COLUMN inheritance_recon.source_type IS '来源类型：CONTRIBUTION 缴费 / INSTALLMENT 分期期次，可据此回源表复算';
+COMMENT ON COLUMN inheritance_recon.source_id IS '来源行主键：contribution.id 或 payout_installment.id';
+COMMENT ON COLUMN inheritance_recon.amount_cents IS '该来源计入继承金额的金额，单位：分';
+
+CREATE TABLE IF NOT EXISTS inheritance_ledger (
+    id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+    claim_id      BIGINT      NOT NULL,
+    movement_type VARCHAR(24) NOT NULL,
+    amount_cents  BIGINT      NOT NULL,
+    created_at    TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_inheritance_ledger_payout
+    ON inheritance_ledger (claim_id, movement_type);
+COMMENT ON COLUMN inheritance_ledger.movement_type IS '账务类型：INHERITANCE_PAYOUT 继承一次性支付出款；唯一索引保证每笔申领只出款一次';
+COMMENT ON COLUMN inheritance_ledger.amount_cents IS '记账金额，单位：分，须等于 inheritance_claim.inheritance_amount_cents';
+
+CREATE TABLE IF NOT EXISTS late_contribution_event (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    member_id       BIGINT      NOT NULL,
+    contribution_id BIGINT      NOT NULL,
+    claim_id        BIGINT      NOT NULL,
+    review_status   VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+    created_at      TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_late_event_contribution ON late_contribution_event (contribution_id);
+COMMENT ON COLUMN late_contribution_event.contribution_id IS '继承支付完成后迟到的缴费 ID，唯一索引保证同一缴费只记一次迟到事件';
+COMMENT ON COLUMN late_contribution_event.claim_id IS '该成员已完成的继承申领 ID';
+COMMENT ON COLUMN late_contribution_event.review_status IS '人工复核状态：PENDING 待复核 / RESOLVED 已处理';

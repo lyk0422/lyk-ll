@@ -32,6 +32,7 @@ import java.time.OffsetDateTime;
  * @param originalPlanNo          补发引用的原计划号；null 为原始申请
  * @param supplementary           是否补发计划
  * @param settledAt               结清时间（UTC）；未结清为 null
+ * @param terminatedAt            被继承申领终止的时间（UTC）；未终止为 null
  */
 public record PlanRow(
         long id,
@@ -55,5 +56,6 @@ public record PlanRow(
         boolean enterpriseReturned,
         String originalPlanNo,
         boolean supplementary,
-        OffsetDateTime settledAt) {
+        OffsetDateTime settledAt,
+        OffsetDateTime terminatedAt) {
 }

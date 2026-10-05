@@ -10,5 +10,7 @@ public enum PlanStatus {
     /** 支付中，至少存在未完成期次。 */
     IN_PROGRESS,
     /** 已结清（终态）：全部期次出款完成。 */
-    SETTLED
+    SETTLED,
+    /** 已终止（终态）：继承申领受理后剩余期次不再出款，已支付部分不回溯。 */
+    TERMINATED
 }

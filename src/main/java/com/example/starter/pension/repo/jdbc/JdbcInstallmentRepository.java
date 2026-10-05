@@ -111,4 +111,14 @@ public class JdbcInstallmentRepository implements InstallmentRepository {
     private static OffsetDateTime toOffsetDateTime(Timestamp timestamp) {
         return timestamp == null ? null : timestamp.toInstant().atOffset(ZoneOffset.UTC);
     }
+
+    @Override
+    public int terminateUnpaidByPlan(long planId) {
+        return jdbcClient.sql("""
+                        UPDATE payout_installment
+                           SET status = 'TERMINATED'
+                         WHERE plan_id = :planId AND status IN ('PENDING', 'FAILED')""")
+                .param("planId", planId)
+                .update();
+    }
 }

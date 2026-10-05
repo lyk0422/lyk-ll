@@ -1,6 +1,9 @@
 package com.example.starter.pension.web;
 
 import com.example.starter.pension.api.ContributionRequest;
+import com.example.starter.pension.api.InheritanceApplyRequest;
+import com.example.starter.pension.api.InheritanceCompleteResponse;
+import com.example.starter.pension.api.InheritanceResponse;
 import com.example.starter.pension.api.MemberUpsertRequest;
 import com.example.starter.pension.api.PaymentInstructionRequest;
 import com.example.starter.pension.api.PaymentResultResponse;
@@ -76,5 +79,24 @@ public class PensionController {
     @PostMapping("/plans/{planNo}/settle")
     public SettleResponse settle(@PathVariable String planNo) {
         return pensionService.settle(planNo);
+    }
+
+    /** 受理继承申领（身故日起 180 个自然日内，与进行中分期计划互斥）。 */
+    @PostMapping("/inheritances")
+    @ResponseStatus(HttpStatus.CREATED)
+    public InheritanceResponse applyInheritance(@Valid @RequestBody InheritanceApplyRequest request) {
+        return pensionService.applyInheritance(request);
+    }
+
+    /** 查询继承申领与勾稽明细。 */
+    @GetMapping("/inheritances/{claimNo}")
+    public InheritanceResponse getInheritance(@PathVariable String claimNo) {
+        return pensionService.getInheritance(claimNo);
+    }
+
+    /** 完成继承支付（终态，重复完成幂等成功）。 */
+    @PostMapping("/inheritances/{claimNo}/complete")
+    public InheritanceCompleteResponse completeInheritance(@PathVariable String claimNo) {
+        return pensionService.completeInheritance(claimNo);
     }
 }

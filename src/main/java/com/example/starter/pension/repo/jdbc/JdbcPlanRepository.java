@@ -26,7 +26,8 @@ public class JdbcPlanRepository implements PlanRepository {
             id, plan_no, request_id, member_id, reason, installment_type, fingerprint,
             request_date, hire_years, vested_ratio_bp, personal_amount_cents, enterprise_amount_cents,
             vested_enterprise_cents, vested_total_cents, unvested_return_cents, installments_count,
-            status, active_member_id, enterprise_returned, original_plan_no, supplementary, settled_at
+            status, active_member_id, enterprise_returned, original_plan_no, supplementary, settled_at,
+            terminated_at
             """;
 
     private static final RowMapper<PlanRow> ROW_MAPPER = (rs, rowNum) -> new PlanRow(
@@ -51,7 +52,8 @@ public class JdbcPlanRepository implements PlanRepository {
             rs.getBoolean("enterprise_returned"),
             rs.getString("original_plan_no"),
             rs.getBoolean("supplementary"),
-            toOffsetDateTime(rs.getTimestamp("settled_at")));
+            toOffsetDateTime(rs.getTimestamp("settled_at")),
+            toOffsetDateTime(rs.getTimestamp("terminated_at")));
 
     private final JdbcTemplate jdbcTemplate;
     private final JdbcClient jdbcClient;
@@ -150,6 +152,27 @@ public class JdbcPlanRepository implements PlanRepository {
                 .query(Long.class)
                 .single();
         return count == null ? 0L : count;
+    }
+
+    @Override
+    public Optional<PlanRow> findActiveByMember(long memberId) {
+        return jdbcClient.sql("SELECT " + COLUMNS
+                        + " FROM payout_plan WHERE active_member_id = :memberId")
+                .param("memberId", memberId)
+                .query(ROW_MAPPER)
+                .optional();
+    }
+
+    @Override
+    public int markTerminated(long planId, OffsetDateTime terminatedAt) {
+        return jdbcClient.sql("""
+                        UPDATE payout_plan
+                           SET status = 'TERMINATED', active_member_id = NULL,
+                               terminated_at = :terminatedAt
+                         WHERE id = :planId AND status IN ('ACCEPTED', 'IN_PROGRESS')""")
+                .param("terminatedAt", Timestamp.from(terminatedAt.toInstant()))
+                .param("planId", planId)
+                .update();
     }
 
     @Override

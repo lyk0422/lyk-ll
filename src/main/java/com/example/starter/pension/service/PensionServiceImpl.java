@@ -1,6 +1,9 @@
 package com.example.starter.pension.service;
 
 import com.example.starter.pension.api.ContributionRequest;
+import com.example.starter.pension.api.InheritanceApplyRequest;
+import com.example.starter.pension.api.InheritanceCompleteResponse;
+import com.example.starter.pension.api.InheritanceResponse;
 import com.example.starter.pension.api.MemberUpsertRequest;
 import com.example.starter.pension.api.PaymentInstructionRequest;
 import com.example.starter.pension.api.PaymentResultResponse;
@@ -9,31 +12,42 @@ import com.example.starter.pension.api.PlanResponse;
 import com.example.starter.pension.api.SettleResponse;
 import com.example.starter.pension.api.SupplementaryPayoutRequest;
 import com.example.starter.pension.bank.BankGateway;
+import com.example.starter.pension.domain.InheritanceStatus;
 import com.example.starter.pension.domain.InstallmentStatus;
 import com.example.starter.pension.domain.InstallmentType;
 import com.example.starter.pension.domain.MemberStatus;
 import com.example.starter.pension.domain.PlanStatus;
 import com.example.starter.pension.domain.PayoutReason;
 import com.example.starter.pension.po.ContributionRow;
+import com.example.starter.pension.po.InheritanceClaimRow;
+import com.example.starter.pension.po.InheritanceReconRow;
 import com.example.starter.pension.po.InstallmentRow;
 import com.example.starter.pension.po.InstructionRow;
 import com.example.starter.pension.po.MemberRow;
 import com.example.starter.pension.po.PlanRow;
 import com.example.starter.pension.repo.ContributionRepository;
+import com.example.starter.pension.repo.InheritanceClaimRepository;
+import com.example.starter.pension.repo.InheritanceLedgerRepository;
+import com.example.starter.pension.repo.InheritanceReconRepository;
 import com.example.starter.pension.repo.InstallmentRepository;
 import com.example.starter.pension.repo.InstallmentRepository.NewInstallment;
 import com.example.starter.pension.repo.InstructionRepository;
+import com.example.starter.pension.repo.LateContributionEventRepository;
 import com.example.starter.pension.repo.LedgerRepository;
 import com.example.starter.pension.repo.MemberRepository;
 import com.example.starter.pension.repo.PlanRepository;
 import com.example.starter.pension.support.TimeProvider;
 import com.example.starter.pension.web.ApiException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
@@ -52,12 +66,21 @@ import java.util.UUID;
 @Service
 public class PensionServiceImpl implements PensionService {
 
+    private static final Logger log = LoggerFactory.getLogger(PensionServiceImpl.class);
+
+    /** 继承申请窗口：自成员身故日起 180 个自然日（UTC 日界，含第 180 日）。 */
+    static final long INHERITANCE_WINDOW_DAYS = 180L;
+
     private final MemberRepository memberRepository;
     private final ContributionRepository contributionRepository;
     private final PlanRepository planRepository;
     private final InstallmentRepository installmentRepository;
     private final InstructionRepository instructionRepository;
     private final LedgerRepository ledgerRepository;
+    private final InheritanceClaimRepository inheritanceClaimRepository;
+    private final InheritanceReconRepository inheritanceReconRepository;
+    private final InheritanceLedgerRepository inheritanceLedgerRepository;
+    private final LateContributionEventRepository lateContributionEventRepository;
     private final BankGateway bankGateway;
     private final VestingCalculator vestingCalculator;
     private final InstallmentScheduler installmentScheduler;
@@ -70,6 +93,10 @@ public class PensionServiceImpl implements PensionService {
                               InstallmentRepository installmentRepository,
                               InstructionRepository instructionRepository,
                               LedgerRepository ledgerRepository,
+                              InheritanceClaimRepository inheritanceClaimRepository,
+                              InheritanceReconRepository inheritanceReconRepository,
+                              InheritanceLedgerRepository inheritanceLedgerRepository,
+                              LateContributionEventRepository lateContributionEventRepository,
                               BankGateway bankGateway,
                               VestingCalculator vestingCalculator,
                               InstallmentScheduler installmentScheduler,
@@ -81,6 +108,10 @@ public class PensionServiceImpl implements PensionService {
         this.installmentRepository = installmentRepository;
         this.instructionRepository = instructionRepository;
         this.ledgerRepository = ledgerRepository;
+        this.inheritanceClaimRepository = inheritanceClaimRepository;
+        this.inheritanceReconRepository = inheritanceReconRepository;
+        this.inheritanceLedgerRepository = inheritanceLedgerRepository;
+        this.lateContributionEventRepository = lateContributionEventRepository;
         this.bankGateway = bankGateway;
         this.vestingCalculator = vestingCalculator;
         this.installmentScheduler = installmentScheduler;
@@ -95,9 +126,22 @@ public class PensionServiceImpl implements PensionService {
 
     @Override
     public void addContribution(ContributionRequest request) {
+        transactionTemplate.executeWithoutResult(status -> doAddContribution(request));
+    }
+
+    /**
+     * 录入缴费；若成员的继承支付已完成（终态），缴费照常入账，但只额外登记
+     * 迟到缴费事件并提示人工复核，不再触发任何补发。
+     */
+    private void doAddContribution(ContributionRequest request) {
         MemberRow member = requireMember(request.memberNo());
-        contributionRepository.insert(member.id(), request.contributionType(), request.amountCents(),
-                request.contributionDate(), request.period());
+        long contributionId = contributionRepository.insert(member.id(), request.contributionType(),
+                request.amountCents(), request.contributionDate(), request.period());
+        inheritanceClaimRepository.findCompletedByMember(member.id()).ifPresent(claim -> {
+            lateContributionEventRepository.insert(member.id(), contributionId, claim.id());
+            log.warn("成员 {} 的继承申领 {} 已完成，缴费 {} 迟到入账：仅记录迟到事件，需人工复核",
+                    member.memberNo(), claim.claimNo(), contributionId);
+        });
     }
 
     @Override
@@ -195,6 +239,7 @@ public class PensionServiceImpl implements PensionService {
             throw new ApiException(HttpStatus.CONFLICT, "ACTIVE_PLAN_EXISTS",
                     "该成员已存在进行中的支付计划");
         }
+        rejectIfInheritanceExists(member);
         if (planRepository.countByMember(member.id()) > 0) {
             throw new ApiException(HttpStatus.CONFLICT, "MEMBER_ALREADY_HAS_PLAN",
                     "该成员已存在历史支付计划，结清后补缴须走补发流程并引用原计划号");
@@ -230,6 +275,7 @@ public class PensionServiceImpl implements PensionService {
             throw new ApiException(HttpStatus.CONFLICT, "ACTIVE_PLAN_EXISTS",
                     "该成员已存在进行中的支付计划");
         }
+        rejectIfInheritanceExists(member);
         List<ContributionRow> unfrozen = contributionRepository.findUnfrozen(member.id());
         if (unfrozen.isEmpty()) {
             throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "NO_SUPPLEMENTARY_CONTRIBUTIONS",
@@ -278,7 +324,7 @@ public class PensionServiceImpl implements PensionService {
         PlanRow plan = new PlanRow(0L, planNo, requestId, member.id(), reason, installmentType,
                 fingerprint, requestDate, hireYears, ratioBp, personal, enterprise,
                 vestedEnterprise, vestedTotal, unvested, count, PlanStatus.ACCEPTED,
-                member.id(), false, originalPlanNo, originalPlanNo != null, null);
+                member.id(), false, originalPlanNo, originalPlanNo != null, null, null);
         long planId = planRepository.insert(plan);
 
         List<Long> contributionIds = contributions.stream().map(ContributionRow::id).toList();
@@ -468,5 +514,205 @@ public class PensionServiceImpl implements PensionService {
 
     private static String newPlanNo() {
         return "PL-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16).toUpperCase(Locale.ROOT);
+    }
+
+    // ------------------------------------------------------------------
+    // 继承申领
+    // ------------------------------------------------------------------
+
+    @Override
+    public InheritanceResponse applyInheritance(InheritanceApplyRequest request) {
+        InheritanceClaimRow replay = inheritanceClaimRepository.findByRequestId(request.requestId())
+                .orElse(null);
+        if (replay != null) {
+            return inheritanceReplayOrConflict(replay, request);
+        }
+        try {
+            return transactionTemplate.execute(status -> doApplyInheritance(request));
+        } catch (DataIntegrityViolationException ex) {
+            InheritanceClaimRow winner = inheritanceClaimRepository.findByRequestId(request.requestId())
+                    .orElse(null);
+            if (winner == null) {
+                throw new ApiException(HttpStatus.CONFLICT, "INHERITANCE_CLAIM_EXISTS",
+                        "该成员已存在继承申领，多名继承人并发申请仅唯一受理");
+            }
+            return inheritanceReplayOrConflict(winner, request);
+        }
+    }
+
+    @Override
+    public InheritanceResponse getInheritance(String claimNo) {
+        InheritanceClaimRow claim = inheritanceClaimRepository.findByClaimNo(claimNo)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "INHERITANCE_NOT_FOUND",
+                        "继承申领不存在: " + claimNo));
+        return toInheritanceResponse(claim);
+    }
+
+    @Override
+    public InheritanceCompleteResponse completeInheritance(String claimNo) {
+        return transactionTemplate.execute(status -> {
+            InheritanceClaimRow claim = inheritanceClaimRepository.findByClaimNo(claimNo)
+                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "INHERITANCE_NOT_FOUND",
+                            "继承申领不存在: " + claimNo));
+            InheritanceClaimRow locked = inheritanceClaimRepository.lockById(claim.id()).orElseThrow();
+            if (locked.status() == InheritanceStatus.COMPLETED) {
+                return buildCompleteResponse(locked, true);
+            }
+            boolean success = bankGateway.payout(locked.claimNo(), 1,
+                    locked.inheritanceAmountCents(), false);
+            if (!success) {
+                throw new ApiException(HttpStatus.CONFLICT, "INHERITANCE_PAYOUT_FAILED",
+                        "托管行继承出款失败，可重试完成");
+            }
+            inheritanceLedgerRepository.insertInheritancePayout(locked.id(),
+                    locked.inheritanceAmountCents());
+            int completed = inheritanceClaimRepository.markCompleted(locked.id(), timeProvider.nowUtc());
+            if (completed == 0) {
+                InheritanceClaimRow refreshed = inheritanceClaimRepository.findByClaimNo(claimNo)
+                        .orElseThrow();
+                return buildCompleteResponse(refreshed, true);
+            }
+            InheritanceClaimRow refreshed = inheritanceClaimRepository.findByClaimNo(claimNo)
+                    .orElseThrow();
+            return buildCompleteResponse(refreshed, false);
+        });
+    }
+
+    /**
+     * 继承申领受理：成员行锁串行化；互斥判定（进行中计划终止、既存申领拒绝）、
+     * 勾稽校验、申领与勾稽明细写入均在同一事务内完成。
+     */
+    private InheritanceResponse doApplyInheritance(InheritanceApplyRequest request) {
+        MemberRow member = requireMember(request.memberNo());
+        memberRepository.lockById(member.id());
+        InheritanceClaimRow concurrent = inheritanceClaimRepository.findByRequestId(request.requestId())
+                .orElse(null);
+        if (concurrent != null) {
+            return inheritanceReplayOrConflict(concurrent, request);
+        }
+        if (inheritanceClaimRepository.countByMember(member.id()) > 0) {
+            throw new ApiException(HttpStatus.CONFLICT, "INHERITANCE_CLAIM_EXISTS",
+                    "该成员已存在继承申领，多名继承人就同一成员仅唯一受理");
+        }
+        long daysSinceDeath = ChronoUnit.DAYS.between(request.deathDate(), request.applyDate());
+        if (daysSinceDeath < 0) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "APPLY_BEFORE_DEATH",
+                    "继承申请日早于成员身故日，拒绝受理");
+        }
+        if (daysSinceDeath > INHERITANCE_WINDOW_DAYS) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "INHERITANCE_WINDOW_EXPIRED",
+                    "继承申请超出身故日起 180 个自然日（UTC 日界）窗口，逾期拒绝");
+        }
+
+        List<ContributionRow> unfrozen = contributionRepository.findUnfrozen(member.id());
+        long accountBalance = unfrozen.stream().mapToLong(ContributionRow::amountCents).sum();
+
+        PlanRow activePlan = planRepository.findActiveByMember(member.id()).orElse(null);
+        List<InstallmentRow> unpaidInstallments = List.of();
+        if (activePlan != null) {
+            PlanRow lockedPlan = planRepository.lockById(activePlan.id()).orElseThrow();
+            unpaidInstallments = installmentRepository.findByPlanId(lockedPlan.id()).stream()
+                    .filter(i -> i.status() == InstallmentStatus.PENDING
+                            || i.status() == InstallmentStatus.FAILED)
+                    .toList();
+        }
+        long unpaidPrincipal = unpaidInstallments.stream()
+                .mapToLong(InstallmentRow::amountCents).sum();
+
+        long inheritanceAmount = Math.addExact(accountBalance, unpaidPrincipal);
+        if (inheritanceAmount <= 0) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "NOTHING_TO_INHERIT",
+                    "账户余额与未支付分期本金均为零，无可继承权益");
+        }
+        if (request.claimAmountCents() != inheritanceAmount) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "RECONCILIATION_MISMATCH",
+                    "继承支付额与账户余额加未支付分期本金之和勾稽不一致：申报 "
+                            + request.claimAmountCents() + "，应为 " + inheritanceAmount);
+        }
+
+        // 互斥：受理继承即终止进行中计划的剩余分期，已支付部分不回溯；同事务提交
+        Long terminatedPlanId = null;
+        if (activePlan != null) {
+            installmentRepository.terminateUnpaidByPlan(activePlan.id());
+            planRepository.markTerminated(activePlan.id(), timeProvider.nowUtc());
+            terminatedPlanId = activePlan.id();
+        }
+
+        String fingerprint = inheritanceFingerprint(request);
+        InheritanceClaimRow claim = new InheritanceClaimRow(0L, newClaimNo(), request.requestId(),
+                member.id(), request.heirName(), request.deathDate(), request.applyDate(),
+                fingerprint, accountBalance, unpaidPrincipal, inheritanceAmount,
+                terminatedPlanId, InheritanceStatus.ACCEPTED, member.id(), null);
+        long claimId = inheritanceClaimRepository.insert(claim);
+
+        List<InheritanceReconRow> recon = new ArrayList<>();
+        for (ContributionRow c : unfrozen) {
+            recon.add(new InheritanceReconRow(0L, claimId, "ACCOUNT_BALANCE", "CONTRIBUTION",
+                    c.id(), c.amountCents()));
+        }
+        for (InstallmentRow i : unpaidInstallments) {
+            recon.add(new InheritanceReconRow(0L, claimId, "UNPAID_INSTALLMENT", "INSTALLMENT",
+                    i.id(), i.amountCents()));
+        }
+        inheritanceReconRepository.insertBatch(claimId, recon);
+
+        InheritanceClaimRow persisted = inheritanceClaimRepository.findByClaimNo(claim.claimNo())
+                .orElseThrow(() -> new IllegalStateException("继承申领插入后无法回读"));
+        return toInheritanceResponse(persisted);
+    }
+
+    private InheritanceResponse inheritanceReplayOrConflict(InheritanceClaimRow existing,
+                                                            InheritanceApplyRequest request) {
+        MemberRow member = memberRepository.findById(existing.memberId()).orElseThrow();
+        if (!member.memberNo().equals(request.memberNo())
+                || !existing.fingerprint().equals(inheritanceFingerprint(request))) {
+            throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT",
+                    "requestId 已存在但业务字段不一致，拒绝产生新继承申领");
+        }
+        return toInheritanceResponse(existing);
+    }
+
+    /** 互斥：成员已存在继承申领时，拒绝再受理任何支付计划申请。 */
+    private void rejectIfInheritanceExists(MemberRow member) {
+        if (inheritanceClaimRepository.countByMember(member.id()) > 0) {
+            throw new ApiException(HttpStatus.CONFLICT, "INHERITANCE_CLAIM_EXISTS",
+                    "该成员已存在继承申领，与支付计划互斥，不能再受理支付申请");
+        }
+    }
+
+    private static String inheritanceFingerprint(InheritanceApplyRequest request) {
+        return Fingerprints.sha256(request.requestId(), request.memberNo(), request.heirName(),
+                request.deathDate().toString(), request.applyDate().toString(),
+                Long.toString(request.claimAmountCents()));
+    }
+
+    private InheritanceResponse toInheritanceResponse(InheritanceClaimRow claim) {
+        MemberRow member = memberRepository.findById(claim.memberId()).orElseThrow();
+        String terminatedPlanNo = null;
+        if (claim.terminatedPlanId() != null) {
+            terminatedPlanNo = planRepository.findById(claim.terminatedPlanId())
+                    .map(PlanRow::planNo).orElse(null);
+        }
+        List<InheritanceResponse.ReconView> recon = inheritanceReconRepository
+                .findByClaimId(claim.id()).stream()
+                .map(r -> new InheritanceResponse.ReconView(r.component(), r.sourceType(),
+                        r.sourceId(), r.amountCents()))
+                .toList();
+        return new InheritanceResponse(claim.claimNo(), claim.requestId(), member.memberNo(),
+                claim.heirName(), claim.deathDate(), claim.applyDate(),
+                claim.accountBalanceCents(), claim.unpaidInstallmentCents(),
+                claim.inheritanceAmountCents(), terminatedPlanNo, claim.status(),
+                claim.completedAt(), recon);
+    }
+
+    private InheritanceCompleteResponse buildCompleteResponse(InheritanceClaimRow claim,
+                                                              boolean replayed) {
+        long paid = inheritanceLedgerRepository.sumInheritancePayouts(claim.id());
+        return new InheritanceCompleteResponse(claim.claimNo(), claim.status(), replayed,
+                claim.inheritanceAmountCents(), paid, claim.completedAt());
+    }
+
+    private static String newClaimNo() {
+        return "IC-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16).toUpperCase(Locale.ROOT);
     }
 }
