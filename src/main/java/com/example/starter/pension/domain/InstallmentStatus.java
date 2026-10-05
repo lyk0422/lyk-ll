@@ -10,5 +10,7 @@ public enum InstallmentStatus {
     /** 已出款，终态，每期最多出款一次。 */
     PAID,
     /** 出款失败，可使用新的指令 requestId 重试。 */
-    FAILED
+    FAILED,
+    /** 已取消（终态）：继承申领受理终止剩余分期，未付期次不再出款。 */
+    CANCELLED
 }

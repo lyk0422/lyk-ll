@@ -22,6 +22,16 @@ public interface InstallmentRepository {
     /** 查询计划全部期次，按期次序号升序。 */
     List<InstallmentRow> findByPlanId(long planId);
 
+    /** 查询计划尚未出款的期次（PENDING/FAILED），按期次序号升序；继承终止时据此计算未付本金。 */
+    List<InstallmentRow> findUnpaidByPlan(long planId);
+
+    /**
+     * 继承申领受理时取消计划全部未付期次（PENDING/FAILED → CANCELLED），已出款期次不回溯。
+     *
+     * @return 实际取消的期次数
+     */
+    int cancelUnpaidByPlan(long planId);
+
     /** 按计划与期次序号查询。 */
     Optional<InstallmentRow> findByPlanAndSeq(long planId, int seqNo);
 

@@ -143,6 +143,14 @@ public class JdbcPlanRepository implements PlanRepository {
     }
 
     @Override
+    public Optional<PlanRow> findActiveByMember(long memberId) {
+        return jdbcClient.sql("SELECT " + COLUMNS + " FROM payout_plan WHERE active_member_id = :memberId")
+                .param("memberId", memberId)
+                .query(ROW_MAPPER)
+                .optional();
+    }
+
+    @Override
     public long countByMember(long memberId) {
         Long count = jdbcClient.sql(
                         "SELECT COUNT(*) FROM payout_plan WHERE member_id = :memberId")
@@ -179,6 +187,17 @@ public class JdbcPlanRepository implements PlanRepository {
                         UPDATE payout_plan
                            SET status = 'IN_PROGRESS'
                          WHERE id = :planId AND status = 'ACCEPTED'""")
+                .param("planId", planId)
+                .update();
+    }
+
+    @Override
+    public int markTerminated(long planId, OffsetDateTime terminatedAt) {
+        return jdbcClient.sql("""
+                        UPDATE payout_plan
+                           SET status = 'TERMINATED', active_member_id = NULL, settled_at = :terminatedAt
+                         WHERE id = :planId AND status IN ('ACCEPTED', 'IN_PROGRESS')""")
+                .param("terminatedAt", Timestamp.from(terminatedAt.toInstant()))
                 .param("planId", planId)
                 .update();
     }

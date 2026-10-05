@@ -1,6 +1,10 @@
 package com.example.starter.pension.web;
 
 import com.example.starter.pension.api.ContributionRequest;
+import com.example.starter.pension.api.InheritanceClaimRequest;
+import com.example.starter.pension.api.InheritanceClaimResponse;
+import com.example.starter.pension.api.InheritanceCompleteResponse;
+import com.example.starter.pension.api.LateContributionEventView;
 import com.example.starter.pension.api.MemberUpsertRequest;
 import com.example.starter.pension.api.PaymentInstructionRequest;
 import com.example.starter.pension.api.PaymentResultResponse;
@@ -16,6 +20,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -76,5 +81,33 @@ public class PensionController {
     @PostMapping("/plans/{planNo}/settle")
     public SettleResponse settle(@PathVariable String planNo) {
         return pensionService.settle(planNo);
+    }
+
+    /** 受理继承申领（身故日起 180 个自然日内，含第 180 日）。 */
+    @PostMapping("/inheritance-claims")
+    @ResponseStatus(HttpStatus.CREATED)
+    public InheritanceClaimResponse applyInheritanceClaim(@Valid @RequestBody InheritanceClaimRequest request) {
+        return pensionService.applyInheritanceClaim(request);
+    }
+
+    /** 查询继承申领与台账勾稽明细（可复算）。 */
+    @GetMapping("/inheritance-claims/{claimNo}")
+    public InheritanceClaimResponse getInheritanceClaim(@PathVariable String claimNo) {
+        return pensionService.getInheritanceClaim(claimNo);
+    }
+
+    /** 完成继承支付（终态，重复完成幂等成功）。 */
+    @PostMapping("/inheritance-claims/{claimNo}/complete")
+    public InheritanceCompleteResponse completeInheritancePayout(
+            @PathVariable String claimNo,
+            @RequestParam(defaultValue = "false") boolean forceFail) {
+        return pensionService.completeInheritancePayout(claimNo, forceFail);
+    }
+
+    /** 查询成员在继承支付完成后迟到缴费的事件（提示人工复核）。 */
+    @GetMapping("/members/{memberNo}/late-contributions")
+    public java.util.List<LateContributionEventView> listLateContributionEvents(
+            @PathVariable String memberNo) {
+        return pensionService.listLateContributionEvents(memberNo);
     }
 }

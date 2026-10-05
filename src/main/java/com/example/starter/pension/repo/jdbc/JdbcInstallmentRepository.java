@@ -66,6 +66,26 @@ public class JdbcInstallmentRepository implements InstallmentRepository {
     }
 
     @Override
+    public List<InstallmentRow> findUnpaidByPlan(long planId) {
+        return jdbcClient.sql("SELECT " + COLUMNS
+                        + " FROM payout_installment WHERE plan_id = :planId"
+                        + " AND status IN ('PENDING', 'FAILED') ORDER BY seq_no")
+                .param("planId", planId)
+                .query(ROW_MAPPER)
+                .list();
+    }
+
+    @Override
+    public int cancelUnpaidByPlan(long planId) {
+        return jdbcClient.sql("""
+                        UPDATE payout_installment
+                           SET status = 'CANCELLED'
+                         WHERE plan_id = :planId AND status IN ('PENDING', 'FAILED')""")
+                .param("planId", planId)
+                .update();
+    }
+
+    @Override
     public Optional<InstallmentRow> findByPlanAndSeq(long planId, int seqNo) {
         return jdbcClient.sql("SELECT " + COLUMNS
                         + " FROM payout_installment WHERE plan_id = :planId AND seq_no = :seqNo")

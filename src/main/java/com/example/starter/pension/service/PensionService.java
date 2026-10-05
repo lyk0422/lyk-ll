@@ -1,6 +1,10 @@
 package com.example.starter.pension.service;
 
 import com.example.starter.pension.api.ContributionRequest;
+import com.example.starter.pension.api.InheritanceClaimRequest;
+import com.example.starter.pension.api.InheritanceClaimResponse;
+import com.example.starter.pension.api.InheritanceCompleteResponse;
+import com.example.starter.pension.api.LateContributionEventView;
 import com.example.starter.pension.api.MemberUpsertRequest;
 import com.example.starter.pension.api.PaymentInstructionRequest;
 import com.example.starter.pension.api.PaymentResultResponse;
@@ -45,4 +49,25 @@ public interface PensionService {
      * 对已结清计划重复结清返回幂等成功。
      */
     SettleResponse settle(String planNo);
+
+    /**
+     * 受理继承申领：继承人于成员身故日起 180 个自然日（UTC 日界，含第 180 日）内
+     * 申请一次性继承支付。继承金额=账户余额+未支付分期本金，申报两项合计与继承支付额
+     * 必须勾稽一致，不等拒绝。存在进行中分期计划时受理即在同一事务内终止剩余分期
+     * （已支付部分不回溯）。以 requestId 幂等：同键同参返回首次结果，同键异参 409；
+     * 同一成员并发申请仅唯一受理。
+     */
+    InheritanceClaimResponse applyInheritanceClaim(InheritanceClaimRequest request);
+
+    /** 查询继承申领（含台账勾稽明细，可复算）。 */
+    InheritanceClaimResponse getInheritanceClaim(String claimNo);
+
+    /**
+     * 完成继承支付（终态）：出款成功置 PAID；重复完成返回幂等成功；
+     * 出款失败时申领保持 ACCEPTED 可重试。
+     */
+    InheritanceCompleteResponse completeInheritancePayout(String claimNo, boolean forceFail);
+
+    /** 查询成员在继承支付完成后迟到缴费的事件列表（提示人工复核）。 */
+    java.util.List<LateContributionEventView> listLateContributionEvents(String memberNo);
 }

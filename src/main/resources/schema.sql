@@ -127,3 +127,68 @@ COMMENT ON COLUMN account_ledger.installment_id IS '成员出款对应期次 ID�
 COMMENT ON COLUMN account_ledger.account IS '记账账户：MEMBER 成员收款账户 / ENTERPRISE 企业账户';
 COMMENT ON COLUMN account_ledger.movement_type IS '账务类型：MEMBER_PAYOUT 个人支付出款 / ENTERPRISE_RETURN 未归属企业缴费划回';
 COMMENT ON COLUMN account_ledger.amount_cents IS '记账金额，单位：分';
+
+CREATE TABLE IF NOT EXISTS inheritance_claim (
+    id                        BIGINT AUTO_INCREMENT PRIMARY KEY,
+    claim_no                  VARCHAR(48)  NOT NULL,
+    request_id                VARCHAR(64)  NOT NULL,
+    member_id                 BIGINT       NOT NULL,
+    heir_name                 VARCHAR(128) NOT NULL,
+    death_date                DATE         NOT NULL,
+    apply_date                DATE         NOT NULL,
+    fingerprint               VARCHAR(64)  NOT NULL,
+    account_balance_cents     BIGINT       NOT NULL,
+    unpaid_installment_cents  BIGINT       NOT NULL,
+    claim_amount_cents        BIGINT       NOT NULL,
+    terminated_plan_id        BIGINT,
+    status                    VARCHAR(16)  NOT NULL DEFAULT 'ACCEPTED',
+    created_at                TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    paid_at                   TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_claim_no ON inheritance_claim (claim_no);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_claim_request_id ON inheritance_claim (request_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_claim_member ON inheritance_claim (member_id);
+COMMENT ON COLUMN inheritance_claim.claim_no IS '继承申领号，全局唯一';
+COMMENT ON COLUMN inheritance_claim.request_id IS '继承申领幂等键 requestId，全局唯一';
+COMMENT ON COLUMN inheritance_claim.member_id IS '身故成员 ID；唯一索引保证同一成员并发唯一受理且仅受理一次';
+COMMENT ON COLUMN inheritance_claim.heir_name IS '继承人姓名（合成数据）';
+COMMENT ON COLUMN inheritance_claim.death_date IS '成员身故日，按 UTC 日历日；申领窗口为身故日起 180 个自然日（含第 180 日）';
+COMMENT ON COLUMN inheritance_claim.apply_date IS '申领受理日，按 UTC 日界，取自系统可控时钟';
+COMMENT ON COLUMN inheritance_claim.fingerprint IS '申领指纹：SHA-256(requestId 与全部业务字段)，用于同键异参冲突判定';
+COMMENT ON COLUMN inheritance_claim.account_balance_cents IS '继承金额构成一：账户余额（未冻结缴费合计），单位：分';
+COMMENT ON COLUMN inheritance_claim.unpaid_installment_cents IS '继承金额构成二：被终止计划的未支付分期本金之和，单位：分；无进行中计划为 0';
+COMMENT ON COLUMN inheritance_claim.claim_amount_cents IS '继承支付额=账户余额+未支付分期本金，单位：分，必须与两项合计勾稽一致';
+COMMENT ON COLUMN inheritance_claim.terminated_plan_id IS '因继承受理被终止的支付计划 ID；NULL 表示受理时无进行中计划';
+COMMENT ON COLUMN inheritance_claim.status IS '申领状态：ACCEPTED 已受理 / PAID 继承支付完成（终态）';
+COMMENT ON COLUMN inheritance_claim.paid_at IS '继承支付完成时间（UTC）；未完成为 NULL';
+
+CREATE TABLE IF NOT EXISTS inheritance_ledger (
+    id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+    claim_id       BIGINT      NOT NULL,
+    entry_type     VARCHAR(24) NOT NULL,
+    ref_id         BIGINT      NOT NULL DEFAULT 0,
+    amount_cents   BIGINT      NOT NULL,
+    created_at     TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_inh_ledger_entry
+    ON inheritance_ledger (claim_id, entry_type, ref_id);
+COMMENT ON COLUMN inheritance_ledger.claim_id IS '所属继承申领 ID';
+COMMENT ON COLUMN inheritance_ledger.entry_type IS '台账类型：ACCOUNT_BALANCE 账户余额构成 / UNPAID_INSTALLMENT 未付分期本金构成 / INHERITANCE_PAYOUT 继承支付出款';
+COMMENT ON COLUMN inheritance_ledger.ref_id IS '构成明细引用的期次 ID；0 表示非期次类条目（余额构成与继承出款）';
+COMMENT ON COLUMN inheritance_ledger.amount_cents IS '台账金额，单位：分；构成条目合计必须等于继承支付出款条目';
+
+CREATE TABLE IF NOT EXISTS late_contribution_event (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    member_id       BIGINT       NOT NULL,
+    contribution_id BIGINT       NOT NULL,
+    claim_id        BIGINT       NOT NULL,
+    amount_cents    BIGINT       NOT NULL,
+    note            VARCHAR(256) NOT NULL,
+    created_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_late_contribution ON late_contribution_event (contribution_id);
+COMMENT ON COLUMN late_contribution_event.member_id IS '迟到缴费所属成员 ID';
+COMMENT ON COLUMN late_contribution_event.contribution_id IS '迟到缴费记录 ID，唯一索引保证同一缴费只记一次迟到事件';
+COMMENT ON COLUMN late_contribution_event.claim_id IS '已完成继承支付的申领 ID';
+COMMENT ON COLUMN late_contribution_event.amount_cents IS '迟到缴费金额，单位：分';
+COMMENT ON COLUMN late_contribution_event.note IS '迟到事件说明，提示人工复核';

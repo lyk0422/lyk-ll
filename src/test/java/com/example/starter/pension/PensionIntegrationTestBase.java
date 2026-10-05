@@ -38,6 +38,7 @@ public abstract class PensionIntegrationTestBase {
     void cleanDatabaseAndFreezeClock() {
         jdbcTemplate.execute("SET REFERENTIAL_INTEGRITY FALSE");
         for (String table : List.of(
+                "late_contribution_event", "inheritance_ledger", "inheritance_claim",
                 "account_ledger", "payout_instruction", "payout_installment",
                 "payout_plan", "contribution", "member")) {
             jdbcTemplate.update("TRUNCATE TABLE " + table);

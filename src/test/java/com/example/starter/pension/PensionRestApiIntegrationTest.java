@@ -30,15 +30,21 @@ class PensionRestApiIntegrationTest {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @Autowired
+    private com.example.starter.pension.support.TimeProvider timeProvider;
+
     @BeforeEach
     void clean() {
         jdbcTemplate.execute("SET REFERENTIAL_INTEGRITY FALSE");
         for (String table : List.of(
+                "late_contribution_event", "inheritance_ledger", "inheritance_claim",
                 "account_ledger", "payout_instruction", "payout_installment",
                 "payout_plan", "contribution", "member")) {
             jdbcTemplate.update("TRUNCATE TABLE " + table);
         }
         jdbcTemplate.execute("SET REFERENTIAL_INTEGRITY TRUE");
+        timeProvider.setClock(java.time.Clock.fixed(
+                java.time.Instant.parse("2026-09-25T10:15:30Z"), java.time.ZoneOffset.UTC));
     }
 
     @Test
@@ -146,5 +152,108 @@ class PensionRestApiIntegrationTest {
         assertThat(settle.getBody().get("replayed").asBoolean()).isTrue();
         assertThat(settle.getBody().get("paidTotalCents").asLong()).isEqualTo(180L);
         assertThat(settle.getBody().get("returnedTotalCents").asLong()).isEqualTo(20L);
+    }
+
+    @Test
+    @DisplayName("REST 继承申领：受理 201/同键重放/异参 409/逾期 422，完成终态与迟到缴费事件")
+    void restInheritanceClaim() {
+        rest.exchange("/api/pension/members", HttpMethod.POST,
+                new HttpEntity<>(Map.of(
+                        "memberNo", "W2",
+                        "name", "继承 rest",
+                        "hireDate", "2020-01-01",
+                        "status", "RETIRED")), Void.class);
+        rest.exchange("/api/pension/contributions", HttpMethod.POST,
+                new HttpEntity<>(Map.of(
+                        "memberNo", "W2",
+                        "contributionType", "PERSONAL",
+                        "amountCents", 1000,
+                        "contributionDate", "2024-01-31",
+                        "period", "2024-01")), Void.class);
+
+        Map<String, Object> claimReq = Map.of(
+                "requestId", "W2-CLAIM",
+                "memberNo", "W2",
+                "heirName", "继承人 REST",
+                "deathDate", "2026-06-17",
+                "declaredAccountBalanceCents", 1000,
+                "declaredUnpaidInstallmentCents", 0,
+                "declaredClaimAmountCents", 1000);
+        ResponseEntity<JsonNode> created = rest.postForEntity(
+                "/api/pension/inheritance-claims", claimReq, JsonNode.class);
+        assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(created.getBody().get("status").asText()).isEqualTo("ACCEPTED");
+        assertThat(created.getBody().get("claimAmountCents").asLong()).isEqualTo(1000L);
+        assertThat(created.getBody().get("applyDate").asText()).isEqualTo("2026-09-25");
+        String claimNo = created.getBody().get("claimNo").asText();
+
+        // 同键同参重放：返回首次申领
+        ResponseEntity<JsonNode> replay = rest.postForEntity(
+                "/api/pension/inheritance-claims", claimReq, JsonNode.class);
+        assertThat(replay.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(replay.getBody().get("claimNo").asText()).isEqualTo(claimNo);
+        assertThat(replay.getBody().get("replayed").asBoolean()).isTrue();
+
+        // 同键异参：409
+        Map<String, Object> conflictReq = Map.of(
+                "requestId", "W2-CLAIM",
+                "memberNo", "W2",
+                "heirName", "另一位继承人",
+                "deathDate", "2026-06-17",
+                "declaredAccountBalanceCents", 1000,
+                "declaredUnpaidInstallmentCents", 0,
+                "declaredClaimAmountCents", 1000);
+        ResponseEntity<JsonNode> conflict = rest.postForEntity(
+                "/api/pension/inheritance-claims", conflictReq, JsonNode.class);
+        assertThat(conflict.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(conflict.getBody().get("code").asText()).isEqualTo("IDEMPOTENCY_CONFLICT");
+
+        // 逾期申领：422（2026-01-01 身故，第 180 日为 2026-06-30，早于受理日 2026-09-25）
+        rest.exchange("/api/pension/members", HttpMethod.POST,
+                new HttpEntity<>(Map.of(
+                        "memberNo", "W3",
+                        "name", "逾期继承",
+                        "hireDate", "2020-01-01",
+                        "status", "RETIRED")), Void.class);
+        ResponseEntity<JsonNode> expired = rest.postForEntity("/api/pension/inheritance-claims",
+                Map.of("requestId", "W3-CLAIM",
+                        "memberNo", "W3",
+                        "heirName", "逾期继承人",
+                        "deathDate", "2026-01-01",
+                        "declaredAccountBalanceCents", 0,
+                        "declaredUnpaidInstallmentCents", 0,
+                        "declaredClaimAmountCents", 0), JsonNode.class);
+        assertThat(expired.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+        assertThat(expired.getBody().get("code").asText()).isEqualTo("CLAIM_WINDOW_EXPIRED");
+
+        // 勾稽明细可查
+        ResponseEntity<JsonNode> view = rest.getForEntity(
+                "/api/pension/inheritance-claims/" + claimNo, JsonNode.class);
+        assertThat(view.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(view.getBody().get("ledger").size()).isEqualTo(1);
+
+        // 完成继承支付（终态），重复完成幂等成功
+        ResponseEntity<JsonNode> done = rest.postForEntity(
+                "/api/pension/inheritance-claims/" + claimNo + "/complete", null, JsonNode.class);
+        assertThat(done.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(done.getBody().get("success").asBoolean()).isTrue();
+        assertThat(done.getBody().get("status").asText()).isEqualTo("PAID");
+        ResponseEntity<JsonNode> doneAgain = rest.postForEntity(
+                "/api/pension/inheritance-claims/" + claimNo + "/complete", null, JsonNode.class);
+        assertThat(doneAgain.getBody().get("replayed").asBoolean()).isTrue();
+
+        // 完成后迟到缴费：只记迟到事件并提示人工复核
+        rest.exchange("/api/pension/contributions", HttpMethod.POST,
+                new HttpEntity<>(Map.of(
+                        "memberNo", "W2",
+                        "contributionType", "PERSONAL",
+                        "amountCents", 150,
+                        "contributionDate", "2026-09-20",
+                        "period", "2026-09")), Void.class);
+        ResponseEntity<JsonNode> late = rest.getForEntity(
+                "/api/pension/members/W2/late-contributions", JsonNode.class);
+        assertThat(late.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(late.getBody().size()).isEqualTo(1);
+        assertThat(late.getBody().get(0).get("amountCents").asLong()).isEqualTo(150L);
     }
 }
