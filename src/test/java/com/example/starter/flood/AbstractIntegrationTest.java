@@ -26,6 +26,10 @@ public abstract class AbstractIntegrationTest {
 
     @BeforeEach
     void resetDatabaseAndClock() {
+        jdbcTemplate.update("DELETE FROM order_conflict_suggestion");
+        jdbcTemplate.update("DELETE FROM warning_level_event");
+        jdbcTemplate.update("DELETE FROM rolling_routing");
+        jdbcTemplate.update("DELETE FROM inflow_hydrograph_point");
         jdbcTemplate.update("DELETE FROM order_event");
         jdbcTemplate.update("DELETE FROM release_order");
         jdbcTemplate.update("DELETE FROM release_plan");

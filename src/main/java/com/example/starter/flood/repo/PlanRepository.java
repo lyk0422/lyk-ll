@@ -41,7 +41,11 @@ public class PlanRepository {
             po.status = rs.getString("status");
             long activeKey = rs.getLong("active_key");
             po.activeKey = rs.wasNull() ? null : activeKey;
+            po.versionNo = rs.getInt("version_no");
+            long rollingId = rs.getLong("rolling_id");
+            po.rollingId = rs.wasNull() ? null : rollingId;
             po.createdAt = toLdt(rs.getTimestamp("created_at"));
+            po.supersededAt = toLdt(rs.getTimestamp("superseded_at"));
             po.completedAt = toLdt(rs.getTimestamp("completed_at"));
             po.archivedAt = toLdt(rs.getTimestamp("archived_at"));
             return po;
@@ -58,21 +62,29 @@ public class PlanRepository {
             PreparedStatement ps = connection.prepareStatement(
                     "INSERT INTO release_plan(plan_no, pond_id, warning_id, routing_id, request_id, "
                             + "openings, total_release, downstream_safe_release, status, active_key, "
-                            + "created_at, completed_at, archived_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            + "version_no, rolling_id, created_at, superseded_at, completed_at, "
+                            + "archived_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     Statement.RETURN_GENERATED_KEYS);
             ps.setString(1, po.planNo);
             ps.setLong(2, po.pondId);
             ps.setLong(3, po.warningId);
-            ps.setLong(4, po.routingId);
+            if (po.routingId == null) {
+                ps.setNull(4, java.sql.Types.BIGINT);
+            } else {
+                ps.setLong(4, po.routingId);
+            }
             ps.setString(5, po.requestId);
             ps.setString(6, po.openings);
             ps.setBigDecimal(7, po.totalRelease);
             ps.setBigDecimal(8, po.downstreamSafeRelease);
             ps.setString(9, po.status);
             ps.setObject(10, po.activeKey);
-            ps.setTimestamp(11, Timestamp.valueOf(po.createdAt));
-            ps.setTimestamp(12, po.completedAt == null ? null : Timestamp.valueOf(po.completedAt));
-            ps.setTimestamp(13, po.archivedAt == null ? null : Timestamp.valueOf(po.archivedAt));
+            ps.setInt(11, po.versionNo);
+            ps.setObject(12, po.rollingId);
+            ps.setTimestamp(13, Timestamp.valueOf(po.createdAt));
+            ps.setTimestamp(14, po.supersededAt == null ? null : Timestamp.valueOf(po.supersededAt));
+            ps.setTimestamp(15, po.completedAt == null ? null : Timestamp.valueOf(po.completedAt));
+            ps.setTimestamp(16, po.archivedAt == null ? null : Timestamp.valueOf(po.archivedAt));
             return ps;
         }, keyHolder);
         Number key = keyHolder.getKey();
@@ -128,5 +140,44 @@ public class PlanRepository {
         return jdbcTemplate.update(
                 "UPDATE release_plan SET status = 'ARCHIVED', archived_at = ? WHERE id = ?",
                 Timestamp.valueOf(archivedAt), planId);
+    }
+
+    /**
+     * 查询处置链下全部方案版本（旧版本留痕可查），按版本号升序。
+     */
+    public List<PlanPO> findVersionsByWarningId(Long warningId) {
+        return jdbcTemplate.query(
+                "SELECT * FROM release_plan WHERE warning_id = ? ORDER BY version_no, id",
+                MAPPER, warningId);
+    }
+
+    /**
+     * 查询处置链当前执行中（生效）方案版本。
+     */
+    public PlanPO findEffectiveByWarningId(Long warningId) {
+        List<PlanPO> list = jdbcTemplate.query(
+                "SELECT * FROM release_plan WHERE warning_id = ? AND status = 'EFFECTIVE'",
+                MAPPER, warningId);
+        return list.isEmpty() ? null : list.get(0);
+    }
+
+    /**
+     * 处置链内当前最大方案版本号；无方案时返回 0。
+     */
+    public int maxVersionNoByWarningId(Long warningId) {
+        Integer max = jdbcTemplate.queryForObject(
+                "SELECT COALESCE(MAX(version_no), 0) FROM release_plan WHERE warning_id = ?",
+                Integer.class, warningId);
+        return max == null ? 0 : max;
+    }
+
+    /**
+     * 旧版本被新版本取代：置 SUPERSEDED 并解除执行中唯一位（留痕不删除）。
+     */
+    public int markSuperseded(Long planId, LocalDateTime supersededAt) {
+        return jdbcTemplate.update(
+                "UPDATE release_plan SET status = 'SUPERSEDED', active_key = NULL, "
+                        + "superseded_at = ? WHERE id = ? AND status = 'EFFECTIVE'",
+                Timestamp.valueOf(supersededAt), planId);
     }
 }

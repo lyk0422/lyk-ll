@@ -269,10 +269,10 @@ public class OrderService {
                 : jsonSupport.fromJsonList(po.actualOpenings,
                         new TypeReference<List<OpeningItem>>() {
                         });
-        return new OrderView(po.orderNo, planNo(po.planId), po.status, po.issuedAt,
-                po.signDeadline, po.signedAt, po.signer, po.escalatedAt, po.escalatedTo,
-                po.executedAt, po.executor, po.receiptedAt, actual, po.actualTotalRelease,
-                po.deviationRatio, po.deviationReason, false);
+        return new OrderView(po.orderNo, planNo(po.planId), po.planVersionNo, po.status,
+                po.issuedAt, po.signDeadline, po.signedAt, po.signer, po.escalatedAt,
+                po.escalatedTo, po.executedAt, po.executor, po.receiptedAt, actual,
+                po.actualTotalRelease, po.deviationRatio, po.deviationReason, false);
     }
 
     private String planNo(Long planId) {

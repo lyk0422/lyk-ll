@@ -5,7 +5,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 /**
- * 泄流方案视图。
+ * 泄流方案视图；滚动演算追加新版本后，旧版本以 SUPERSEDED 留痕可查。
  */
 public record PlanView(
         String planNo,
@@ -19,5 +19,7 @@ public record PlanView(
         String orderNo,
         String orderStatus,
         boolean replay,
-        LocalDateTime createdAt) {
+        LocalDateTime createdAt,
+        Integer versionNo,
+        LocalDateTime supersededAt) {
 }

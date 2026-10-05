@@ -5,6 +5,8 @@ import com.example.starter.flood.web.dto.PlanRequest;
 import com.example.starter.flood.web.dto.PlanView;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -28,5 +30,13 @@ public class PlanController {
     @ResponseStatus(HttpStatus.CREATED)
     public PlanView create(@Valid @RequestBody PlanRequest request) {
         return planService.create(request);
+    }
+
+    /**
+     * 按方案编号查询（含版本号与取代时刻）。
+     */
+    @GetMapping("/{planNo}")
+    public PlanView get(@PathVariable String planNo) {
+        return planService.getByNo(planNo);
     }
 }

@@ -3,20 +3,27 @@ package com.example.starter.flood;
 import com.example.starter.flood.bootstrap.SyntheticDataInitializer;
 import com.example.starter.flood.service.OrderService;
 import com.example.starter.flood.service.PlanService;
+import com.example.starter.flood.service.RollingService;
 import com.example.starter.flood.service.RoutingService;
 import com.example.starter.flood.service.ReviewService;
 import com.example.starter.flood.service.WarningService;
+import com.example.starter.flood.web.dto.HydrographPointItem;
+import com.example.starter.flood.web.dto.HydrographRequest;
+import com.example.starter.flood.web.dto.HydrographView;
 import com.example.starter.flood.web.dto.OpeningItem;
 import com.example.starter.flood.web.dto.OrderActionRequest;
 import com.example.starter.flood.web.dto.PlanRequest;
 import com.example.starter.flood.web.dto.PlanView;
 import com.example.starter.flood.web.dto.ReceiptRequest;
 import com.example.starter.flood.web.dto.ReviewRequest;
+import com.example.starter.flood.web.dto.RollingRequest;
+import com.example.starter.flood.web.dto.RollingVersionView;
 import com.example.starter.flood.web.dto.RoutingRequest;
 import com.example.starter.flood.web.dto.RoutingView;
 import com.example.starter.flood.web.dto.WarningRequest;
 import com.example.starter.flood.web.dto.WarningView;
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -38,6 +45,10 @@ public class FlowSupport {
     private OrderService orderService;
     @Autowired
     private ReviewService reviewService;
+    @Autowired
+    private RollingService rollingService;
+    @Autowired
+    private MutableClock mutableClock;
 
     public String pondCode() {
         return SyntheticDataInitializer.DEMO_POND_CODE;
@@ -86,5 +97,29 @@ public class FlowSupport {
     public static List<OpeningItem> safeBoundaryOpenings() {
         return List.of(new OpeningItem("1#排洪隧洞工作闸门", new BigDecimal("1.200"),
                 new BigDecimal("20.000")));
+    }
+
+    /**
+     * 录入合成入库洪水过程线：以当前时钟时刻为起点，每 30 分钟一个点，流量按序列给定。
+     */
+    public HydrographView submitHydrograph(String requestId, String warningNo,
+                                           BigDecimal... rates) {
+        LocalDateTime base = LocalDateTime.ofInstant(mutableClock.instant(),
+                mutableClock.getZone());
+        List<HydrographPointItem> points = new java.util.ArrayList<>();
+        for (int i = 0; i < rates.length; i++) {
+            points.add(new HydrographPointItem(base.plusMinutes(30L * i), rates[i]));
+        }
+        return rollingService.submitHydrograph(warningNo,
+                new HydrographRequest(requestId, points));
+    }
+
+    /**
+     * 触发一次滚动演算。
+     */
+    public RollingVersionView roll(String requestId, String warningNo, BigDecimal waterLevel,
+                                   BigDecimal dryBeach, BigDecimal phreatic) {
+        return rollingService.roll(warningNo,
+                new RollingRequest(requestId, waterLevel, dryBeach, phreatic));
     }
 }

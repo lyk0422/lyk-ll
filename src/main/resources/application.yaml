@@ -46,3 +46,5 @@ flood-control:
   sign-timeout-minutes: 15
   # 回执实际泄量与方案泄量允许的偏差比例（含边界），恰 10% 视为一致
   receipt-deviation-ratio: 0.10
+  # 滚动演算间隔（分钟），距上一版本恰满该时长触发新一次滚动重算
+  rolling-interval-minutes: 30

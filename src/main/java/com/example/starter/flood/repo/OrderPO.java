@@ -4,12 +4,14 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 /**
- * 泄流指令 PO（下达→签收→执行→回执/升级）。
+ * 泄流指令 PO（下达→签收→执行→回执/升级）；只认创建时的方案版本，新版本不溯及在途指令。
  */
 public class OrderPO {
     public Long id;
     public String orderNo;
     public Long planId;
+    /** 创建指令时的方案版本号快照。 */
+    public Integer planVersionNo;
     public String status;
     public LocalDateTime issuedAt;
     public LocalDateTime signDeadline;

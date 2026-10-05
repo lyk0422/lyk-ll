@@ -31,6 +31,7 @@ public class WarningRepository {
             po.title = rs.getString("title");
             po.rainSummary = rs.getString("rain_summary");
             po.status = rs.getString("status");
+            po.warningLevel = rs.getString("warning_level");
             po.requestId = rs.getString("request_id");
             po.openedAt = toLdt(rs.getTimestamp("opened_at"));
             po.archivedAt = toLdt(rs.getTimestamp("archived_at"));
@@ -45,9 +46,10 @@ public class WarningRepository {
     public void insert(WarningPO po) {
         jdbcTemplate.update(
                 "INSERT INTO warning_chain(warning_no, pond_id, title, rain_summary, status, "
-                        + "request_id, opened_at, archived_at) VALUES (?,?,?,?,?,?,?,?)",
+                        + "warning_level, request_id, opened_at, archived_at) "
+                        + "VALUES (?,?,?,?,?,?,?,?,?)",
                 po.warningNo, po.pondId, po.title, po.rainSummary, po.status,
-                po.requestId, Timestamp.valueOf(po.openedAt),
+                po.warningLevel, po.requestId, Timestamp.valueOf(po.openedAt),
                 po.archivedAt == null ? null : Timestamp.valueOf(po.archivedAt));
     }
 
@@ -96,5 +98,14 @@ public class WarningRepository {
                 "UPDATE warning_chain SET status = 'ARCHIVED', archived_at = ? WHERE id = ? "
                         + "AND status = 'ACTIVE'",
                 Timestamp.valueOf(archivedAt), id);
+    }
+
+    /**
+     * 提升预警级别（滚动演算泄流能力不足时调用，与方案版本追加同事务）。
+     */
+    public int updateLevel(Long id, String toLevel) {
+        return jdbcTemplate.update(
+                "UPDATE warning_chain SET warning_level = ? WHERE id = ? AND status = 'ACTIVE'",
+                toLevel, id);
     }
 }

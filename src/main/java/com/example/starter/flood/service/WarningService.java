@@ -70,6 +70,7 @@ public class WarningService {
         po.title = request.title();
         po.rainSummary = request.rainSummary();
         po.status = ChainStatus.ACTIVE.name();
+        po.warningLevel = com.example.starter.flood.domain.WarningLevel.ORANGE.name();
         po.requestId = request.requestId();
         po.openedAt = now;
         warningRepository.insert(po);

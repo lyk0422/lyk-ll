@@ -123,6 +123,7 @@ public class PlanService {
         plan.downstreamSafeRelease = pond.downstreamSafeRelease;
         plan.status = "EFFECTIVE";
         plan.activeKey = pond.id;
+        plan.versionNo = 1;
         plan.createdAt = now;
         try {
             planRepository.insert(plan);
@@ -131,10 +132,11 @@ public class PlanService {
                     "尾矿库 " + pond.pondCode + " 已存在执行中的泄流方案，同一时刻不得重复生效");
         }
 
-        // 方案生效即下达指令，签收时限恰为配置分钟数（默认 15 分钟）
+        // 方案生效即下达指令，签收时限恰为配置分钟数（默认 15 分钟）；指令只认创建时的方案版本
         OrderPO order = new OrderPO();
         order.orderNo = noGenerator.next("ZL");
         order.planId = plan.id;
+        order.planVersionNo = plan.versionNo;
         order.status = OrderStatus.ISSUED.name();
         order.issuedAt = now;
         order.signDeadline = now.plusMinutes(properties.getSignTimeoutMinutes());
@@ -202,11 +204,29 @@ public class PlanService {
                 pond == null ? null : pond.pondCode, openings, plan.totalRelease,
                 plan.downstreamSafeRelease, plan.status,
                 order == null ? null : order.orderNo,
-                order == null ? null : order.status, replay, plan.createdAt);
+                order == null ? null : order.status, replay, plan.createdAt,
+                plan.versionNo, plan.supersededAt);
     }
 
     private String warningNo(Long warningId) {
         WarningPO warning = warningService.findWarning(warningId);
         return warning == null ? null : warning.warningNo;
+    }
+
+    /**
+     * 按方案编号查询视图（含版本号与取代时刻），不存在 404。
+     */
+    public PlanView getByNo(String planNo) {
+        return toView(requireByNo(planNo), false);
+    }
+
+    /**
+     * 查询处置链下全部方案版本（旧版本留痕可查），按版本号升序。
+     */
+    public List<PlanView> listVersions(String warningNo) {
+        WarningPO warning = warningService.requireByNo(warningNo);
+        return planRepository.findVersionsByWarningId(warning.id).stream()
+                .map(plan -> toView(plan, false))
+                .toList();
     }
 }

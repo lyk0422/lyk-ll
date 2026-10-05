@@ -56,12 +56,20 @@ public class ReviewService {
         }
 
         LocalDateTime now = LocalDateTime.now(clock);
-        PlanPO plan = planRepository.findByWarningId(warning.id);
-        OrderPO order = plan == null ? null : orderRepository.findByPlanId(plan.id);
-        if (plan != null && "EFFECTIVE".equals(plan.status)) {
-            throw FloodControlException.business("PLAN_STILL_EFFECTIVE",
-                    "方案 " + plan.planNo + " 仍在执行中（未回执闭环），不能归档");
+        PlanPO effective = planRepository.findEffectiveByWarningId(warning.id);
+        if (effective != null) {
+            boolean inFlight = orderRepository.findAllByPlanId(effective.id).stream()
+                    .anyMatch(o -> !"RECEIPTED".equals(o.status));
+            if (inFlight) {
+                throw FloodControlException.business("PLAN_STILL_EFFECTIVE",
+                        "方案 " + effective.planNo + " 仍在执行中（未回执闭环），不能归档");
+            }
+            // 滚动演算自动追加的生效版本无在途指令：随归档闭环，不阻塞终态
+            planRepository.markCompleted(effective.id, now);
         }
+        java.util.List<PlanPO> versions = planRepository.findVersionsByWarningId(warning.id);
+        PlanPO latest = versions.isEmpty() ? null : versions.get(versions.size() - 1);
+        OrderPO order = latest == null ? null : orderRepository.findByPlanId(latest.id);
 
         int warningRows = warningRepository.markArchived(warning.id, now);
         if (warningRows == 0) {
@@ -70,10 +78,10 @@ public class ReviewService {
             return new ReviewView(archived.warningNo, archived.status,
                     reviewRepository.findNoteByWarningId(archived.id), true, archived.archivedAt);
         }
-        if (plan != null) {
-            planRepository.markArchived(plan.id, now);
+        for (PlanPO version : versions) {
+            planRepository.markArchived(version.id, now);
         }
-        reviewRepository.insert(warning.id, plan == null ? null : plan.id,
+        reviewRepository.insert(warning.id, latest == null ? null : latest.id,
                 order == null ? null : order.id, request.note(), now);
         return new ReviewView(warning.warningNo, ChainStatus.ARCHIVED.name(),
                 request.note(), false, now);
