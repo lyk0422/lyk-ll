@@ -16,6 +16,7 @@ import com.example.starter.gas.dto.VoucherResponse;
 import com.example.starter.gas.repo.AssessmentRepository;
 import com.example.starter.gas.repo.IdempotencyRepository;
 import com.example.starter.gas.repo.MeterReadingRepository;
+import com.example.starter.gas.repo.QualityRepository;
 import com.example.starter.gas.repo.ReferenceDataRepository;
 import com.example.starter.gas.repo.VoucherRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -60,6 +61,7 @@ public class CustodyService {
     private final VoucherRepository voucherRepository;
     private final AssessmentRepository assessmentRepository;
     private final IdempotencyRepository idempotencyRepository;
+    private final QualityRepository qualityRepository;
     private final TerminalSealer terminalSealer;
 
     public CustodyService(Clock clock,
@@ -69,6 +71,7 @@ public class CustodyService {
                           VoucherRepository voucherRepository,
                           AssessmentRepository assessmentRepository,
                           IdempotencyRepository idempotencyRepository,
+                          QualityRepository qualityRepository,
                           TerminalSealer terminalSealer) {
         this.clock = clock;
         this.objectMapper = objectMapper;
@@ -77,6 +80,7 @@ public class CustodyService {
         this.voucherRepository = voucherRepository;
         this.assessmentRepository = assessmentRepository;
         this.idempotencyRepository = idempotencyRepository;
+        this.qualityRepository = qualityRepository;
         this.terminalSealer = terminalSealer;
     }
 
@@ -227,6 +231,11 @@ public class CustodyService {
                 || voucherRepository.isConfirmedBy(voucherNo, request.party())) {
             // 重复确认（同方再次确认或凭证已生效）：返回当前状态，不产生新记录
             return toVoucherResponse(voucherRepository.findByNo(voucherNo));
+        }
+        if (qualityRepository.isConfirmPaused(voucherNo)) {
+            // 气质差异未解决：尚未生效的凭证暂停双方确认，已有确认记录保留
+            throw ApiException.conflict("CONFIRM_PAUSED",
+                    "气质差异未解决，双方确认暂停；待双方签认差异后解除");
         }
 
         java.time.Instant now = clock.instant();

@@ -139,8 +139,84 @@ CREATE TABLE IF NOT EXISTS daily_assessment (
 -- 通用幂等记录：指纹覆盖 requestId 与全部业务字段
 CREATE TABLE IF NOT EXISTS idempotent_request (
     request_id    VARCHAR(64)  NOT NULL PRIMARY KEY COMMENT '业务幂等键',
-    request_type  VARCHAR(32)  NOT NULL COMMENT '请求类型：READING/VOUCHER/CONFIRM/DISPUTE/SEAL/ADJUSTMENT',
+    request_type  VARCHAR(32)  NOT NULL COMMENT '请求类型：READING/VOUCHER/CONFIRM/DISPUTE/SEAL/ADJUSTMENT/VERIFICATION/SIGNOFF',
     fingerprint   VARCHAR(64)  NOT NULL COMMENT '业务字段指纹（SHA-256）',
     response_json CLOB         NOT NULL COMMENT '首次响应快照（JSON）',
     created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 合成组分热值表：核验折算的基准（能量单位/体积单位），仅合成数据
+CREATE TABLE IF NOT EXISTS component_heating_value (
+    component_code VARCHAR(16)   NOT NULL PRIMARY KEY COMMENT '组分编码，如 CH4/C2H6',
+    component_name VARCHAR(64)   NOT NULL COMMENT '组分中文名称',
+    heating_value  DECIMAL(18, 6) NOT NULL COMMENT '组分热值，能量单位/体积单位',
+    created_at     TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 气质采样记录：按“交接站＋采样时刻”去重；采样时刻按 UTC 气量日归属
+CREATE TABLE IF NOT EXISTS quality_sample (
+    id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+    station_code  VARCHAR(32)    NOT NULL COMMENT '交接站编码',
+    sample_time   TIMESTAMP      NOT NULL COMMENT '采样时刻（UTC）',
+    gas_date      DATE           NOT NULL COMMENT '按采样时刻归位的气量日（UTC）',
+    sample_volume DECIMAL(20, 4) NOT NULL COMMENT '采样体积，体积单位',
+    heating_value DECIMAL(18, 6) NOT NULL COMMENT '按组分热值表折算的本样热值，能量单位/体积单位',
+    components    CLOB           NOT NULL COMMENT '合成组分比例快照（JSON，比例合计恰为 100%）',
+    request_id    VARCHAR(64)    NOT NULL COMMENT '首次携带本样的核验提交幂等键',
+    created_at    TIMESTAMP      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '采样入库时间（UTC）',
+    CONSTRAINT uk_sample_station_time UNIQUE (station_code, sample_time)
+);
+
+-- 同站同气量日核验版本序列：数据库级占用，并发核验只允许一个生效版本
+CREATE TABLE IF NOT EXISTS station_day_verification (
+    station_code    VARCHAR(32) NOT NULL COMMENT '交接站编码',
+    gas_date        DATE        NOT NULL COMMENT '气量日（UTC）',
+    current_version INT         NOT NULL COMMENT '当前生效版本号（最新已分配版本）',
+    created_at      TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT pk_station_day_verification PRIMARY KEY (station_code, gas_date)
+);
+
+-- 气质组分核验单：同站同气量日追加版本，旧版本结论可查
+CREATE TABLE IF NOT EXISTS quality_verification (
+    id                      BIGINT AUTO_INCREMENT PRIMARY KEY,
+    verification_no         VARCHAR(80)    NOT NULL COMMENT '核验单号（业务唯一）',
+    request_id              VARCHAR(64)    NOT NULL COMMENT '核验提交幂等键',
+    station_code            VARCHAR(32)    NOT NULL COMMENT '交接站编码',
+    gas_date                DATE           NOT NULL COMMENT '气量日（UTC）',
+    voucher_no              VARCHAR(64)    NOT NULL COMMENT '关联的原始凭证号',
+    version                 INT            NOT NULL COMMENT '版本号，同站同日自 1 递增',
+    sample_count            INT            NOT NULL COMMENT '参与加权的同日采样条数',
+    verified_heating_value  DECIMAL(18, 6) NOT NULL COMMENT '核验热值：同日采样体积加权，能量单位/体积单位',
+    voucher_heating_value   DECIMAL(18, 6) NOT NULL COMMENT '核验时凭证加权热值快照，能量单位/体积单位',
+    relative_deviation      DECIMAL(18, 8) NOT NULL COMMENT '绝对相对偏差＝|核验热值－凭证热值|/凭证热值',
+    difference_flag         TINYINT        NOT NULL COMMENT '气质差异标记：1 偏差>1%，0 一致（恰 1% 视为一致）',
+    status                  VARCHAR(24)    NOT NULL COMMENT '结论状态：CONSISTENT/DIFFERENT_OPEN/DIFFERENT_RESOLVED',
+    sign_off_a_at           TIMESTAMP      NULL COMMENT 'A 方差异签认时刻（UTC），未签认为空',
+    sign_off_b_at           TIMESTAMP      NULL COMMENT 'B 方差异签认时刻（UTC），未签认为空',
+    resolved_at             TIMESTAMP      NULL COMMENT '双方签认完成、差异解除时刻（UTC）',
+    created_at              TIMESTAMP      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '本版本提交时刻（UTC）',
+    CONSTRAINT uk_verification_no UNIQUE (verification_no),
+    CONSTRAINT uk_verification_request UNIQUE (request_id),
+    -- 同站同日同版本唯一：并发核验只允许一个生效版本
+    CONSTRAINT uk_verification_station_day_version UNIQUE (station_code, gas_date, version)
+);
+
+-- 差异签认记录：同一核验单同一方仅一条
+CREATE TABLE IF NOT EXISTS quality_difference_signoff (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    verification_no VARCHAR(80) NOT NULL COMMENT '核验单号',
+    party           VARCHAR(8)  NOT NULL COMMENT '签认方：A/B',
+    request_id      VARCHAR(64) NOT NULL COMMENT '签认幂等键',
+    signed_at       TIMESTAMP   NOT NULL COMMENT '签认时刻（UTC）',
+    CONSTRAINT uk_signoff_request UNIQUE (request_id),
+    CONSTRAINT uk_signoff_verification_party UNIQUE (verification_no, party)
+);
+
+-- 确认暂停：气质差异未解决时，尚未生效的关联凭证暂停双方确认；一张凭证至多一条有效暂停
+CREATE TABLE IF NOT EXISTS voucher_confirm_pause (
+    voucher_no      VARCHAR(64) NOT NULL PRIMARY KEY COMMENT '被暂停确认的凭证号',
+    verification_no VARCHAR(80) NOT NULL COMMENT '触发暂停的核验单号',
+    paused_at       TIMESTAMP   NOT NULL COMMENT '暂停时刻（UTC）',
+    released_at     TIMESTAMP   NULL COMMENT '解除时刻（UTC）；为空表示仍暂停'
 );

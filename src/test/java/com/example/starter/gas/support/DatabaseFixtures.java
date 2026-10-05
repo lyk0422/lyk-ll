@@ -19,6 +19,11 @@ public final class DatabaseFixtures {
         jdbc.update("DELETE FROM voucher_reading_diff");
         jdbc.update("DELETE FROM voucher_dispute");
         jdbc.update("DELETE FROM voucher_confirmation");
+        jdbc.update("DELETE FROM voucher_confirm_pause");
+        jdbc.update("DELETE FROM quality_difference_signoff");
+        jdbc.update("DELETE FROM quality_verification");
+        jdbc.update("DELETE FROM station_day_verification");
+        jdbc.update("DELETE FROM quality_sample");
         jdbc.update("DELETE FROM station_day_voucher");
         jdbc.update("DELETE FROM custody_voucher");
         jdbc.update("DELETE FROM meter_reading");

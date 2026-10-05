@@ -2,13 +2,17 @@ package com.example.starter.gas.web;
 
 import com.example.starter.gas.dto.AssessmentResponse;
 import com.example.starter.gas.dto.ConfirmRequest;
+import com.example.starter.gas.dto.DifferenceSignOffRequest;
 import com.example.starter.gas.dto.DisputeRequest;
 import com.example.starter.gas.dto.ReadingSubmitRequest;
 import com.example.starter.gas.dto.ReadingSubmitResponse;
 import com.example.starter.gas.dto.SealRequest;
+import com.example.starter.gas.dto.VerificationResponse;
+import com.example.starter.gas.dto.VerificationSubmitRequest;
 import com.example.starter.gas.dto.VoucherCreateRequest;
 import com.example.starter.gas.dto.VoucherResponse;
 import com.example.starter.gas.service.CustodyService;
+import com.example.starter.gas.service.QualityVerificationService;
 import jakarta.validation.Valid;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
@@ -32,9 +36,12 @@ import java.util.List;
 public class GasCustodyController {
 
     private final CustodyService custodyService;
+    private final QualityVerificationService qualityVerificationService;
 
-    public GasCustodyController(CustodyService custodyService) {
+    public GasCustodyController(CustodyService custodyService,
+                                QualityVerificationService qualityVerificationService) {
         this.custodyService = custodyService;
+        this.qualityVerificationService = qualityVerificationService;
     }
 
     @PostMapping("/readings")
@@ -82,5 +89,30 @@ public class GasCustodyController {
     @GetMapping("/stations/{stationCode}/assessments")
     public List<AssessmentResponse> listAssessments(@PathVariable String stationCode) {
         return custodyService.listAssessments(stationCode);
+    }
+
+    @PostMapping("/verifications")
+    public ResponseEntity<VerificationResponse> submitVerification(
+            @Valid @RequestBody VerificationSubmitRequest request) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(qualityVerificationService.submitVerification(request));
+    }
+
+    @GetMapping("/verifications/{verificationNo}")
+    public VerificationResponse getVerification(@PathVariable String verificationNo) {
+        return qualityVerificationService.getVerification(verificationNo);
+    }
+
+    @GetMapping("/stations/{stationCode}/verifications")
+    public List<VerificationResponse> listVerifications(
+            @PathVariable String stationCode,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate gasDate) {
+        return qualityVerificationService.listVerifications(stationCode, gasDate);
+    }
+
+    @PostMapping("/verifications/{verificationNo}/sign-offs")
+    public VerificationResponse signOffDifference(@PathVariable String verificationNo,
+                                                  @Valid @RequestBody DifferenceSignOffRequest request) {
+        return qualityVerificationService.signOffDifference(verificationNo, request);
     }
 }
