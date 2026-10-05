@@ -118,6 +118,75 @@ CREATE TABLE IF NOT EXISTS shipment_event (
 );
 COMMENT ON COLUMN shipment_event.event_type IS '事件：ROUTE_REJECTED/CHECKIN_REVERSED/DEVIATION_WARNING/LOST_CONTACT/LATE_CHECKIN_AFTER_CLOSE/REROUTE_SWITCH';
 
+-- 夜间禁行时段（合成管制规则）：全局生效，半开区间 [start,end)
+CREATE TABLE IF NOT EXISTS curfew_period (
+    id         BIGINT AUTO_INCREMENT NOT NULL PRIMARY KEY,
+    start_time TIMESTAMP   NOT NULL,
+    end_time   TIMESTAMP   NOT NULL
+);
+COMMENT ON TABLE curfew_period IS '夜间禁行时段：车辆仅可在时段外或获准改线后通行，换班完成不豁免禁行';
+COMMENT ON COLUMN curfew_period.start_time IS '禁行起点时刻，半开区间[start,end)，时刻==起点视为禁行（恰满起点判定）';
+COMMENT ON COLUMN curfew_period.end_time IS '禁行结束时刻，半开区间[start,end)，时刻==结束视为可通行';
+
+-- 押运接力段：计划跨越禁行起点的运单须在起点前的安全接力点完成双人换班
+CREATE TABLE IF NOT EXISTS relay_segment (
+    id              BIGINT AUTO_INCREMENT NOT NULL PRIMARY KEY,
+    shipment_id     BIGINT      NOT NULL,
+    approval_id     BIGINT      NOT NULL,
+    waypoint_seq    INT         NOT NULL,
+    curfew_start    TIMESTAMP   NOT NULL,
+    status          VARCHAR(16) NOT NULL,
+    outgoing_escort VARCHAR(32),
+    incoming_escort VARCHAR(32),
+    outgoing_time   TIMESTAMP,
+    incoming_time   TIMESTAMP,
+    completed_at    TIMESTAMP,
+    created_at      TIMESTAMP   NOT NULL
+);
+COMMENT ON COLUMN relay_segment.approval_id IS '设置接力点时生效的路线核准记录ID';
+COMMENT ON COLUMN relay_segment.waypoint_seq IS '安全接力点途经点序号，其计划通过时刻须严格早于禁行起点';
+COMMENT ON COLUMN relay_segment.curfew_start IS '关联禁行起点时刻快照：换班完成时刻须严格早于该时刻，恰满即违约';
+COMMENT ON COLUMN relay_segment.status IS 'OPEN进行中/COMPLETED换班完成/BREACHED未按时换班违约冻结';
+COMMENT ON COLUMN relay_segment.outgoing_escort IS '交班押运员编号；换班未完成为NULL';
+COMMENT ON COLUMN relay_segment.incoming_escort IS '接班押运员编号；换班未完成为NULL';
+COMMENT ON COLUMN relay_segment.outgoing_time IS '交班打卡时刻（Asia/Shanghai）；未打卡为NULL';
+COMMENT ON COLUMN relay_segment.incoming_time IS '接班打卡时刻（Asia/Shanghai）；未打卡为NULL';
+COMMENT ON COLUMN relay_segment.completed_at IS '换班完成登记时刻；未完成为NULL';
+
+-- 进行中接力段占用：同一运单同时刻至多一个 OPEN 接力段（主键冲突即并发拒绝）
+CREATE TABLE IF NOT EXISTS shipment_active_relay (
+    shipment_id BIGINT NOT NULL PRIMARY KEY,
+    relay_id    BIGINT NOT NULL
+);
+COMMENT ON TABLE shipment_active_relay IS '进行中接力段占用：设置接力点时插入，换班完成或违约冻结时删除';
+
+CREATE TABLE IF NOT EXISTS relay_checkin (
+    id           BIGINT AUTO_INCREMENT NOT NULL PRIMARY KEY,
+    relay_id     BIGINT      NOT NULL,
+    shipment_id  BIGINT      NOT NULL,
+    waypoint_seq INT         NOT NULL,
+    escort_role  VARCHAR(16) NOT NULL,
+    escort_id    VARCHAR(32) NOT NULL,
+    check_time   TIMESTAMP   NOT NULL,
+    request_id   VARCHAR(64),
+    created_at   TIMESTAMP   NOT NULL,
+    CONSTRAINT uk_relay_checkin UNIQUE (shipment_id, waypoint_seq, escort_role)
+);
+COMMENT ON TABLE relay_checkin IS '接力段双人打卡记录，去重键：运单+途经点序号+押运角色（交班/接班各一次，单人打卡不生效）';
+COMMENT ON COLUMN relay_checkin.escort_role IS 'OUTGOING交班/INCOMING接班；双方均打卡换班才生效';
+COMMENT ON COLUMN relay_checkin.escort_id IS '押运员编号（合成数据）';
+COMMENT ON COLUMN relay_checkin.check_time IS '打卡时刻（Asia/Shanghai），乱序回传按时刻归位，接班时刻早于交班时刻为逆序';
+
+CREATE TABLE IF NOT EXISTS disposal_record (
+    id            BIGINT AUTO_INCREMENT NOT NULL PRIMARY KEY,
+    shipment_id   BIGINT       NOT NULL,
+    relay_id      BIGINT,
+    reason        VARCHAR(512) NOT NULL,
+    registered_at TIMESTAMP    NOT NULL
+);
+COMMENT ON TABLE disposal_record IS '处置登记：未按时完成换班的运单冻结时在同一事务内登记';
+COMMENT ON COLUMN disposal_record.relay_id IS '关联接力段ID；无接力段的冻结为NULL';
+
 CREATE TABLE IF NOT EXISTS idempotent_record (
     request_id    VARCHAR(64) NOT NULL PRIMARY KEY,
     fingerprint   VARCHAR(64) NOT NULL,

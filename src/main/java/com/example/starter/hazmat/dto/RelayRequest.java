@@ -1,0 +1,15 @@
+package com.example.starter.hazmat.dto;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.PositiveOrZero;
+
+/**
+ * 设置安全接力点请求。
+ *
+ * @param requestId   幂等键
+ * @param waypointSeq 接力点途经点序号（其计划通过时刻须严格早于禁行起点）
+ */
+public record RelayRequest(
+        @NotBlank String requestId,
+        @PositiveOrZero int waypointSeq) {
+}
