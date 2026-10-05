@@ -3,29 +3,42 @@ package com.example.starter.quarantine.service;
 import com.example.starter.quarantine.ArrivalResult;
 import com.example.starter.quarantine.CertificateStatus;
 import com.example.starter.quarantine.DeclarationStatus;
+import com.example.starter.quarantine.FlowPurpose;
 import com.example.starter.quarantine.Species;
+import com.example.starter.quarantine.TransitAlertStatus;
+import com.example.starter.quarantine.TransportType;
 import com.example.starter.quarantine.api.ApiDtos.ArrivalCmd;
 import com.example.starter.quarantine.api.ApiDtos.ArrivalView;
 import com.example.starter.quarantine.api.ApiDtos.CertificateView;
 import com.example.starter.quarantine.api.ApiDtos.DeclarationCmd;
 import com.example.starter.quarantine.api.ApiDtos.DeclarationView;
 import com.example.starter.quarantine.api.ApiDtos.DepartCmd;
+import com.example.starter.quarantine.api.ApiDtos.FlowCmd;
+import com.example.starter.quarantine.api.ApiDtos.FlowView;
 import com.example.starter.quarantine.api.ApiDtos.IssueCmd;
 import com.example.starter.quarantine.api.ApiDtos.LockdownCmd;
 import com.example.starter.quarantine.api.ApiDtos.LockdownView;
+import com.example.starter.quarantine.api.ApiDtos.ResolveAlertCmd;
 import com.example.starter.quarantine.api.ApiDtos.StockCmd;
 import com.example.starter.quarantine.api.ApiDtos.StockView;
+import com.example.starter.quarantine.api.ApiDtos.TrajectoryEvent;
+import com.example.starter.quarantine.api.ApiDtos.TrajectoryView;
+import com.example.starter.quarantine.api.ApiDtos.TransitAlertView;
 import com.example.starter.quarantine.api.ApiException;
 import com.example.starter.quarantine.model.Rows.ArrivalRow;
 import com.example.starter.quarantine.model.Rows.CertificateRow;
 import com.example.starter.quarantine.model.Rows.DeclarationRow;
+import com.example.starter.quarantine.model.Rows.FlowRegistrationRow;
 import com.example.starter.quarantine.model.Rows.LockdownRow;
+import com.example.starter.quarantine.model.Rows.TransitAlertRow;
 import com.example.starter.quarantine.repo.QuarantineRepository;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
 import org.springframework.dao.DuplicateKeyException;
@@ -58,17 +71,43 @@ public class QuarantineService {
 
     /**
      * 检疫申报。幂等；申报时养殖场已处于封锁区的，申报单直接落库为已驳回。
+     * 运输类型 TRANSIT（过境）须给定时限与途经区域清单；LOCAL 不允许携带过境字段。
      */
     @Transactional
     public DeclarationView declare(DeclarationCmd cmd) {
+        TransportType transportType = cmd.transportType() == null ? TransportType.LOCAL : cmd.transportType();
+        Integer transitHours = transportType == TransportType.TRANSIT ? cmd.transitHours() : null;
+        List<String> routeRegions = transportType == TransportType.TRANSIT
+                ? normalizeRouteRegions(cmd.routeRegions()) : null;
+        if (transportType == TransportType.TRANSIT) {
+            if (transitHours == null) {
+                throw ApiException.unprocessable("过境申报必须给定时限（transitHours，小时）");
+            }
+            if (routeRegions == null) {
+                throw ApiException.unprocessable("过境申报必须给出途经区域清单（routeRegions）");
+            }
+        }
+        String joinedRegions = routeRegions == null ? null : String.join(",", routeRegions);
         String fingerprint = fingerprint(cmd.requestId(), cmd.farmId(), cmd.destination(),
-                cmd.species().name(), String.valueOf(cmd.quantity()), cmd.earTagRange());
+                cmd.species().name(), String.valueOf(cmd.quantity()), cmd.earTagRange(),
+                transportType.name(), String.valueOf(transitHours), String.valueOf(joinedRegions));
+        TransportType finalType = transportType;
         return repo.findDeclarationByRequestId(cmd.requestId())
                 .map(existing -> replayDeclaration(existing, fingerprint))
-                .orElseGet(() -> createDeclaration(cmd, fingerprint));
+                .orElseGet(() -> createDeclaration(cmd, fingerprint, finalType, transitHours, joinedRegions));
     }
 
-    private DeclarationView createDeclaration(DeclarationCmd cmd, String fingerprint) {
+    private List<String> normalizeRouteRegions(List<String> routeRegions) {
+        if (routeRegions == null) {
+            return null;
+        }
+        List<String> normalized = routeRegions.stream().map(String::trim).distinct().toList();
+        return normalized.isEmpty() ? null : normalized;
+    }
+
+    private DeclarationView createDeclaration(DeclarationCmd cmd, String fingerprint,
+                                              TransportType transportType, Integer transitHours,
+                                              String joinedRegions) {
         Instant now = clock.instant();
         repo.ensureFarmRegistry(cmd.farmId(), now);
         // 与封锁发布串行化：持锁期间封锁要么已生效（本单驳回），要么未生效（封锁随后会驳回本单）。
@@ -78,7 +117,8 @@ public class QuarantineService {
         String rejectReason = locked ? LOCKDOWN_REJECT_REASON : null;
         try {
             repo.insertDeclaration(cmd.requestId(), fingerprint, cmd.farmId(), cmd.destination(),
-                    cmd.species(), cmd.quantity(), cmd.earTagRange(), status, rejectReason, now);
+                    cmd.species(), cmd.quantity(), cmd.earTagRange(), status, rejectReason,
+                    transportType, transitHours, joinedRegions, now);
         } catch (DuplicateKeyException e) {
             // 并发同键申报：以先提交者为准。
             return repo.findDeclarationByRequestId(cmd.requestId())
@@ -149,6 +189,7 @@ public class QuarantineService {
         long id = repo.insertCertificate("TMP-" + cmd.requestId(), cmd.requestId(), fingerprint,
                 declaration.requestId(), declaration.farmId(), declaration.destination(),
                 declaration.species(), declaration.quantity(), declaration.earTagRange(),
+                declaration.transportType(), declaration.transitHours(), declaration.routeRegions(),
                 issuedAt, expiresAt, now);
         String certNo = String.format("AQ%08d", id);
         repo.updateCertNo(id, certNo, now);
@@ -189,7 +230,10 @@ public class QuarantineService {
         if (repo.findActiveLockdownByFarm(locked.farmId()).isPresent()) {
             throw ApiException.unprocessable("产地处于疫点封锁区，禁止启运");
         }
-        repo.markDeparted(cmd.certNo(), now, now);
+        // 过境行程自启运起算核销时限：终点 = 启运时间 + 过境时限，恰满时限视为按时。
+        Instant transitDeadlineAt = locked.transportType() == TransportType.TRANSIT
+                ? now.plusSeconds(locked.transitHours() * 3600L) : null;
+        repo.markDeparted(cmd.certNo(), now, transitDeadlineAt, now);
         return repo.findCertByNo(cmd.certNo()).map(this::toCertificateView).orElseThrow();
     }
 
@@ -294,9 +338,46 @@ public class QuarantineService {
         }
         repo.insertArrival(cmd.requestId(), fingerprint, cmd.certNo(), cmd.quantity(),
                 result, note, now);
+        // 过境证：与抵达记录同一事务写入加强监测标记与超时预警（预警不改变证书效力）。
+        if (cert.transportType() == TransportType.TRANSIT) {
+            if (passesEpidemicArea(cert.routeRegions())) {
+                repo.markEnhancedMonitoring(cert.certNo(), now);
+            }
+            ensureTransitAlertIfOverdue(cert, now);
+        }
         CertificateRow after = repo.findCertByNo(cmd.certNo()).orElseThrow();
         ArrivalRow row = repo.findArrivalByRequestId(cmd.requestId()).orElseThrow();
         return toArrivalView(row, after);
+    }
+
+    /** 途经区域与合成疫区清单是否有交集。 */
+    private boolean passesEpidemicArea(String routeRegions) {
+        if (routeRegions == null || routeRegions.isBlank()) {
+            return false;
+        }
+        List<String> regions = List.of(routeRegions.split(","));
+        return repo.findEpidemicAreaCodes().stream().anyMatch(regions::contains);
+    }
+
+    /**
+     * 过境超时未核销则生成预警事件（每证至多一条，幂等）：在途证当前时刻晚于核销时限终点，
+     * 或已结案证结案时刻晚于终点。恰满时限（等于终点）视为按时，不触发预警。
+     */
+    private void ensureTransitAlertIfOverdue(CertificateRow cert, Instant now) {
+        Instant deadline = cert.transitDeadlineAt();
+        if (deadline == null) {
+            return;
+        }
+        boolean overdue = cert.status() == CertificateStatus.CLOSED
+                ? cert.closedAt() != null && cert.closedAt().isAfter(deadline)
+                : now.isAfter(deadline);
+        if (overdue) {
+            repo.insertTransitAlertIfAbsent(alertKey(cert.certNo()), cert.certNo(), now);
+        }
+    }
+
+    private static String alertKey(String certNo) {
+        return "TA-" + certNo;
     }
 
     private ArrivalView replayArrival(ArrivalRow existing, String fingerprint) {
@@ -319,6 +400,131 @@ public class QuarantineService {
         repo.ensureFarmRegistry(cmd.farmId(), now);
         repo.upsertStock(cmd.farmId(), cmd.species(), cmd.earTagRange(), cmd.quantity(), now);
         return new StockView(cmd.farmId(), cmd.species(), cmd.earTagRange(), cmd.quantity());
+    }
+
+    // ---------- 流向登记 ----------
+
+    /**
+     * 流向登记。幂等；按证书运输类型拦截不符用途的流向：过境证仅允许 TRANSIT 用途，
+     * 本地证仅允许 LOCAL_SALE/BREEDING；不符用途返回 422 且无副作用。
+     */
+    @Transactional
+    public FlowView registerFlow(FlowCmd cmd) {
+        String fingerprint = fingerprint(cmd.requestId(), cmd.certNo(), cmd.purpose().name());
+        var existing = repo.findFlowByRequestId(cmd.requestId());
+        if (existing.isPresent()) {
+            FlowRegistrationRow row = existing.get();
+            if (!row.fingerprint().equals(fingerprint)) {
+                throw ApiException.conflict("requestId 已存在且业务参数不一致，拒绝重放");
+            }
+            return toFlowView(row);
+        }
+        CertificateRow cert = repo.findCertByNo(cmd.certNo())
+                .orElseThrow(() -> ApiException.notFound("证书不存在: " + cmd.certNo()));
+        boolean purposeAllowed = cert.transportType() == TransportType.TRANSIT
+                ? cmd.purpose() == FlowPurpose.TRANSIT
+                : cmd.purpose() != FlowPurpose.TRANSIT;
+        if (!purposeAllowed) {
+            throw ApiException.unprocessable(
+                    "证书运输类型 " + cert.transportType() + " 不允许流向用途 " + cmd.purpose());
+        }
+        Instant now = clock.instant();
+        try {
+            repo.insertFlowRegistration(cmd.requestId(), fingerprint, cmd.certNo(), cmd.purpose(), now);
+        } catch (DuplicateKeyException e) {
+            // 并发同键登记：以先提交者为准。
+            return repo.findFlowByRequestId(cmd.requestId())
+                    .map(row -> {
+                        if (!row.fingerprint().equals(fingerprint)) {
+                            throw ApiException.conflict("requestId 已存在且业务参数不一致，拒绝重放");
+                        }
+                        return toFlowView(row);
+                    })
+                    .orElseThrow(() -> e);
+        }
+        return repo.findFlowByRequestId(cmd.requestId()).map(this::toFlowView).orElseThrow();
+    }
+
+    // ---------- 过境超时预警 ----------
+
+    /**
+     * 扫描超时未核销的在途过境证并生成预警事件（每证至多一条，幂等）；预警不改变证书效力。
+     * 返回当前全部预警事件（审计口径）。
+     */
+    @Transactional
+    public List<TransitAlertView> scanTransitAlerts() {
+        Instant now = clock.instant();
+        for (CertificateRow cert : repo.findOverdueTransitCerts(now)) {
+            repo.insertTransitAlertIfAbsent(alertKey(cert.certNo()), cert.certNo(), now);
+        }
+        return listTransitAlerts();
+    }
+
+    /**
+     * 办结过境预警（处理闭环）。幂等：同键同参返回首次结果，同键异参 409；
+     * 已办结的预警对新请求号幂等返回当前状态。
+     */
+    @Transactional
+    public TransitAlertView resolveTransitAlert(String alertKey, ResolveAlertCmd cmd) {
+        String fingerprint = fingerprint(cmd.requestId(), alertKey, String.valueOf(cmd.note()));
+        var byRequest = repo.findAlertByResolveRequestId(cmd.requestId());
+        if (byRequest.isPresent()) {
+            TransitAlertRow row = byRequest.get();
+            if (!row.resolveFingerprint().equals(fingerprint)) {
+                throw ApiException.conflict("requestId 已存在且业务参数不一致，拒绝重放");
+            }
+            return toAlertView(row);
+        }
+        TransitAlertRow alert = repo.findAlertByKey(alertKey)
+                .orElseThrow(() -> ApiException.notFound("过境预警不存在: " + alertKey));
+        if (alert.status() == TransitAlertStatus.RESOLVED) {
+            return toAlertView(alert);
+        }
+        Instant now = clock.instant();
+        repo.resolveAlert(alertKey, cmd.requestId(), fingerprint, cmd.note(), now);
+        return repo.findAlertByKey(alertKey).map(this::toAlertView).orElseThrow();
+    }
+
+    @Transactional(readOnly = true)
+    public List<TransitAlertView> listTransitAlerts() {
+        return repo.findAllAlerts().stream().map(this::toAlertView).toList();
+    }
+
+    // ---------- 轨迹查询（审计口径） ----------
+
+    /**
+     * 证书轨迹：汇总出证、启运、落地报告、流向登记、预警生成/办结与结案事件，按时间升序。
+     */
+    @Transactional(readOnly = true)
+    public TrajectoryView getTrajectory(String certNo) {
+        CertificateRow cert = repo.findCertByNo(certNo)
+                .orElseThrow(() -> ApiException.notFound("证书不存在: " + certNo));
+        List<TrajectoryEvent> events = new ArrayList<>();
+        events.add(new TrajectoryEvent("ISSUED", "出证，证号 " + cert.certNo(), cert.issuedAt()));
+        if (cert.departedAt() != null) {
+            events.add(new TrajectoryEvent("DEPARTED", "启运", cert.departedAt()));
+        }
+        for (ArrivalRow arrival : repo.findArrivalsByCertNo(certNo)) {
+            events.add(new TrajectoryEvent("ARRIVAL",
+                    "落地报告 " + arrival.quantity() + " 头，结果 " + arrival.result(), arrival.createdAt()));
+        }
+        for (FlowRegistrationRow flow : repo.findFlowsByCertNo(certNo)) {
+            events.add(new TrajectoryEvent("FLOW_REGISTERED",
+                    "流向登记：" + flow.purpose(), flow.createdAt()));
+        }
+        for (TransitAlertRow alert : repo.findAlertsByCertNo(certNo)) {
+            events.add(new TrajectoryEvent("ALERT_TRIGGERED",
+                    "过境超时未核销预警 " + alert.alertKey(), alert.triggeredAt()));
+            if (alert.resolvedAt() != null) {
+                events.add(new TrajectoryEvent("ALERT_RESOLVED",
+                        "预警办结：" + alert.resolveNote(), alert.resolvedAt()));
+            }
+        }
+        if (cert.closedAt() != null) {
+            events.add(new TrajectoryEvent("CLOSED", "结案", cert.closedAt()));
+        }
+        events.sort(Comparator.comparing(TrajectoryEvent::at));
+        return new TrajectoryView(cert.certNo(), cert.transportType(), events);
     }
 
     // ---------- 查询 ----------
@@ -348,13 +554,17 @@ public class QuarantineService {
 
     private DeclarationView toDeclarationView(DeclarationRow row) {
         return new DeclarationView(row.requestId(), row.farmId(), row.destination(), row.species(),
-                row.quantity(), row.earTagRange(), row.status(), row.rejectReason(), row.createdAt());
+                row.quantity(), row.earTagRange(), row.status(), row.rejectReason(),
+                row.transportType(), row.transitHours(),
+                row.routeRegions() == null ? null : List.of(row.routeRegions().split(",")),
+                row.createdAt());
     }
 
     private CertificateView toCertificateView(CertificateRow row) {
         return new CertificateView(row.certNo(), row.issueRequestId(), row.declarationRequestId(),
                 row.farmId(), row.destination(), row.species(), row.quantity(), row.earTagRange(),
                 row.status(), row.quarantineObservation(), row.reportedQty(),
+                row.transportType(), row.transitDeadlineAt(), row.enhancedMonitoring(),
                 row.issuedAt(), row.expiresAt(), row.departedAt(), row.closedAt());
     }
 
@@ -365,7 +575,17 @@ public class QuarantineService {
 
     private ArrivalView toArrivalView(ArrivalRow row, CertificateRow cert) {
         return new ArrivalView(row.requestId(), row.certNo(), row.quantity(), row.result(), row.note(),
-                cert.status(), cert.quarantineObservation(), cert.reportedQty(), row.createdAt());
+                cert.status(), cert.quarantineObservation(), cert.reportedQty(),
+                cert.enhancedMonitoring(), row.createdAt());
+    }
+
+    private FlowView toFlowView(FlowRegistrationRow row) {
+        return new FlowView(row.requestId(), row.certNo(), row.purpose(), row.createdAt());
+    }
+
+    private TransitAlertView toAlertView(TransitAlertRow row) {
+        return new TransitAlertView(row.alertKey(), row.certNo(), row.status(),
+                row.triggeredAt(), row.resolvedAt(), row.resolveNote());
     }
 
     /**

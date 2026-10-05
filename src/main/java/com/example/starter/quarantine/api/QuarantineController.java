@@ -6,14 +6,20 @@ import com.example.starter.quarantine.api.ApiDtos.CertificateView;
 import com.example.starter.quarantine.api.ApiDtos.DeclarationCmd;
 import com.example.starter.quarantine.api.ApiDtos.DeclarationView;
 import com.example.starter.quarantine.api.ApiDtos.DepartCmd;
+import com.example.starter.quarantine.api.ApiDtos.FlowCmd;
+import com.example.starter.quarantine.api.ApiDtos.FlowView;
 import com.example.starter.quarantine.api.ApiDtos.IssueCmd;
 import com.example.starter.quarantine.api.ApiDtos.LockdownCmd;
 import com.example.starter.quarantine.api.ApiDtos.LockdownView;
+import com.example.starter.quarantine.api.ApiDtos.ResolveAlertCmd;
 import com.example.starter.quarantine.api.ApiDtos.StockCmd;
 import com.example.starter.quarantine.api.ApiDtos.StockView;
+import com.example.starter.quarantine.api.ApiDtos.TrajectoryView;
+import com.example.starter.quarantine.api.ApiDtos.TransitAlertView;
 import com.example.starter.quarantine.service.IssueExecutor;
 import com.example.starter.quarantine.service.QuarantineService;
 import jakarta.validation.Valid;
+import java.util.List;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -91,5 +97,36 @@ public class QuarantineController {
                               @RequestParam String species,
                               @RequestParam String earTagRange) {
         return service.getStock(farmId, species, earTagRange);
+    }
+
+    /** 流向登记（幂等；按证书运输类型拦截不符用途的流向）。 */
+    @PostMapping("/quarantine/flows")
+    public FlowView registerFlow(@Valid @RequestBody FlowCmd cmd) {
+        return service.registerFlow(cmd);
+    }
+
+    /** 扫描超时未核销的过境证并生成预警事件（幂等，每证至多一条）。 */
+    @PostMapping("/quarantine/transit-alerts/scan")
+    public List<TransitAlertView> scanTransitAlerts() {
+        return service.scanTransitAlerts();
+    }
+
+    /** 查询全部过境预警事件（审计口径）。 */
+    @GetMapping("/quarantine/transit-alerts")
+    public List<TransitAlertView> listTransitAlerts() {
+        return service.listTransitAlerts();
+    }
+
+    /** 办结过境预警（幂等，处理闭环）。 */
+    @PostMapping("/quarantine/transit-alerts/{alertKey}/resolve")
+    public TransitAlertView resolveTransitAlert(@PathVariable String alertKey,
+                                                @Valid @RequestBody ResolveAlertCmd cmd) {
+        return service.resolveTransitAlert(alertKey, cmd);
+    }
+
+    /** 证书轨迹查询（审计口径：出证、启运、落地、流向、预警、结案）。 */
+    @GetMapping("/quarantine/certificates/{certNo}/trajectory")
+    public TrajectoryView getTrajectory(@PathVariable String certNo) {
+        return service.getTrajectory(certNo);
     }
 }

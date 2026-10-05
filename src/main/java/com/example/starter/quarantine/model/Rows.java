@@ -3,7 +3,10 @@ package com.example.starter.quarantine.model;
 import com.example.starter.quarantine.ArrivalResult;
 import com.example.starter.quarantine.CertificateStatus;
 import com.example.starter.quarantine.DeclarationStatus;
+import com.example.starter.quarantine.FlowPurpose;
 import com.example.starter.quarantine.Species;
+import com.example.starter.quarantine.TransitAlertStatus;
+import com.example.starter.quarantine.TransportType;
 import java.time.Instant;
 
 /**
@@ -37,6 +40,9 @@ public final class Rows {
             String earTagRange,
             DeclarationStatus status,
             String rejectReason,
+            TransportType transportType,
+            Integer transitHours,
+            String routeRegions,
             Instant createdAt) {
     }
 
@@ -55,6 +61,11 @@ public final class Rows {
             CertificateStatus status,
             boolean quarantineObservation,
             int reportedQty,
+            TransportType transportType,
+            Integer transitHours,
+            Instant transitDeadlineAt,
+            String routeRegions,
+            boolean enhancedMonitoring,
             Instant issuedAt,
             Instant expiresAt,
             Instant departedAt,
@@ -79,6 +90,30 @@ public final class Rows {
             int quantity,
             ArrivalResult result,
             String note,
+            Instant createdAt) {
+    }
+
+    /** 流向登记行。 */
+    public record FlowRegistrationRow(
+            long id,
+            String requestId,
+            String fingerprint,
+            String certNo,
+            FlowPurpose purpose,
+            Instant createdAt) {
+    }
+
+    /** 过境超时预警事件行。 */
+    public record TransitAlertRow(
+            long id,
+            String alertKey,
+            String certNo,
+            TransitAlertStatus status,
+            Instant triggeredAt,
+            String resolveRequestId,
+            String resolveFingerprint,
+            String resolveNote,
+            Instant resolvedAt,
             Instant createdAt) {
     }
 }

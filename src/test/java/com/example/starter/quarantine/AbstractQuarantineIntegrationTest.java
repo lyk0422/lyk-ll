@@ -42,6 +42,8 @@ public abstract class AbstractQuarantineIntegrationTest {
 
     @BeforeEach
     void resetDatabaseAndClock() {
+        jdbc.update("DELETE FROM transit_alert");
+        jdbc.update("DELETE FROM flow_registration");
         jdbc.update("DELETE FROM arrival_report");
         jdbc.update("DELETE FROM cert_batch_hold");
         jdbc.update("DELETE FROM quarantine_certificate");
@@ -49,6 +51,7 @@ public abstract class AbstractQuarantineIntegrationTest {
         jdbc.update("DELETE FROM lockdown_zone");
         jdbc.update("DELETE FROM farm_stock");
         jdbc.update("DELETE FROM farm_registry");
+        // 合成疫区清单为初始化种子数据，用例间保留。
         clock.setInstant(TestClockConfig.BASE_INSTANT);
     }
 

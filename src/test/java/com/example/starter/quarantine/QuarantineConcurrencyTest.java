@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.starter.quarantine.api.ApiDtos.ArrivalCmd;
 import com.example.starter.quarantine.api.ApiDtos.CertificateView;
+import com.example.starter.quarantine.api.ApiDtos.DeclarationCmd;
 import com.example.starter.quarantine.api.ApiDtos.DeclarationView;
 import com.example.starter.quarantine.api.ApiDtos.IssueCmd;
 import com.example.starter.quarantine.api.ApiDtos.LockdownCmd;
@@ -153,6 +154,38 @@ class QuarantineConcurrencyTest extends AbstractQuarantineIntegrationTest {
         assertThat(results).hasSize(2);
         assertThat(countRows("arrival_report")).isEqualTo(1);
         assertThat(service.getCertificate(cert.certNo()).reportedQty()).isEqualTo(4);
+    }
+
+    /** 并发对同一过境证足额核销：唯一成功结案，其余只记录为迟到事件。 */
+    @Test
+    void concurrentTransitArrivalVerificationSucceedsExactlyOnce() throws Exception {
+        String farm = "F-CC-TR-ARR";
+        stock(farm, Species.PIG, "TAG-TR", 10);
+        DeclarationView declaration = service.declare(new DeclarationCmd(
+                "D-CC-TR", farm, "DEST-TR", Species.PIG, 10, "TAG-TR",
+                TransportType.TRANSIT, 6, List.of("SYN-EP-001")));
+        CertificateView cert = issue("I-CC-TR", declaration.requestId());
+        depart(cert.certNo());
+
+        List<Callable<Object>> tasks = new ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            String requestId = "A-CC-TR-" + i;
+            tasks.add(() -> service.arrive(new ArrivalCmd(requestId, cert.certNo(), 10)));
+        }
+        List<Object> results = runConcurrently(tasks);
+
+        // 恰一笔 ACCEPTED_FINAL，其余为结案后的迟到事件；最终核销数量等于证载数量。
+        long finals = results.stream()
+                .map(r -> (com.example.starter.quarantine.api.ApiDtos.ArrivalView) r)
+                .filter(v -> v.result() == ArrivalResult.ACCEPTED_FINAL)
+                .count();
+        assertThat(finals).isEqualTo(1);
+        assertThat(countRows("arrival_report")).isEqualTo(4);
+        CertificateView after = service.getCertificate(cert.certNo());
+        assertThat(after.status()).isEqualTo(CertificateStatus.CLOSED);
+        assertThat(after.reportedQty()).isEqualTo(10);
+        // 途经疫区：加强监测标记与抵达记录同事务写入，并发下仍成立。
+        assertThat(after.enhancedMonitoring()).isTrue();
     }
 
     /** 以同一发令枪并发执行任务并收集结果（异常作为结果返回）。 */

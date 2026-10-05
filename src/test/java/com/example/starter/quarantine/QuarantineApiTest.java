@@ -114,4 +114,61 @@ class QuarantineApiTest extends AbstractQuarantineIntegrationTest {
                         {"requestId":"I-HTTP-LK","declarationRequestId":"D-HTTP-LK"}
                         """)).andExpect(status().isUnprocessableEntity());
     }
+
+    @Test
+    void transitFlowOverHttp() throws Exception {
+        mvc.perform(post("/api/stocks").contentType(MediaType.APPLICATION_JSON).content("""
+                {"farmId":"F-HTTP-TR","species":"PIG","earTagRange":"TAG-TR","quantity":10}
+                """)).andExpect(status().isOk());
+
+        // 过境申报：运输类型 transit，给定时限与途经区域（含合成疫区）。
+        mvc.perform(post("/api/quarantine/declarations").contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"requestId":"D-HTTP-TR","farmId":"F-HTTP-TR","destination":"DEST-TR",
+                         "species":"PIG","quantity":4,"earTagRange":"TAG-TR",
+                         "transportType":"TRANSIT","transitHours":6,
+                         "routeRegions":["SYN-EP-001"]}
+                        """)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.transportType").value("TRANSIT"));
+
+        String certNo = mvc.perform(post("/api/quarantine/certificates")
+                .contentType(MediaType.APPLICATION_JSON).content("""
+                        {"requestId":"I-HTTP-TR","declarationRequestId":"D-HTTP-TR"}
+                        """)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.transportType").value("TRANSIT"))
+                .andReturn().getResponse().getContentAsString()
+                .replaceAll(".*\"certNo\":\"", "").replaceAll("\".*", "");
+
+        // 过境证用于本地销售流向 → 422 拦截。
+        mvc.perform(post("/api/quarantine/flows").contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"requestId":"FL-HTTP-TR-BAD","certNo":"%s","purpose":"LOCAL_SALE"}
+                        """.formatted(certNo))).andExpect(status().isUnprocessableEntity());
+        // 过境通行流向 → 登记成功。
+        mvc.perform(post("/api/quarantine/flows").contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"requestId":"FL-HTTP-TR","certNo":"%s","purpose":"TRANSIT"}
+                        """.formatted(certNo))).andExpect(status().isOk());
+
+        // 启运：写入过境核销时限终点。
+        mvc.perform(post("/api/quarantine/departures").contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"requestId":"DEP-HTTP-TR","certNo":"%s"}
+                        """.formatted(certNo))).andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("IN_TRANSIT"))
+                .andExpect(jsonPath("$.transitDeadlineAt").exists());
+
+        // 抵达核销：途经合成疫区，加强监测标记与抵达记录同事务写入。
+        mvc.perform(post("/api/quarantine/arrivals").contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"requestId":"A-HTTP-TR","certNo":"%s","quantity":4}
+                        """.formatted(certNo))).andExpect(status().isOk())
+                .andExpect(jsonPath("$.result").value("ACCEPTED_FINAL"))
+                .andExpect(jsonPath("$.enhancedMonitoring").value(true));
+
+        // 轨迹查询纳入审计口径。
+        mvc.perform(get("/api/quarantine/certificates/{certNo}/trajectory", certNo))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.transportType").value("TRANSIT"));
+    }
 }
