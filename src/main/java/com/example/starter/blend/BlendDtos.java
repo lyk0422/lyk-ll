@@ -83,6 +83,39 @@ public final class BlendDtos {
                               List<BatchView> batches, List<String> lateEvents) {
     }
 
+    /** 清洗单发起请求，requestId 为幂等键；占用时间窗为半开区间[windowStart, windowEnd)，格式yyyy-MM-dd HH:mm:ss。 */
+    public record CreateCleaningRequest(@NotBlank String requestId,
+                                        @NotNull Long blendTankId,
+                                        @NotBlank String toProduct,
+                                        @NotBlank String windowStart,
+                                        @NotBlank String windowEnd) {
+    }
+
+    /** 清洗单发起响应。 */
+    public record CleaningResponse(long cleaningId, String cleanNo, long blendTankId, String status,
+                                   String fromProduct, String toProduct,
+                                   String windowStart, String windowEnd) {
+    }
+
+    /** 清洗完成确认请求，requestId 为幂等键。 */
+    public record CompleteCleaningRequest(@NotBlank String requestId) {
+    }
+
+    /** 清洗完成确认响应；tankState 为复位后的罐状态。 */
+    public record CompleteCleaningResponse(long cleaningId, String status, String completedAt,
+                                           long blendTankId, String tankState) {
+    }
+
+    /** 罐占用视图条目：执行中调合单、执行中清洗占用窗、当前品种与罐状态。 */
+    public record TankOccupancyView(long blendTankId, String tankCode, String state, String currentProduct,
+                                    Long executingOrderId, Long executingCleaningId,
+                                    String cleaningWindowStart, String cleaningWindowEnd) {
+    }
+
+    /** 罐占用视图响应。 */
+    public record TankOccupancyResponse(List<TankOccupancyView> tanks) {
+    }
+
     /** 统一错误报文。 */
     public record ErrorBody(String error, String message) {
     }

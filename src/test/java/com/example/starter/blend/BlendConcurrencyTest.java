@@ -1,6 +1,7 @@
 package com.example.starter.blend;
 
 import com.example.starter.blend.BlendDtos.ComponentAmount;
+import com.example.starter.blend.BlendDtos.CreateCleaningRequest;
 import com.example.starter.blend.BlendDtos.CreateOrderRequest;
 import com.example.starter.blend.BlendDtos.OrderResponse;
 import org.junit.jupiter.api.Test;
@@ -118,5 +119,51 @@ class BlendConcurrencyTest extends BlendServiceTestBase {
         // 无论重放还是409，最终只创建一张调合单，库存只扣减一次
         assertEquals(1, countRows("blend_order"));
         assertEquals(new BigDecimal("950.000"), remaining(1));
+    }
+
+    @Test
+    void concurrentCleaningOnSameTankOnlyOneSucceeds() throws Exception {
+        int threads = 4;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch ready = new CountDownLatch(threads);
+        CountDownLatch go = new CountDownLatch(1);
+        AtomicInteger success = new AtomicInteger();
+        AtomicInteger conflict = new AtomicInteger();
+        AtomicInteger other = new AtomicInteger();
+        try {
+            var futures = java.util.stream.IntStream.range(0, threads)
+                    .mapToObj(i -> pool.submit(() -> {
+                        ready.countDown();
+                        try {
+                            go.await(5, TimeUnit.SECONDS);
+                            service.createCleaning(new CreateCleaningRequest("R-CL-CC-" + i, 1L, "GAS95",
+                                    "2026-09-25 18:00:00", "2026-09-25 20:00:00"));
+                            success.incrementAndGet();
+                        } catch (BlendException e) {
+                            if (e.status() == 409) {
+                                conflict.incrementAndGet();
+                            } else {
+                                other.incrementAndGet();
+                            }
+                        } catch (Exception e) {
+                            other.incrementAndGet();
+                        }
+                    }))
+                    .toList();
+            assertTrue(ready.await(10, TimeUnit.SECONDS));
+            go.countDown();
+            for (Future<?> future : futures) {
+                future.get(30, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+        // 清洗任务按罐号唯一：并发发起唯一成功，其余均为409冲突
+        assertEquals(1, success.get());
+        assertEquals(threads - 1, conflict.get());
+        assertEquals(0, other.get());
+        // 最终数据一致：仅一张执行中清洗单、一条罐级清洗锁
+        assertEquals(1, countRows("cleaning_order"));
+        assertEquals(1, countRows("cleaning_tank_lock"));
     }
 }

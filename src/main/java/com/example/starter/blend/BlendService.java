@@ -4,7 +4,11 @@ import com.example.starter.blend.BlendCalculator.ComponentSnapshot;
 import com.example.starter.blend.BlendCalculator.Judgment;
 import com.example.starter.blend.BlendCalculator.SpecLimits;
 import com.example.starter.blend.BlendDtos.BatchView;
+import com.example.starter.blend.BlendDtos.CleaningResponse;
+import com.example.starter.blend.BlendDtos.CompleteCleaningRequest;
+import com.example.starter.blend.BlendDtos.CompleteCleaningResponse;
 import com.example.starter.blend.BlendDtos.ComponentAmount;
+import com.example.starter.blend.BlendDtos.CreateCleaningRequest;
 import com.example.starter.blend.BlendDtos.CreateOrderRequest;
 import com.example.starter.blend.BlendDtos.Metrics;
 import com.example.starter.blend.BlendDtos.OrderDetail;
@@ -16,11 +20,17 @@ import com.example.starter.blend.BlendDtos.ReleaseResponse;
 import com.example.starter.blend.BlendDtos.SampleRequest;
 import com.example.starter.blend.BlendDtos.SampleResponse;
 import com.example.starter.blend.BlendDtos.SampleView;
+import com.example.starter.blend.BlendDtos.TankOccupancyResponse;
+import com.example.starter.blend.BlendDtos.TankOccupancyView;
 import com.example.starter.blend.BlendRepository.BatchComponentRow;
 import com.example.starter.blend.BlendRepository.BatchRow;
+import com.example.starter.blend.BlendRepository.CleaningRow;
 import com.example.starter.blend.BlendRepository.ComponentTankRow;
 import com.example.starter.blend.BlendRepository.OrderRow;
+import com.example.starter.blend.BlendRepository.OrderWindowRow;
 import com.example.starter.blend.BlendRepository.SpecRow;
+import com.example.starter.blend.BlendRepository.TankOccupancyRow;
+import com.example.starter.blend.BlendRepository.TankStatusRow;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -60,6 +70,18 @@ public class BlendService {
     /** 批次状态：判定不合格。 */
     public static final String BATCH_FAILED = "FAILED";
 
+    /** 清洗单状态：执行中。 */
+    public static final String CLEAN_EXECUTING = "EXECUTING";
+    /** 清洗单状态：已完成确认（终态）。 */
+    public static final String CLEAN_COMPLETED = "COMPLETED";
+    /** 清洗单状态：逾期自动释放（终态）。 */
+    public static final String CLEAN_EXPIRED = "EXPIRED";
+
+    /** 罐状态：正常。 */
+    public static final String TANK_IDLE = "IDLE";
+    /** 罐状态：待确认（清洗逾期释放后须重新发起清洗方可占用）。 */
+    public static final String TANK_PENDING_CONFIRM = "PENDING_CONFIRM";
+
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final BlendRepository repository;
@@ -82,6 +104,7 @@ public class BlendService {
      * 任一组分不足则整单不下达且库存无变动；同一调合罐同时刻只允许一张执行中调合单。
      */
     public OrderResponse createOrder(CreateOrderRequest request) {
+        self.expireOverdueCleaningsNow();
         String fingerprint = idempotency.fingerprint(request.requestId(), "CREATE_ORDER",
                 request.productCode(), request.blendTankId(), canonicalComponents(request.components()));
         return idempotency.execute("CREATE_ORDER", request.requestId(), fingerprint,
@@ -116,6 +139,52 @@ public class BlendService {
         String fingerprint = idempotency.fingerprint(request.requestId(), "RELEASE", orderId);
         return idempotency.execute("RELEASE", request.requestId(), fingerprint,
                 ReleaseResponse.class, () -> self.doRelease(orderId, request));
+    }
+
+    /**
+     * 发起品种切换清洗确认：requestId 幂等，指纹覆盖 requestId 与全部业务字段；
+     * 清洗任务按罐号唯一，占用时间窗按半开区间登记，与调合单占用冲突时不得下达。
+     */
+    public CleaningResponse createCleaning(CreateCleaningRequest request) {
+        self.expireOverdueCleaningsNow();
+        String fingerprint = idempotency.fingerprint(request.requestId(), "CREATE_CLEANING",
+                request.blendTankId(), request.toProduct(), request.windowStart(), request.windowEnd());
+        return idempotency.execute("CREATE_CLEANING", request.requestId(), fingerprint,
+                CleaningResponse.class, () -> self.doCreateCleaning(request));
+    }
+
+    /**
+     * 清洗完成确认：requestId 幂等；清洗确认与罐状态复位在同一事务内完成。
+     */
+    public CompleteCleaningResponse completeCleaning(long cleaningId, CompleteCleaningRequest request) {
+        self.expireOverdueCleaningsNow();
+        String fingerprint = idempotency.fingerprint(request.requestId(), "COMPLETE_CLEANING", cleaningId);
+        return idempotency.execute("COMPLETE_CLEANING", request.requestId(), fingerprint,
+                CompleteCleaningResponse.class, () -> self.doCompleteCleaning(cleaningId, request));
+    }
+
+    /**
+     * 逾期未完成清洗单自动释放：独立事务提交，释放结果不随后续业务成败回滚。
+     */
+    @Transactional
+    public void expireOverdueCleaningsNow() {
+        expireOverdueCleanings(LocalDateTime.now(clock));
+    }
+
+    /**
+     * 罐占用视图：执行中调合单、执行中清洗占用窗、当前品种与罐状态；
+     * 查询前对逾期未完成清洗单执行自动释放并标记罐待确认。
+     */
+    @Transactional
+    public TankOccupancyResponse occupancyView() {
+        expireOverdueCleanings(LocalDateTime.now(clock));
+        List<TankOccupancyView> tanks = repository.findTankOccupancy().stream()
+                .map(r -> new TankOccupancyView(r.blendTankId(), r.tankCode(),
+                        r.state() == null ? TANK_IDLE : r.state(), r.currentProduct(),
+                        r.executingOrderId(), r.executingCleaningId(),
+                        formatTime(r.cleaningWindowStart()), formatTime(r.cleaningWindowEnd())))
+                .toList();
+        return new TankOccupancyResponse(tanks);
     }
 
     /**
@@ -154,6 +223,8 @@ public class BlendService {
             throw BlendException.notFound("调合罐不存在: " + request.blendTankId());
         }
         LocalDateTime now = LocalDateTime.now(clock);
+        // 品种切换控制：逾期清洗已在入口事务释放，此处校验清洗占用窗与罐品种状态
+        checkTankSwitchAllowed(request.blendTankId(), request.productCode(), now);
         // 先逐罐校验余量（行锁），任一组分不足则整单拒绝，不产生任何库存变动
         List<ComponentTankRow> tanks = new ArrayList<>();
         for (ComponentAmount component : request.components()) {
@@ -177,6 +248,8 @@ public class BlendService {
         } catch (DuplicateKeyException e) {
             throw BlendException.conflict("调合罐" + request.blendTankId() + "存在执行中调合单，本次下达被拒绝");
         }
+        // 罐品种台账随调合单下达登记当前品种
+        repository.updateTankStatus(request.blendTankId(), request.productCode(), TANK_IDLE, now);
         long batchId = repository.insertBatch(orderId, 1, null, BATCH_OPEN, now);
         List<ComponentSnapshot> snapshots = new ArrayList<>();
         for (int i = 0; i < tanks.size(); i++) {
@@ -303,6 +376,72 @@ public class BlendService {
         return new ReleaseResponse(orderId, ORDER_RELEASED, formatTime(now));
     }
 
+    /**
+     * 清洗单发起事务体：占用窗半开区间与调合单占用冲突校验、罐级清洗锁占用同事务。
+     */
+    @Transactional
+    public CleaningResponse doCreateCleaning(CreateCleaningRequest request) {
+        String tankCode = repository.findBlendTankCode(request.blendTankId())
+                .orElseThrow(() -> BlendException.notFound("调合罐不存在: " + request.blendTankId()));
+        LocalDateTime windowStart = parseTime(request.windowStart());
+        LocalDateTime windowEnd = parseTime(request.windowEnd());
+        if (!windowEnd.isAfter(windowStart)) {
+            throw new BlendException(400, "清洗占用窗终点必须晚于起点");
+        }
+        LocalDateTime now = LocalDateTime.now(clock);
+        // 清洗占用窗[windowStart, windowEnd)与调合单占用窗[createdAt, releasedAt)冲突校验，端点相接不算冲突
+        for (OrderWindowRow window : repository.findOrderWindowsForTank(request.blendTankId())) {
+            boolean overlaps = window.createdAt().isBefore(windowEnd)
+                    && (window.releasedAt() == null || windowStart.isBefore(window.releasedAt()));
+            if (overlaps) {
+                throw BlendException.conflict("清洗占用窗与调合罐" + tankCode + "的调合单" + window.orderId()
+                        + "占用冲突，新清洗单不得下达");
+            }
+        }
+        repository.ensureTankStatus(request.blendTankId(), now);
+        TankStatusRow status = repository.findTankStatus(request.blendTankId())
+                .orElseThrow(() -> BlendException.notFound("调合罐不存在: " + request.blendTankId()));
+        long cleaningId = repository.insertCleaning("TMP-" + request.requestId(), request.requestId(),
+                request.blendTankId(), status.currentProduct(), request.toProduct(), CLEAN_EXECUTING,
+                windowStart, windowEnd, now);
+        String cleanNo = String.format("CL%08d", cleaningId);
+        repository.updateCleaningNo(cleaningId, cleanNo);
+        // 清洗任务按罐号唯一：同罐同时刻只允许一张执行中清洗单
+        try {
+            repository.acquireCleaningLock(request.blendTankId(), cleaningId, now);
+        } catch (DuplicateKeyException e) {
+            throw BlendException.conflict("调合罐" + tankCode + "存在执行中清洗单，同罐同时刻只允许一张执行中清洗单");
+        }
+        return new CleaningResponse(cleaningId, cleanNo, request.blendTankId(), CLEAN_EXECUTING,
+                status.currentProduct(), request.toProduct(), formatTime(windowStart), formatTime(windowEnd));
+    }
+
+    /**
+     * 清洗完成确认事务体：清洗单状态流转、罐级锁释放与罐状态复位在同一事务内完成。
+     */
+    @Transactional
+    public CompleteCleaningResponse doCompleteCleaning(long cleaningId, CompleteCleaningRequest request) {
+        repository.findCleaningForUpdate(cleaningId)
+                .orElseThrow(() -> BlendException.notFound("清洗单不存在: " + cleaningId));
+        LocalDateTime now = LocalDateTime.now(clock);
+        // 逾期未完成已在入口事务自动释放：占用窗终点已过（半开区间端点相接即结束）的清洗单不能再确认
+        CleaningRow cleaning = repository.findCleaning(cleaningId)
+                .orElseThrow(() -> BlendException.notFound("清洗单不存在: " + cleaningId));
+        if (CLEAN_EXPIRED.equals(cleaning.status())) {
+            throw BlendException.conflict("清洗单已逾期自动释放，罐已标记待确认，须重新发起清洗");
+        }
+        if (!CLEAN_EXECUTING.equals(cleaning.status())) {
+            throw BlendException.conflict("清洗单状态为" + cleaning.status() + "，不能完成确认");
+        }
+        repository.updateCleaningStatus(cleaningId, CLEAN_COMPLETED, now);
+        repository.releaseCleaningLock(cleaning.blendTankId());
+        // 罐状态复位：清洗确认后罐空置，可接任意品种
+        repository.ensureTankStatus(cleaning.blendTankId(), now);
+        repository.updateTankStatus(cleaning.blendTankId(), null, TANK_IDLE, now);
+        return new CompleteCleaningResponse(cleaningId, CLEAN_COMPLETED, formatTime(now),
+                cleaning.blendTankId(), TANK_IDLE);
+    }
+
     private SampleResponse submitFirstSample(OrderRow order, BatchRow batch, String requestId) {
         if (BATCH_SAMPLE1_PASSED.equals(batch.status())) {
             throw BlendException.conflict("首样已提交且合格，请提交次样");
@@ -395,6 +534,54 @@ public class BlendService {
             return List.of();
         }
         return List.of(hints.split(";"));
+    }
+
+    /**
+     * 逾期未完成清洗单自动释放：释放占用窗与罐级锁，并把罐标记为待确认；重新占用须重新发起清洗。
+     */
+    private void expireOverdueCleanings(LocalDateTime now) {
+        for (CleaningRow overdue : repository.findOverdueExecutingCleanings(now)) {
+            repository.updateCleaningStatus(overdue.id(), CLEAN_EXPIRED, null);
+            repository.releaseCleaningLock(overdue.blendTankId());
+            repository.ensureTankStatus(overdue.blendTankId(), now);
+            TankStatusRow status = repository.findTankStatus(overdue.blendTankId()).orElse(null);
+            String product = status == null ? null : status.currentProduct();
+            repository.updateTankStatus(overdue.blendTankId(), product, TANK_PENDING_CONFIRM, now);
+        }
+    }
+
+    /**
+     * 品种切换校验：清洗占用窗未结束时新调合单不得下达（半开区间，端点相接不算冲突）；
+     * 罐待确认或跨品种且未清洗确认时直接拒绝，并给出需清洗的罐号明细。
+     */
+    private void checkTankSwitchAllowed(long blendTankId, String productCode, LocalDateTime now) {
+        String tankCode = repository.findBlendTankCode(blendTankId).orElse(String.valueOf(blendTankId));
+        repository.findExecutingCleaningForTank(blendTankId).ifPresent(cleaning -> {
+            if (now.isBefore(cleaning.windowEnd())) {
+                throw BlendException.conflict("调合罐" + tankCode + "存在执行中清洗单" + cleaning.cleanNo()
+                        + "，占用窗[" + formatTime(cleaning.windowStart()) + ", "
+                        + formatTime(cleaning.windowEnd()) + ")未结束，新调合单不得下达");
+            }
+        });
+        repository.ensureTankStatus(blendTankId, now);
+        TankStatusRow status = repository.findTankStatus(blendTankId)
+                .orElseThrow(() -> BlendException.notFound("调合罐不存在: " + blendTankId));
+        if (TANK_PENDING_CONFIRM.equals(status.state())) {
+            throw BlendException.unprocessable("调合罐" + tankCode + "清洗逾期待确认，需清洗罐号：" + tankCode
+                    + "；须重新发起清洗确认后方可占用");
+        }
+        if (status.currentProduct() != null && !status.currentProduct().equals(productCode)) {
+            throw BlendException.unprocessable("调合罐" + tankCode + "当前品种" + status.currentProduct()
+                    + "，与目标品种" + productCode + "不同，未清洗确认不得跨品种下单；需清洗罐号：" + tankCode);
+        }
+    }
+
+    private LocalDateTime parseTime(String text) {
+        try {
+            return LocalDateTime.parse(text, TIME_FORMAT);
+        } catch (Exception e) {
+            throw new BlendException(400, "时间格式必须为yyyy-MM-dd HH:mm:ss: " + text);
+        }
     }
 
     private String formatTime(LocalDateTime time) {
