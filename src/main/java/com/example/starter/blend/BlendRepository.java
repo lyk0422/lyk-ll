@@ -67,6 +67,29 @@ public class BlendRepository {
                              int responseStatus, String responseBody) {
     }
 
+    /** 调合罐行。 */
+    public record BlendTankRow(long id, String code, String name) {
+    }
+
+    /** 调合罐品种状态行。currentProduct 为 null 表示空罐；cleanForProduct 为 null 表示无有效清洗确认。 */
+    public record TankStateRow(long blendTankId, String currentProduct, String cleanForProduct,
+                               String status, LocalDateTime updatedAt) {
+    }
+
+    /** 清洗单行。时间窗为半开区间[windowStart, windowEnd)。 */
+    public record CleaningRow(long id, String requestId, long blendTankId, String fromProduct, String toProduct,
+                              LocalDateTime windowStart, LocalDateTime windowEnd, String status,
+                              LocalDateTime consumedAt, LocalDateTime createdAt, LocalDateTime completedAt) {
+    }
+
+    /** 罐占用视图用的锁占用行：调合单占用。 */
+    public record LockedOrderRow(long blendTankId, OrderRow order) {
+    }
+
+    /** 罐占用视图用的锁占用行：清洗占用。 */
+    public record LockedCleaningRow(long blendTankId, CleaningRow cleaning) {
+    }
+
     private static final RowMapper<ComponentTankRow> TANK_MAPPER = (rs, n) -> new ComponentTankRow(
             rs.getLong("id"), rs.getString("code"), rs.getBigDecimal("remaining_volume"),
             rs.getBigDecimal("octane"), rs.getBigDecimal("sulfur"), rs.getBigDecimal("vapor_pressure"));
@@ -102,20 +125,27 @@ public class BlendRepository {
             rs.getString("request_id"), rs.getString("endpoint"), rs.getString("fingerprint"),
             rs.getInt("response_status"), rs.getString("response_body"));
 
+    private static final RowMapper<BlendTankRow> BLEND_TANK_MAPPER = (rs, n) -> new BlendTankRow(
+            rs.getLong("id"), rs.getString("code"), rs.getString("name"));
+
+    private static final RowMapper<TankStateRow> TANK_STATE_MAPPER = (rs, n) -> new TankStateRow(
+            rs.getLong("blend_tank_id"), rs.getString("current_product"), rs.getString("clean_for_product"),
+            rs.getString("status"), rs.getTimestamp("updated_at").toLocalDateTime());
+
+    private static final RowMapper<CleaningRow> CLEANING_MAPPER = (rs, n) -> new CleaningRow(
+            rs.getLong("id"), rs.getString("request_id"), rs.getLong("blend_tank_id"),
+            rs.getString("from_product"), rs.getString("to_product"),
+            rs.getTimestamp("window_start").toLocalDateTime(), rs.getTimestamp("window_end").toLocalDateTime(),
+            rs.getString("status"),
+            rs.getTimestamp("consumed_at") == null ? null : rs.getTimestamp("consumed_at").toLocalDateTime(),
+            rs.getTimestamp("created_at").toLocalDateTime(),
+            rs.getTimestamp("completed_at") == null ? null : rs.getTimestamp("completed_at").toLocalDateTime());
+
     /**
      * 按牌号查询成品规格。
      */
     public Optional<SpecRow> findSpec(String productCode) {
         return queryOne("SELECT * FROM product_spec WHERE product_code = ?", SPEC_MAPPER, productCode);
-    }
-
-    /**
-     * 调合罐是否存在。
-     */
-    public boolean blendTankExists(long blendTankId) {
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM blend_tank WHERE id = ?",
-                Integer.class, blendTankId);
-        return count != null && count > 0;
     }
 
     /**
@@ -355,6 +385,199 @@ public class BlendRepository {
      */
     public void releaseTankLock(long blendTankId) {
         jdbc.update("DELETE FROM blend_tank_lock WHERE blend_tank_id = ?", blendTankId);
+    }
+
+    /**
+     * 按ID查询调合罐。
+     */
+    public Optional<BlendTankRow> findBlendTank(long blendTankId) {
+        return queryOne("SELECT * FROM blend_tank WHERE id = ?", BLEND_TANK_MAPPER, blendTankId);
+    }
+
+    /**
+     * 查询全部调合罐（按ID升序），用于罐占用视图。
+     */
+    public List<BlendTankRow> findBlendTanks() {
+        return jdbc.query("SELECT * FROM blend_tank ORDER BY id", BLEND_TANK_MAPPER);
+    }
+
+    /**
+     * 查询调合罐品种状态。
+     */
+    public Optional<TankStateRow> findTankState(long blendTankId) {
+        return queryOne("SELECT * FROM blend_tank_state WHERE blend_tank_id = ?", TANK_STATE_MAPPER,
+                blendTankId);
+    }
+
+    /**
+     * 插入罐品种状态（初始为NORMAL空罐）。唯一键冲突时抛出 DuplicateKeyException。
+     */
+    public void insertTankState(long blendTankId, LocalDateTime now) {
+        jdbc.update("INSERT INTO blend_tank_state (blend_tank_id, current_product, clean_for_product, status, "
+                + "updated_at) VALUES (?,NULL,NULL,'NORMAL',?)", blendTankId, Timestamp.valueOf(now));
+    }
+
+    /**
+     * 更新罐品种状态；返回受影响行数。
+     */
+    public int updateTankState(long blendTankId, String currentProduct, String cleanForProduct,
+                               String status, LocalDateTime now) {
+        return jdbc.update("UPDATE blend_tank_state SET current_product = ?, clean_for_product = ?, "
+                        + "status = ?, updated_at = ? WHERE blend_tank_id = ?",
+                currentProduct, cleanForProduct, status, Timestamp.valueOf(now), blendTankId);
+    }
+
+    /**
+     * 确保罐品种状态行存在；并发初始化时容忍唯一键冲突并重读。
+     */
+    public TankStateRow ensureTankState(long blendTankId, LocalDateTime now) {
+        Optional<TankStateRow> existing = findTankState(blendTankId);
+        if (existing.isPresent()) {
+            return existing.get();
+        }
+        try {
+            insertTankState(blendTankId, now);
+        } catch (org.springframework.dao.DuplicateKeyException ignored) {
+            // 并发初始化，重读即可
+        }
+        return findTankState(blendTankId).orElseThrow();
+    }
+
+    /**
+     * 新建清洗单（执行中），返回自增ID。
+     */
+    public long insertCleaning(String requestId, long blendTankId, String fromProduct, String toProduct,
+                               LocalDateTime windowStart, LocalDateTime windowEnd, String status,
+                               LocalDateTime createdAt) {
+        KeyHolder keys = new GeneratedKeyHolder();
+        jdbc.update(con -> {
+            PreparedStatement ps = con.prepareStatement(
+                    "INSERT INTO cleaning_order (request_id, blend_tank_id, from_product, to_product, "
+                            + "window_start, window_end, status, consumed_at, created_at) "
+                            + "VALUES (?,?,?,?,?,?,?,NULL,?)",
+                    Statement.RETURN_GENERATED_KEYS);
+            ps.setString(1, requestId);
+            ps.setLong(2, blendTankId);
+            ps.setString(3, fromProduct);
+            ps.setString(4, toProduct);
+            ps.setTimestamp(5, Timestamp.valueOf(windowStart));
+            ps.setTimestamp(6, Timestamp.valueOf(windowEnd));
+            ps.setString(7, status);
+            ps.setTimestamp(8, Timestamp.valueOf(createdAt));
+            return ps;
+        }, keys);
+        return Objects.requireNonNull(keys.getKey()).longValue();
+    }
+
+    /**
+     * 按ID查询清洗单。
+     */
+    public Optional<CleaningRow> findCleaning(long cleaningId) {
+        return queryOne("SELECT * FROM cleaning_order WHERE id = ?", CLEANING_MAPPER, cleaningId);
+    }
+
+    /**
+     * 按ID查询清洗单并加行锁（FOR UPDATE），用于完成确认与状态流转。
+     */
+    public Optional<CleaningRow> findCleaningForUpdate(long cleaningId) {
+        return queryOne("SELECT * FROM cleaning_order WHERE id = ? FOR UPDATE", CLEANING_MAPPER, cleaningId);
+    }
+
+    /**
+     * 查询罐上执行中的清洗单（经占用锁定位）。
+     */
+    public Optional<CleaningRow> findExecutingCleaning(long blendTankId) {
+        return queryOne("SELECT c.* FROM cleaning_order c JOIN cleaning_lock l ON l.cleaning_id = c.id "
+                + "WHERE l.blend_tank_id = ?", CLEANING_MAPPER, blendTankId);
+    }
+
+    /**
+     * 查询罐上逾期未完成的执行中清洗单（占用窗终点不晚于now，半开区间端点相接即逾期）。
+     */
+    public List<CleaningRow> findOverdueCleanings(long blendTankId, LocalDateTime now) {
+        return jdbc.query("SELECT * FROM cleaning_order WHERE blend_tank_id = ? AND status = 'EXECUTING' "
+                        + "AND window_end <= ? ORDER BY id", CLEANING_MAPPER, blendTankId,
+                Timestamp.valueOf(now));
+    }
+
+    /**
+     * 查询全部逾期未完成的执行中清洗单，用于占用视图的全局自动释放。
+     */
+    public List<CleaningRow> findAllOverdueCleanings(LocalDateTime now) {
+        return jdbc.query("SELECT * FROM cleaning_order WHERE status = 'EXECUTING' AND window_end <= ? "
+                + "ORDER BY id", CLEANING_MAPPER, Timestamp.valueOf(now));
+    }
+
+    /**
+     * 更新清洗单状态；completedAt 仅在完成确认时非空。仅允许从执行中流转。
+     */
+    public int updateCleaningStatus(long cleaningId, String status, LocalDateTime completedAt) {
+        return jdbc.update("UPDATE cleaning_order SET status = ?, completed_at = ? WHERE id = ? "
+                        + "AND status = 'EXECUTING'", status,
+                completedAt == null ? null : Timestamp.valueOf(completedAt), cleaningId);
+    }
+
+    /**
+     * 消费罐上未使用的清洗确认（调合单下达成功后调用）。
+     */
+    public void consumeCleanConfirmations(long blendTankId, LocalDateTime now) {
+        jdbc.update("UPDATE cleaning_order SET consumed_at = ? WHERE blend_tank_id = ? "
+                + "AND status = 'COMPLETED' AND consumed_at IS NULL", Timestamp.valueOf(now), blendTankId);
+    }
+
+    /**
+     * 统计与清洗时间窗冲突的调合单占用数（半开区间重叠，端点相接不算冲突）：
+     * 执行中调合单占用[created_at, +∞)，已放行占用[created_at, released_at)。
+     */
+    public int countOrderWindowConflicts(long blendTankId, LocalDateTime windowStart,
+                                         LocalDateTime windowEnd) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM blend_order WHERE blend_tank_id = ? AND ("
+                        + "(status = 'EXECUTING' AND created_at < ?) "
+                        + "OR (status = 'RELEASED' AND created_at < ? AND released_at > ?))",
+                Integer.class, blendTankId, Timestamp.valueOf(windowEnd), Timestamp.valueOf(windowEnd),
+                Timestamp.valueOf(windowStart));
+        return count == null ? 0 : count;
+    }
+
+    /**
+     * 占用清洗执行锁。唯一键冲突时抛出 DuplicateKeyException。
+     */
+    public void acquireCleaningLock(long blendTankId, long cleaningId, LocalDateTime createdAt) {
+        jdbc.update("INSERT INTO cleaning_lock (blend_tank_id, cleaning_id, created_at) VALUES (?,?,?)",
+                blendTankId, cleaningId, Timestamp.valueOf(createdAt));
+    }
+
+    /**
+     * 释放清洗执行锁。
+     */
+    public void releaseCleaningLock(long blendTankId) {
+        jdbc.update("DELETE FROM cleaning_lock WHERE blend_tank_id = ?", blendTankId);
+    }
+
+    /**
+     * 查询全部执行中调合单占用（罐占用视图）。
+     */
+    public List<LockedOrderRow> findLockedOrders() {
+        return jdbc.query("SELECT l.blend_tank_id, o.* FROM blend_tank_lock l "
+                        + "JOIN blend_order o ON o.id = l.order_id ORDER BY l.blend_tank_id",
+                (rs, n) -> new LockedOrderRow(rs.getLong("blend_tank_id"), ORDER_MAPPER.mapRow(rs, n)));
+    }
+
+    /**
+     * 查询全部执行中清洗占用（罐占用视图）。
+     */
+    public List<LockedCleaningRow> findLockedCleanings() {
+        return jdbc.query("SELECT l.blend_tank_id, c.* FROM cleaning_lock l "
+                        + "JOIN cleaning_order c ON c.id = l.cleaning_id ORDER BY l.blend_tank_id",
+                (rs, n) -> new LockedCleaningRow(rs.getLong("blend_tank_id"), CLEANING_MAPPER.mapRow(rs, n)));
+    }
+
+    /**
+     * 查询全部罐品种状态（罐占用视图）。
+     */
+    public List<TankStateRow> findAllTankStates() {
+        return jdbc.query("SELECT * FROM blend_tank_state ORDER BY blend_tank_id", TANK_STATE_MAPPER);
     }
 
     private <T> Optional<T> queryOne(String sql, RowMapper<T> mapper, Object... args) {

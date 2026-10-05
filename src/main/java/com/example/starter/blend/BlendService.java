@@ -18,9 +18,11 @@ import com.example.starter.blend.BlendDtos.SampleResponse;
 import com.example.starter.blend.BlendDtos.SampleView;
 import com.example.starter.blend.BlendRepository.BatchComponentRow;
 import com.example.starter.blend.BlendRepository.BatchRow;
+import com.example.starter.blend.BlendRepository.BlendTankRow;
 import com.example.starter.blend.BlendRepository.ComponentTankRow;
 import com.example.starter.blend.BlendRepository.OrderRow;
 import com.example.starter.blend.BlendRepository.SpecRow;
+import com.example.starter.blend.BlendRepository.TankStateRow;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -65,23 +67,30 @@ public class BlendService {
     private final BlendRepository repository;
     private final BlendCalculator calculator;
     private final IdempotencyExecutor idempotency;
+    private final CleaningService cleaningService;
     private final Clock clock;
     private final BlendService self;
 
     public BlendService(BlendRepository repository, BlendCalculator calculator,
-                        IdempotencyExecutor idempotency, Clock clock, @Lazy BlendService self) {
+                        IdempotencyExecutor idempotency, CleaningService cleaningService,
+                        Clock clock, @Lazy BlendService self) {
         this.repository = repository;
         this.calculator = calculator;
         this.idempotency = idempotency;
+        this.cleaningService = cleaningService;
         this.clock = clock;
         this.self = self;
     }
 
     /**
      * 下达调合单：requestId 幂等；校验罐余量，组分切罐与库存扣减在同一事务内完成；
-     * 任一组分不足则整单不下达且库存无变动；同一调合罐同时刻只允许一张执行中调合单。
+     * 任一组分不足则整单不下达且库存无变动；同一调合罐同时刻只允许一张执行中调合单；
+     * 跨品种切换须先完成清洗确认。逾期清洗先在独立事务内自动释放，避免随本单回滚。
      */
     public OrderResponse createOrder(CreateOrderRequest request) {
+        if (request.blendTankId() != null) {
+            cleaningService.expireOverdue(request.blendTankId(), LocalDateTime.now(clock));
+        }
         String fingerprint = idempotency.fingerprint(request.requestId(), "CREATE_ORDER",
                 request.productCode(), request.blendTankId(), canonicalComponents(request.components()));
         return idempotency.execute("CREATE_ORDER", request.requestId(), fingerprint,
@@ -150,10 +159,23 @@ public class BlendService {
     public OrderResponse doCreateOrder(CreateOrderRequest request) {
         SpecRow spec = repository.findSpec(request.productCode())
                 .orElseThrow(() -> BlendException.notFound("成品规格不存在: " + request.productCode()));
-        if (!repository.blendTankExists(request.blendTankId())) {
-            throw BlendException.notFound("调合罐不存在: " + request.blendTankId());
-        }
+        BlendTankRow blendTank = repository.findBlendTank(request.blendTankId())
+                .orElseThrow(() -> BlendException.notFound("调合罐不存在: " + request.blendTankId()));
         LocalDateTime now = LocalDateTime.now(clock);
+        // 品种切换清洗控制：逾期清洗先自动释放；清洗占用窗内新单不得下达
+        cleaningService.expireOverdue(request.blendTankId(), now);
+        cleaningService.assertNoCleaningWindowConflict(request.blendTankId(), now);
+        TankStateRow tankState = cleaningService.tankState(request.blendTankId(), now);
+        if (CleaningService.TANK_PENDING_CONFIRMATION.equals(tankState.status())) {
+            throw BlendException.conflict("调合罐" + blendTank.code()
+                    + "清洗逾期未完成，罐状态待确认，重新占用须重新发起清洗");
+        }
+        String currentProduct = tankState.currentProduct();
+        if (currentProduct != null && !currentProduct.equals(request.productCode())
+                && !request.productCode().equals(tankState.cleanForProduct())) {
+            throw BlendException.unprocessable("跨品种切换未清洗确认，需清洗罐号明细：" + blendTank.code()
+                    + "（罐内品种" + currentProduct + "，目标品种" + request.productCode() + "）");
+        }
         // 先逐罐校验余量（行锁），任一组分不足则整单拒绝，不产生任何库存变动
         List<ComponentTankRow> tanks = new ArrayList<>();
         for (ComponentAmount component : request.components()) {
@@ -177,6 +199,8 @@ public class BlendService {
         } catch (DuplicateKeyException e) {
             throw BlendException.conflict("调合罐" + request.blendTankId() + "存在执行中调合单，本次下达被拒绝");
         }
+        // 登记罐内品种并消费该罐未使用的清洗确认（同事务）
+        cleaningService.onOrderCreated(request.blendTankId(), request.productCode(), now);
         long batchId = repository.insertBatch(orderId, 1, null, BATCH_OPEN, now);
         List<ComponentSnapshot> snapshots = new ArrayList<>();
         for (int i = 0; i < tanks.size(); i++) {

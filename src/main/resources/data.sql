@@ -24,3 +24,13 @@ INSERT INTO product_spec (product_code, octane_limit, sulfur_limit, vapor_pressu
                           octane_margin, sulfur_margin, vapor_pressure_margin)
 SELECT 'GAS92', 92.000, 10.000, 65.000, 0.300, 0.500, 1.000
 WHERE NOT EXISTS (SELECT 1 FROM product_spec WHERE product_code = 'GAS92');
+
+INSERT INTO product_spec (product_code, octane_limit, sulfur_limit, vapor_pressure_limit,
+                          octane_margin, sulfur_margin, vapor_pressure_margin)
+SELECT 'GAS95', 95.000, 8.000, 60.000, 0.300, 0.500, 1.000
+WHERE NOT EXISTS (SELECT 1 FROM product_spec WHERE product_code = 'GAS95');
+
+INSERT INTO product_spec (product_code, octane_limit, sulfur_limit, vapor_pressure_limit,
+                          octane_margin, sulfur_margin, vapor_pressure_margin)
+SELECT 'GAS98', 98.000, 5.000, 55.000, 0.300, 0.500, 1.000
+WHERE NOT EXISTS (SELECT 1 FROM product_spec WHERE product_code = 'GAS98');

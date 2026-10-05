@@ -106,3 +106,32 @@ CREATE TABLE IF NOT EXISTS blend_tank_lock (
     order_id BIGINT NOT NULL COMMENT '占用中的调合单ID',
     created_at TIMESTAMP NOT NULL COMMENT '占用时间，时区Asia/Shanghai'
 ) COMMENT='调合罐执行中占用锁，同一调合罐同时刻只允许一张执行中调合单';
+
+CREATE TABLE IF NOT EXISTS blend_tank_state (
+    blend_tank_id BIGINT PRIMARY KEY COMMENT '调合罐ID',
+    current_product VARCHAR(32) NULL COMMENT '罐内当前品种；NULL表示空罐或从未装油',
+    clean_for_product VARCHAR(32) NULL COMMENT '已清洗确认的目标品种；NULL表示无有效清洗确认',
+    status VARCHAR(20) NOT NULL COMMENT '状态：NORMAL正常/CLEANING清洗执行中/PENDING_CONFIRMATION清洗逾期未完成待确认',
+    updated_at TIMESTAMP NOT NULL COMMENT '状态更新时间，时区Asia/Shanghai'
+) COMMENT='调合罐品种状态，跨品种切换清洗控制';
+
+CREATE TABLE IF NOT EXISTS cleaning_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id VARCHAR(64) NOT NULL COMMENT '幂等请求键',
+    blend_tank_id BIGINT NOT NULL COMMENT '调合罐ID',
+    from_product VARCHAR(32) NULL COMMENT '切换前罐内品种快照；NULL表示空罐',
+    to_product VARCHAR(32) NOT NULL COMMENT '清洗确认的目标品种',
+    window_start TIMESTAMP NOT NULL COMMENT '清洗占用窗起点（半开区间，含起点），时区Asia/Shanghai',
+    window_end TIMESTAMP NOT NULL COMMENT '清洗占用窗终点（半开区间，不含终点），时区Asia/Shanghai',
+    status VARCHAR(20) NOT NULL COMMENT '状态：EXECUTING执行中/COMPLETED已完成确认/EXPIRED逾期未完成已释放',
+    consumed_at TIMESTAMP NULL COMMENT '清洗确认被跨品种下单消费时间；NULL表示未消费',
+    created_at TIMESTAMP NOT NULL COMMENT '创建时间，时区Asia/Shanghai',
+    completed_at TIMESTAMP NULL COMMENT '完成确认时间；NULL表示未完成',
+    CONSTRAINT uk_cleaning_request UNIQUE (request_id)
+) COMMENT='品种切换清洗单，清洗任务按罐号唯一';
+
+CREATE TABLE IF NOT EXISTS cleaning_lock (
+    blend_tank_id BIGINT PRIMARY KEY COMMENT '调合罐ID',
+    cleaning_id BIGINT NOT NULL COMMENT '执行中清洗单ID',
+    created_at TIMESTAMP NOT NULL COMMENT '占用时间，时区Asia/Shanghai'
+) COMMENT='清洗执行占用锁，同罐同时刻只允许一张执行中清洗单';

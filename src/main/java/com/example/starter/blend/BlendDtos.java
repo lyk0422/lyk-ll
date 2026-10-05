@@ -1,5 +1,6 @@
 package com.example.starter.blend;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Max;
@@ -9,6 +10,7 @@ import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -81,6 +83,41 @@ public final class BlendDtos {
     public record OrderDetail(long orderId, String orderNo, String productCode, long blendTankId, String status,
                               BigDecimal totalVolume, int reblendCount, Metrics metrics, List<String> marginHints,
                               List<BatchView> batches, List<String> lateEvents) {
+    }
+
+    /** 清洗单创建请求；时间窗为半开区间[windowStart, windowEnd)，端点相接不算冲突。 */
+    public record CreateCleaningRequest(@NotBlank String requestId,
+                                        @NotNull Long blendTankId,
+                                        @NotBlank String toProduct,
+                                        @NotNull @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+                                        LocalDateTime windowStart,
+                                        @NotNull @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+                                        LocalDateTime windowEnd) {
+    }
+
+    /** 清洗完成确认请求。 */
+    public record CompleteCleaningRequest(@NotBlank String requestId) {
+    }
+
+    /** 清洗单响应；时间为yyyy-MM-dd HH:mm:ss（Asia/Shanghai），completedAt为null表示未完成。 */
+    public record CleaningResponse(long cleaningId, long blendTankId, String fromProduct, String toProduct,
+                                   String status, String windowStart, String windowEnd, String completedAt) {
+    }
+
+    /** 调合单占用视图节点；occupiedTo为null表示执行中开口区间。 */
+    public record OrderOccupancy(long orderId, String orderNo, String productCode,
+                                 String occupiedFrom, String occupiedTo) {
+    }
+
+    /** 清洗占用视图节点，时间窗为半开区间[windowStart, windowEnd)。 */
+    public record CleaningOccupancy(long cleaningId, String fromProduct, String toProduct,
+                                    String windowStart, String windowEnd) {
+    }
+
+    /** 罐占用视图：罐品种状态、执行中调合单占用与执行中清洗占用窗。 */
+    public record TankOccupancyView(long blendTankId, String code, String tankStatus, String currentProduct,
+                                    String cleanForProduct, OrderOccupancy orderOccupancy,
+                                    CleaningOccupancy cleaningOccupancy) {
     }
 
     /** 统一错误报文。 */

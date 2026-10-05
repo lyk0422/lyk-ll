@@ -12,7 +12,8 @@ import java.math.BigDecimal;
 /**
  * 调合服务测试基类：每个用例前清理业务数据并重建合成夹具，避免用例间顺序依赖。
  * 合成组分罐：1号(辛烷95/硫5/蒸气压60/余量1000)、2号(89/12/70/1000)、3号(97/3/55/500)；
- * 调合罐1、2；规格GAS92上限(92/10/65)，安全边际(0.3/0.5/1.0)。
+ * 调合罐1(B1)、2(B2)；规格GAS92上限(92/10/65)、GAS95上限(95/8/60)、GAS98上限(98/5/55)，
+ * 安全边际均为(0.3/0.5/1.0)。时钟每用例复位到固定业务时间。
  */
 @Import(TestClockConfig.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -27,13 +28,20 @@ abstract class BlendServiceTestBase {
     @Autowired
     protected BlendRepository repository;
 
+    @Autowired
+    protected CleaningService cleaningService;
+
     @BeforeEach
     void resetData() {
+        TestClockConfig.resetClock();
         jdbc.update("DELETE FROM late_event");
         jdbc.update("DELETE FROM lab_sample");
         jdbc.update("DELETE FROM blend_batch_component");
         jdbc.update("DELETE FROM blend_batch");
         jdbc.update("DELETE FROM blend_tank_lock");
+        jdbc.update("DELETE FROM cleaning_lock");
+        jdbc.update("DELETE FROM cleaning_order");
+        jdbc.update("DELETE FROM blend_tank_state");
         jdbc.update("DELETE FROM blend_order");
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM component_tank");
@@ -50,6 +58,12 @@ abstract class BlendServiceTestBase {
         jdbc.update("INSERT INTO product_spec (id, product_code, octane_limit, sulfur_limit, "
                 + "vapor_pressure_limit, octane_margin, sulfur_margin, vapor_pressure_margin) "
                 + "VALUES (1,'GAS92',92.000,10.000,65.000,0.300,0.500,1.000)");
+        jdbc.update("INSERT INTO product_spec (id, product_code, octane_limit, sulfur_limit, "
+                + "vapor_pressure_limit, octane_margin, sulfur_margin, vapor_pressure_margin) "
+                + "VALUES (2,'GAS95',95.000,8.000,60.000,0.300,0.500,1.000)");
+        jdbc.update("INSERT INTO product_spec (id, product_code, octane_limit, sulfur_limit, "
+                + "vapor_pressure_limit, octane_margin, sulfur_margin, vapor_pressure_margin) "
+                + "VALUES (3,'GAS98',98.000,5.000,55.000,0.300,0.500,1.000)");
     }
 
     @AfterAll
