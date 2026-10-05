@@ -4,10 +4,12 @@ import com.example.starter.api.dto.CommandDtos;
 import com.example.starter.api.dto.ReadingDtos;
 import com.example.starter.api.dto.SetupDtos;
 import com.example.starter.api.dto.StrategyDtos;
+import com.example.starter.service.AlarmHandlingService;
 import com.example.starter.service.AlarmService;
 import com.example.starter.service.EnergyService;
 import com.example.starter.service.EvaluationService;
 import com.example.starter.service.ReadingService;
+import com.example.starter.service.RehearsalService;
 import com.example.starter.service.SetupService;
 import com.example.starter.service.StrategyService;
 import com.example.starter.testsupport.MutableClock;
@@ -50,11 +52,16 @@ public abstract class AbstractIntegrationTest {
     protected EnergyService energyService;
     @Autowired
     protected EvaluationService evaluationService;
+    @Autowired
+    protected AlarmHandlingService alarmHandlingService;
+    @Autowired
+    protected RehearsalService rehearsalService;
 
     @BeforeEach
     void cleanDatabase() {
         jdbcTemplate.update("SET REFERENTIAL_INTEGRITY FALSE");
-        for (String table : List.of("idempotent_request", "daily_evaluation", "control_command",
+        for (String table : List.of("idempotent_request", "strategy_rehearsal", "alarm_handling",
+                "daily_evaluation", "control_command",
                 "energy_budget", "deviation_alarm", "late_reading_event", "sensor_reading",
                 "climate_strategy", "crop_stage", "crop", "zone_info")) {
             jdbcTemplate.update("TRUNCATE TABLE " + table);
@@ -95,6 +102,18 @@ public abstract class AbstractIntegrationTest {
     protected ReadingDtos.ReadingResponse ingest(Instant sampleTime, String temp, String humidity) {
         return readingService.ingest(
                 new ReadingDtos.ReadingRequest(ZONE, sampleTime, bd(temp), bd(humidity)));
+    }
+
+    /**
+     * 下发基线策略 S1（24/18/70，温度带宽 ±1.0）并连续注入 3 点 27℃ 偏离读数触发 ACTIVE 告警，
+     * 返回告警 id，供告警处置用例使用。
+     */
+    protected Long dispatchBaselineAndTriggerAlarm(Instant effective, Instant firstSample) {
+        draftStrategy("S1", "24.00", "18.00", "70.00", "1.0", "5.0");
+        dispatch("S1", "REQ-D-ALARM", effective);
+        ingest(firstSample, "27.00", "70");
+        ingest(firstSample.plusSeconds(60), "27.00", "70");
+        return ingest(firstSample.plusSeconds(120), "27.00", "70").alarmId();
     }
 
     protected static BigDecimal bd(String value) {

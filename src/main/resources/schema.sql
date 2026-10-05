@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS climate_strategy (
     CONSTRAINT uk_zone_effective UNIQUE (zone_code, effective_time)
 );
 COMMENT ON TABLE climate_strategy IS '气候策略：编制→校验→下发→执行→评估/失效';
-COMMENT ON COLUMN climate_strategy.status IS 'DRAFT/VALIDATED/DISPATCHED/EXECUTING/EXPIRED/EVALUATED';
+COMMENT ON COLUMN climate_strategy.status IS 'DRAFT/VALIDATED/SUSPENDED/DISPATCHED/EXECUTING/EXPIRED/EVALUATED；SUSPENDED=与进行中告警处置不兼容而挂起，无任何副作用';
 COMMENT ON COLUMN climate_strategy.day_temp IS '白天温度设定点，单位摄氏度';
 COMMENT ON COLUMN climate_strategy.night_temp IS '夜间温度设定点，单位摄氏度；与白天设定点差值不得超过8摄氏度（含8）';
 COMMENT ON COLUMN climate_strategy.temp_tolerance IS '温度允许带宽半宽，单位摄氏度';
@@ -155,3 +155,59 @@ CREATE TABLE IF NOT EXISTS idempotent_request (
 );
 COMMENT ON TABLE idempotent_request IS 'requestId 幂等记录：PROCESSING占位→DONE落首次结果；指纹覆盖 requestId 与全部业务字段';
 COMMENT ON COLUMN idempotent_request.status IS 'PROCESSING=首个请求处理中，DONE=首次结果已落库，FAILED=首个请求回滚';
+
+CREATE TABLE IF NOT EXISTS alarm_handling (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    handling_code       VARCHAR(64)  NOT NULL,
+    alarm_id            BIGINT       NOT NULL,
+    zone_code           VARCHAR(64)  NOT NULL,
+    status              VARCHAR(16)  NOT NULL,
+    temp_min            DECIMAL(5,2) NOT NULL,
+    temp_max            DECIMAL(5,2) NOT NULL,
+    humidity_min        DECIMAL(5,2) NOT NULL,
+    humidity_max        DECIMAL(5,2) NOT NULL,
+    request_id          VARCHAR(96),
+    complete_request_id VARCHAR(96),
+    created_at          TIMESTAMP(6) NOT NULL,
+    completed_at        TIMESTAMP(6),
+    CONSTRAINT uk_handling_code UNIQUE (handling_code)
+);
+COMMENT ON TABLE alarm_handling IS '告警处置：针对偏差告警的临时管控窗口，IN_PROGRESS 期间同分区新策略须与其兼容，否则下发挂起';
+COMMENT ON COLUMN alarm_handling.status IS 'IN_PROGRESS=处置进行中（参与仲裁）；COMPLETED=处置完结（终态，不再参与仲裁）';
+COMMENT ON COLUMN alarm_handling.temp_min IS '处置期间允许的设定温度下限，单位摄氏度，边界含等号；昼夜设定点均须落在窗口内才兼容';
+COMMENT ON COLUMN alarm_handling.temp_max IS '处置期间允许的设定温度上限，单位摄氏度，边界含等号';
+COMMENT ON COLUMN alarm_handling.humidity_min IS '处置期间允许的湿度设定点下限，单位%RH，边界含等号';
+COMMENT ON COLUMN alarm_handling.humidity_max IS '处置期间允许的湿度设定点上限，单位%RH，边界含等号';
+COMMENT ON COLUMN alarm_handling.request_id IS '发起处置的幂等 requestId';
+COMMENT ON COLUMN alarm_handling.complete_request_id IS '完结处置的幂等 requestId，空值表示尚未完结';
+
+CREATE TABLE IF NOT EXISTS strategy_rehearsal (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    strategy_code     VARCHAR(64)   NOT NULL,
+    request_id        VARCHAR(96)   NOT NULL,
+    model_version     VARCHAR(32)   NOT NULL,
+    effective_time    TIMESTAMP(6)  NOT NULL,
+    eval_date         DATE          NOT NULL,
+    day_temp          DECIMAL(5,2)  NOT NULL,
+    night_temp        DECIMAL(5,2)  NOT NULL,
+    humidity_setpoint DECIMAL(5,2)  NOT NULL,
+    duration_minutes  BIGINT        NOT NULL,
+    hourly_rate_kwh   DECIMAL(12,3) NOT NULL,
+    estimated_kwh     DECIMAL(12,3) NOT NULL,
+    budget_kwh        DECIMAL(12,3),
+    consumed_kwh      DECIMAL(12,3),
+    remaining_kwh     DECIMAL(12,3),
+    handling_conflict VARCHAR(256),
+    verdict           VARCHAR(16)   NOT NULL,
+    created_at        TIMESTAMP(6)  NOT NULL
+);
+COMMENT ON TABLE strategy_rehearsal IS '策略下发前预演留档：合成能耗模型估算与仲裁结论随策略版本保存，输入齐全可复算';
+COMMENT ON COLUMN strategy_rehearsal.model_version IS '合成能耗模型版本，复算时须使用同版本系数';
+COMMENT ON COLUMN strategy_rehearsal.eval_date IS '生效时刻所在 UTC 日期，决定比对哪一天的能耗预算';
+COMMENT ON COLUMN strategy_rehearsal.duration_minutes IS '执行期时长：生效时刻到当日 UTC 日界的分钟数';
+COMMENT ON COLUMN strategy_rehearsal.hourly_rate_kwh IS '合成模型小时能耗速率，单位 kWh/h';
+COMMENT ON COLUMN strategy_rehearsal.estimated_kwh IS '执行期预估能耗，单位 kWh，保留 3 位小数';
+COMMENT ON COLUMN strategy_rehearsal.budget_kwh IS '预演时当日预算（kWh）；空值表示当日未分配预算，不校验能耗';
+COMMENT ON COLUMN strategy_rehearsal.remaining_kwh IS '预演时当日剩余预算（kWh）=预算-已耗；空值同上';
+COMMENT ON COLUMN strategy_rehearsal.handling_conflict IS '不兼容的进行中处置编码（逗号分隔），空值表示无处置冲突';
+COMMENT ON COLUMN strategy_rehearsal.verdict IS 'PASS=放行下发；SUSPENDED=与进行中处置不兼容挂起；REJECTED=预估能耗超当日剩余预算拒绝下发';

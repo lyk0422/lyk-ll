@@ -50,7 +50,8 @@ class GreenhouseFlowHttpTest {
     @BeforeEach
     void clean() {
         jdbcTemplate.update("SET REFERENTIAL_INTEGRITY FALSE");
-        for (String table : List.of("idempotent_request", "daily_evaluation", "control_command",
+        for (String table : List.of("idempotent_request", "strategy_rehearsal", "alarm_handling",
+                "daily_evaluation", "control_command",
                 "energy_budget", "deviation_alarm", "late_reading_event", "sensor_reading",
                 "climate_strategy", "crop_stage", "crop", "zone_info")) {
             jdbcTemplate.update("TRUNCATE TABLE " + table);

@@ -1,8 +1,10 @@
 package com.example.starter.service;
 
 import com.example.starter.api.dto.StrategyDtos;
+import com.example.starter.domain.RehearsalVerdict;
 import com.example.starter.domain.StrategyStatus;
 import com.example.starter.repo.CropRepository;
+import com.example.starter.repo.RehearsalRepository;
 import com.example.starter.repo.StrategyRepository;
 import com.example.starter.support.IdempotencySupport;
 import com.example.starter.web.BusinessRuleException;
@@ -22,7 +24,10 @@ import java.util.List;
  *     <li>温湿度设定点须在作物生育期允许窗口内，恰在边界合法；</li>
  *     <li>昼夜设定差绝对值不得超过 8 摄氏度，恰 8 合法；</li>
  *     <li>相邻两次变更（生效时刻）间隔不少于 30 分钟，恰满 30 分钟允许；</li>
- *     <li>同一分区同时刻只允许一个生效策略，新策略生效与旧策略失效在同一事务完成。</li>
+ *     <li>同一分区同时刻只允许一个生效策略，新策略生效与旧策略失效在同一事务完成；</li>
+ *     <li>下发前执行预演仲裁：预估能耗超当日剩余预算直接拒绝（恰等允许）；
+ *     与进行中告警处置不兼容则挂起等待处置完结，挂起不产生任何副作用；
+ *     仲裁结论与策略状态推进在同一事务完成，预演留档可复算。</li>
  * </ul>
  */
 @Service
@@ -37,14 +42,17 @@ public class StrategyService {
     private final CropRepository cropRepository;
     private final SetupService setupService;
     private final IdempotencySupport idempotencySupport;
+    private final RehearsalService rehearsalService;
     private final Clock clock;
 
     public StrategyService(StrategyRepository strategyRepository, CropRepository cropRepository,
-                           SetupService setupService, IdempotencySupport idempotencySupport, Clock clock) {
+                           SetupService setupService, IdempotencySupport idempotencySupport,
+                           RehearsalService rehearsalService, Clock clock) {
         this.strategyRepository = strategyRepository;
         this.cropRepository = cropRepository;
         this.setupService = setupService;
         this.idempotencySupport = idempotencySupport;
+        this.rehearsalService = rehearsalService;
         this.clock = clock;
     }
 
@@ -111,8 +119,8 @@ public class StrategyService {
                                                       StrategyDtos.DispatchRequest request) {
         StrategyRepository.Strategy strategy = strategyRepository.findByCode(strategyCode)
                 .orElseThrow(() -> new NotFoundException("策略不存在：" + strategyCode));
-        if (!"VALIDATED".equals(strategy.status())) {
-            throw new BusinessRuleException("仅校验通过、尚未下发的策略可下发，当前状态：" + strategy.status());
+        if (!"VALIDATED".equals(strategy.status()) && !"SUSPENDED".equals(strategy.status())) {
+            throw new BusinessRuleException("仅校验通过或挂起待发的策略可下发，当前状态：" + strategy.status());
         }
         Instant effectiveTime = request.effectiveTime();
         // 锁定分区行，串行化同分区并发下发，保证间隔判定与唯一生效不被并发穿透。
@@ -124,6 +132,21 @@ public class StrategyService {
                         + " 分钟，少于最小间隔 30 分钟");
             }
         });
+        // 下发前预演仲裁：能耗超预算拒绝、处置不兼容挂起、其余放行；结论与状态推进同事务。
+        RehearsalRepository.Rehearsal rehearsal =
+                rehearsalService.arbitrate(strategy, effectiveTime, request.requestId());
+        if (RehearsalVerdict.SUSPENDED.name().equals(rehearsal.verdict())) {
+            rehearsalService.archive(rehearsal);
+            strategyRepository.markSuspended(strategy.id());
+            return toResponse(strategyRepository.findByCode(strategyCode).orElseThrow());
+        }
+        if (RehearsalVerdict.REJECTED.name().equals(rehearsal.verdict())) {
+            // 拒绝后业务事务回滚，预演留档以独立事务落库，保证拒绝原因可查可复算。
+            rehearsalService.archiveIsolated(rehearsal);
+            throw new BusinessRuleException("预估执行期能耗 " + rehearsal.estimatedKwh()
+                    + "kWh 超过当日剩余预算 " + rehearsal.remainingKwh() + "kWh，拒绝下发");
+        }
+        rehearsalService.archive(rehearsal);
         Instant now = clock.instant();
         // 新生效与旧失效必须同一事务：先将当前生效策略置 EXPIRED，再置新策略 DISPATCHED。
         strategyRepository.findActiveByZone(strategy.zoneCode()).ifPresent(active -> {
