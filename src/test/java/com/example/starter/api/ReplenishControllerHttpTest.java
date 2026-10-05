@@ -42,6 +42,7 @@ class ReplenishControllerHttpTest {
         jdbc.update("DELETE FROM late_event");
         jdbc.update("DELETE FROM plan_discrepancy");
         jdbc.update("DELETE FROM escort_checkin");
+        jdbc.update("DELETE FROM fast_track_decision");
         jdbc.update("DELETE FROM replenish_plan");
         jdbc.update("UPDATE atm SET frozen = 0");
         jdbc.update("UPDATE custodian SET frozen = 0");
@@ -149,5 +150,38 @@ class ReplenishControllerHttpTest {
                         .content(objectMapper.writeValueAsString(
                                 body("rid-over", "atmCode", "ATM-0002", "amount", 600001))))
                 .andExpect(status().isConflict());
+    }
+
+    @Test
+    void temporary_generate_over_http_and_daily_reconciliation() throws Exception {
+        // 测试时钟固定在 2026-09-20，位于合成节假日 2026-09-23 前 3 日窗口内
+        MvcResult generated = mockMvc.perform(post("/api/plans/temporary/generate")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(body("rid-temp-gen"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.preHolidayWindow").value(true))
+                .andExpect(jsonPath("$.generatedCount").value(3))
+                .andExpect(jsonPath("$.plans[0].planType").value("TEMPORARY"))
+                .andExpect(jsonPath("$.plans[0].status").value("APPROVED"))
+                .andReturn();
+        long tempId = objectMapper.readTree(generated.getResponse().getContentAsString())
+                .get("plans").get(0).get("id").asLong();
+
+        // 同键重放返回首次结果，不重复生成
+        mockMvc.perform(post("/api/plans/temporary/generate").contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(body("rid-temp-gen"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.generatedCount").value(3));
+
+        // 临时计划押运时限 2 小时：08:00 批准，截止 10:00
+        mockMvc.perform(get("/api/plans/" + tempId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.escortDeadline").value("2026-09-20T10:00:00Z"));
+
+        // 快速通道结论纳入日结核对
+        mockMvc.perform(get("/api/plans/daily-reconciliation/2026-09-20"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.fastTrackDecisionCount").value(3))
+                .andExpect(jsonPath("$.fastTrackDecisions[0].decision").value("AUTO_APPROVED"));
     }
 }

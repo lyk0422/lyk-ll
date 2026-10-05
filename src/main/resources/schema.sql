@@ -24,11 +24,13 @@ CREATE TABLE IF NOT EXISTS replenish_plan (
     plan_no             VARCHAR(40) NOT NULL,
     atm_id              BIGINT      NOT NULL,
     business_date       DATE        NOT NULL, -- 计划归属营业日（UTC 日界）
+    plan_type           VARCHAR(16) NOT NULL DEFAULT 'REGULAR', -- REGULAR 常规 / TEMPORARY 节假日临时计划
+    queue_seq           BIGINT      NOT NULL DEFAULT 0, -- 同一 ATM 内排队位置（单调递增），让路计划保留原位置
     predicted_amount    BIGINT      NOT NULL, -- 预测加钞额（元）
     planned_amount      BIGINT      NOT NULL, -- 计划加钞额（元），不得超过钞箱容量
     status              VARCHAR(32) NOT NULL, -- 计划状态，见 PlanStatus
-    approved_at         TIMESTAMP   NULL,     -- 审批通过时刻（UTC），押运 4 小时时限起点
-    escort_deadline     TIMESTAMP   NULL,     -- 押运时限=审批通过时刻+4h，恰满未完成双人打卡即异常
+    approved_at         TIMESTAMP   NULL,     -- 审批通过时刻（UTC），常规 4 小时/临时 2 小时押运时限起点
+    escort_deadline     TIMESTAMP   NULL,     -- 押运时限=批准时刻+4h（常规）或+2h（临时），恰满未完成双人打卡即异常
     escort_completed_at TIMESTAMP   NULL,     -- 第二名押运员打卡完成时刻（UTC）
     counted_amount      BIGINT      NULL,     -- 押运员双人清点数（元），NULL 表示尚未清点
     counted_at          TIMESTAMP   NULL,
@@ -40,7 +42,25 @@ CREATE TABLE IF NOT EXISTS replenish_plan (
     sealed_at           TIMESTAMP   NULL,     -- 日结封存时刻（UTC），非 NULL 即终态
     created_at          TIMESTAMP   NOT NULL,
     CONSTRAINT uk_plan_no UNIQUE (plan_no),
-    CONSTRAINT uk_plan_atm_date UNIQUE (atm_id, business_date) -- 同一 ATM 每个 UTC 日唯一计划，兼作并发唯一受理约束
+    CONSTRAINT uk_plan_atm_date_type UNIQUE (atm_id, business_date, plan_type) -- 同一 ATM 每个 UTC 日每类计划唯一，兼作并发唯一受理约束
+);
+
+-- 合成节假日日历：节前 3 日（含节前第 3 日）触发取现峰值预测
+CREATE TABLE IF NOT EXISTS holiday_calendar (
+    holiday_date DATE        NOT NULL,
+    name         VARCHAR(64) NOT NULL, -- 节假日名称（合成数据）
+    created_at   TIMESTAMP   NOT NULL,
+    CONSTRAINT uk_holiday_date UNIQUE (holiday_date)
+);
+
+-- 临时计划快速审批通道结论留痕：纳入日结核对
+CREATE TABLE IF NOT EXISTS fast_track_decision (
+    id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+    plan_id       BIGINT       NOT NULL, -- 关联计划（临时计划或被让路的常规计划）
+    business_date DATE         NOT NULL, -- 日结核对归属营业日（UTC 日界）
+    decision      VARCHAR(32)  NOT NULL, -- AUTO_APPROVED 快速批准 / PREEMPTED_REGULAR 临时优先常规让路 / YIELDED_TO_REGULAR 临时让路 / REGULAR_YIELDED 常规被让路
+    detail        VARCHAR(255) NOT NULL, -- 裁决说明（金额对比等）
+    decided_at    TIMESTAMP    NOT NULL  -- 裁决时刻（UTC）
 );
 
 CREATE TABLE IF NOT EXISTS escort_checkin (

@@ -2,6 +2,7 @@ package com.example.starter.repo;
 
 import com.example.starter.domain.DiscrepancyStatus;
 import com.example.starter.domain.PlanStatus;
+import com.example.starter.domain.PlanType;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -37,8 +38,22 @@ public class ReplenishRepository {
         return queryOne("SELECT * FROM atm WHERE code = ?", ATM_MAPPER, code);
     }
 
+    /** 行锁加载 ATM，用于编制/临时计划生成时按 ATM 串行化并发。 */
+    public Optional<Atm> findAtmByCodeForUpdate(String code) {
+        return queryOne("SELECT * FROM atm WHERE code = ? FOR UPDATE", ATM_MAPPER, code);
+    }
+
     public Optional<Atm> findAtmById(long id) {
         return queryOne("SELECT * FROM atm WHERE id = ?", ATM_MAPPER, id);
+    }
+
+    /** 行锁加载 ATM（按主键），用于审批放行时串行化同一 ATM 的执行中唯一性检查。 */
+    public Optional<Atm> findAtmByIdForUpdate(long id) {
+        return queryOne("SELECT * FROM atm WHERE id = ? FOR UPDATE", ATM_MAPPER, id);
+    }
+
+    public List<Atm> findAllAtms() {
+        return jdbc.query("SELECT * FROM atm ORDER BY id", ATM_MAPPER);
     }
 
     @Transactional
@@ -77,16 +92,19 @@ public class ReplenishRepository {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(con -> {
             PreparedStatement ps = con.prepareStatement(
-                    "INSERT INTO replenish_plan (plan_no, atm_id, business_date, predicted_amount, planned_amount, "
+                    "INSERT INTO replenish_plan (plan_no, atm_id, business_date, plan_type, queue_seq, "
+                            + "predicted_amount, planned_amount, "
                             + "status, approved_at, escort_deadline, escort_completed_at, counted_amount, counted_at, "
                             + "count_custodian_id, device_amount, device_confirmed_at, reconciled_at, discrepancy_id, "
                             + "sealed_at, created_at) "
-                            + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     Statement.RETURN_GENERATED_KEYS);
             int i = 1;
             ps.setString(i++, row.getPlanNo());
             ps.setLong(i++, row.getAtmId());
             ps.setDate(i++, java.sql.Date.valueOf(row.getBusinessDate()));
+            ps.setString(i++, row.getPlanType().name());
+            ps.setLong(i++, row.getQueueSeq());
             ps.setLong(i++, row.getPredictedAmount());
             ps.setLong(i++, row.getPlannedAmount());
             ps.setString(i++, row.getStatus().name());
@@ -113,9 +131,28 @@ public class ReplenishRepository {
         return queryOne("SELECT * FROM replenish_plan WHERE id = ?", PLAN_MAPPER, id);
     }
 
-    public Optional<PlanRow> findPlanByAtmAndDate(long atmId, LocalDate businessDate) {
-        return queryOne("SELECT * FROM replenish_plan WHERE atm_id = ? AND business_date = ?",
-                PLAN_MAPPER, atmId, java.sql.Date.valueOf(businessDate));
+    public Optional<PlanRow> findPlanByAtmAndDate(long atmId, LocalDate businessDate, PlanType planType) {
+        return queryOne("SELECT * FROM replenish_plan WHERE atm_id = ? AND business_date = ? AND plan_type = ?",
+                PLAN_MAPPER, atmId, java.sql.Date.valueOf(businessDate), planType.name());
+    }
+
+    /** 同一 ATM 下一个排队位置：当前最大 queue_seq + 1，须在 ATM 行锁保护内调用。 */
+    public long nextQueueSeq(long atmId) {
+        Long max = jdbc.queryForObject(
+                "SELECT COALESCE(MAX(queue_seq), 0) FROM replenish_plan WHERE atm_id = ?", Long.class, atmId);
+        return (max == null ? 0 : max) + 1;
+    }
+
+    /**
+     * 查询同一 ATM 当前执行中加钞单（已批准、押运在途：APPROVED）。
+     * 双人押运完成（ESCORTED）后押运通道即释放，不再占用执行中名额。
+     * 不变式：同一 ATM 同时刻至多一张执行中单。
+     */
+    public Optional<PlanRow> findExecutingPlan(long atmId) {
+        List<PlanRow> rows = jdbc.query(
+                "SELECT * FROM replenish_plan WHERE atm_id = ? AND status = 'APPROVED' ORDER BY id",
+                PLAN_MAPPER, atmId);
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 
     /** 行锁加载，用于状态机推进与并发串行化。 */
@@ -247,6 +284,31 @@ public class ReplenishRepository {
         return n == null ? 0L : n;
     }
 
+    // ---------------- 节假日日历与快速通道留痕 ----------------
+
+    /** 查询日期区间内的合成节假日（含边界），用于节前 3 日峰值预测。 */
+    public List<Holiday> findHolidaysBetween(LocalDate from, LocalDate to) {
+        return jdbc.query(
+                "SELECT * FROM holiday_calendar WHERE holiday_date BETWEEN ? AND ? ORDER BY holiday_date",
+                (rs, n) -> new Holiday(rs.getDate("holiday_date").toLocalDate(), rs.getString("name")),
+                java.sql.Date.valueOf(from), java.sql.Date.valueOf(to));
+    }
+
+    @Transactional
+    public void insertFastTrackDecision(long planId, LocalDate businessDate, String decision,
+                                        String detail, Instant decidedAt) {
+        jdbc.update("INSERT INTO fast_track_decision (plan_id, business_date, decision, detail, decided_at) "
+                        + "VALUES (?,?,?,?,?)",
+                planId, java.sql.Date.valueOf(businessDate), decision, detail, Timestamp.from(decidedAt));
+    }
+
+    /** 日结核对：查询某营业日（UTC 日界）全部快速通道结论。 */
+    public List<FastTrackDecisionRow> findFastTrackDecisionsByDate(LocalDate businessDate) {
+        return jdbc.query(
+                "SELECT * FROM fast_track_decision WHERE business_date = ? ORDER BY id",
+                FAST_TRACK_MAPPER, java.sql.Date.valueOf(businessDate));
+    }
+
     // ---------------- 幂等记录 ----------------
 
     /** 单条幂等留痕插入；并发同键可能抛唯一键冲突，由服务层捕获裁决，不加独立事务边界。 */
@@ -343,6 +405,8 @@ public class ReplenishRepository {
         r.setPlanNo(rs.getString("plan_no"));
         r.setAtmId(rs.getLong("atm_id"));
         r.setBusinessDate(rs.getDate("business_date").toLocalDate());
+        r.setPlanType(PlanType.valueOf(rs.getString("plan_type")));
+        r.setQueueSeq(rs.getLong("queue_seq"));
         r.setPredictedAmount(rs.getLong("predicted_amount"));
         r.setPlannedAmount(rs.getLong("planned_amount"));
         r.setStatus(PlanStatus.valueOf(rs.getString("status")));
@@ -395,8 +459,15 @@ public class ReplenishRepository {
         return r;
     };
 
-    private static final RowMapper<IdempotentRow> IDEMPOTENT_MAPPER = (rs, n) -> new IdempotentRow(
-            rs.getString("request_id"),
+    private static final RowMapper<FastTrackDecisionRow> FAST_TRACK_MAPPER = (rs, n) -> new FastTrackDecisionRow(
+            rs.getLong("id"),
+            rs.getLong("plan_id"),
+            rs.getDate("business_date").toLocalDate(),
+            rs.getString("decision"),
+            rs.getString("detail"),
+            rs.getTimestamp("decided_at").toInstant());
+
+    private static final RowMapper<IdempotentRow> IDEMPOTENT_MAPPER = (rs, n) -> new IdempotentRow(            rs.getString("request_id"),
             rs.getString("action"),
             rs.getString("fingerprint"),
             (Long) rs.getObject("plan_id"),

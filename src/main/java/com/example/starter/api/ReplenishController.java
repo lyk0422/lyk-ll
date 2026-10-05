@@ -2,6 +2,7 @@ package com.example.starter.api;
 
 import com.example.starter.service.ReplenishService;
 import jakarta.validation.Valid;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -10,6 +11,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.time.LocalDate;
 import java.util.List;
 
 /**
@@ -30,6 +32,12 @@ public class ReplenishController {
     @PostMapping
     public ResponseEntity<Object> create(@Valid @RequestBody CreatePlanRequest request) {
         return result(service.createPlan(request));
+    }
+
+    /** 节假日临时通道：节前 3 日峰值预测，超阈值网点自动生成临时计划并快速批准。 */
+    @PostMapping("/temporary/generate")
+    public ResponseEntity<Object> generateTemporary(@Valid @RequestBody GenerateTemporaryRequest request) {
+        return result(service.generateTemporaryPlans(request));
     }
 
     /** 审批：起算 4 小时押运时限。 */
@@ -95,5 +103,12 @@ public class ReplenishController {
     @GetMapping("/{planId}/discrepancy")
     public DiscrepancyResponse discrepancy(@PathVariable long planId) {
         return service.getDiscrepancy(planId);
+    }
+
+    /** 日结核对：某营业日（UTC，yyyy-MM-dd）全部快速通道结论留痕。 */
+    @GetMapping("/daily-reconciliation/{date}")
+    public DailyReconciliationResponse dailyReconciliation(
+            @PathVariable @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
+        return service.dailyReconciliation(date);
     }
 }

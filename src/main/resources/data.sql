@@ -9,3 +9,9 @@ MERGE INTO custodian (id, code, name, frozen, created_at) KEY(id) VALUES
     (2, 'C-02', '李娜', 0, CURRENT_TIMESTAMP),
     (3, 'C-03', '王强', 0, CURRENT_TIMESTAMP),
     (4, 'C-04', '赵敏', 0, CURRENT_TIMESTAMP);
+
+-- 合成节假日日历：仅用于节前 3 日峰值预测，全部为合成数据
+MERGE INTO holiday_calendar (holiday_date, name, created_at) KEY(holiday_date) VALUES
+    ('2026-09-23', '合成-秋分调休假期', CURRENT_TIMESTAMP),
+    ('2026-10-01', '合成-国庆节',       CURRENT_TIMESTAMP),
+    ('2026-10-08', '合成-重阳调休假期', CURRENT_TIMESTAMP);

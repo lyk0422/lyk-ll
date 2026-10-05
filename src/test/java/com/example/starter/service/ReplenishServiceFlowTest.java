@@ -63,6 +63,7 @@ class ReplenishServiceFlowTest {
         jdbc.update("DELETE FROM late_event");
         jdbc.update("DELETE FROM plan_discrepancy");
         jdbc.update("DELETE FROM escort_checkin");
+        jdbc.update("DELETE FROM fast_track_decision");
         jdbc.update("DELETE FROM replenish_plan");
         jdbc.update("UPDATE atm SET frozen = 0");
         jdbc.update("UPDATE custodian SET frozen = 0");
@@ -341,7 +342,8 @@ class ReplenishServiceFlowTest {
         assertEquals(threads - 1, conflict.get());
         assertEquals(1L, repo.findPlanByAtmAndDate(
                 repo.findAtmByCode("ATM-0001").orElseThrow().id(),
-                java.time.LocalDate.parse("2026-09-20")).stream().count());
+                java.time.LocalDate.parse("2026-09-20"),
+                com.example.starter.domain.PlanType.REGULAR).stream().count());
     }
 
     @Test
