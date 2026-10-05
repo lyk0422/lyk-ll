@@ -88,10 +88,64 @@ CREATE TABLE IF NOT EXISTS special_correction (
     CONSTRAINT uk_special_request UNIQUE (request_id)
 );
 
+-- 合成暴露场所库：报告卡现住址包含关键词即自动归并到该场所
+CREATE TABLE IF NOT EXISTS exposure_site (
+    code    VARCHAR(32) PRIMARY KEY COMMENT '暴露场所编码',
+    name    VARCHAR(128) NOT NULL COMMENT '暴露场所名称（合成）',
+    keyword VARCHAR(128) NOT NULL COMMENT '地址归并关键词：报告卡现住址包含该关键词即归入本场所'
+);
+
+-- 报告卡-场所归并记录：一张卡最多归入一个场所
+CREATE TABLE IF NOT EXISTS card_exposure (
+    card_no     VARCHAR(40) PRIMARY KEY COMMENT '卡片编号',
+    site_code   VARCHAR(32) NOT NULL COMMENT '归并到的暴露场所编码',
+    reported_at TIMESTAMP NOT NULL COMMENT '报告时刻(UTC)，取卡片创建时刻'
+);
+
+-- 聚集性疫情事件：同一场所72小时(UTC)内3例及以上报告触发，恰3例即触发
+CREATE TABLE IF NOT EXISTS cluster_event (
+    id                     BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '聚集事件编号',
+    site_code              VARCHAR(32) NOT NULL COMMENT '暴露场所编码',
+    status                 VARCHAR(16) NOT NULL COMMENT '状态：OPEN进行中/CONFIRMED协查确认/EXCLUDED协查排除/CLOSED已关闭(终态)',
+    first_case_at          TIMESTAMP NOT NULL COMMENT '窗口内首例报告时刻(UTC)',
+    last_case_at           TIMESTAMP NOT NULL COMMENT '窗口内末例报告时刻(UTC)',
+    open_investigation_id  BIGINT COMMENT '当前进行中协查单编号；NULL表示无，保证同一时刻仅一张进行中协查单',
+    conclusion             VARCHAR(512) COMMENT '协查结论回写内容；未回写NULL',
+    created_at             TIMESTAMP NOT NULL COMMENT '事件生成时刻(UTC)',
+    closed_at              TIMESTAMP COMMENT '关闭时刻(UTC)；未关闭NULL'
+);
+CREATE INDEX IF NOT EXISTS idx_cluster_site ON cluster_event (site_code, status);
+
+-- 聚集事件涉及卡号（含事件关闭后迟到的卡）
+CREATE TABLE IF NOT EXISTS cluster_event_card (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+    event_id    BIGINT NOT NULL COMMENT '聚集事件编号',
+    card_no     VARCHAR(40) NOT NULL COMMENT '卡片编号',
+    reported_at TIMESTAMP NOT NULL COMMENT '报告时刻(UTC)',
+    arrival     VARCHAR(8) NOT NULL COMMENT '归并类型：NORMAL窗口内正常归并/LATE事件关闭后迟到（可另行归并新事件）',
+    CONSTRAINT uk_event_card UNIQUE (event_id, card_no)
+);
+CREATE INDEX IF NOT EXISTS idx_event_card ON cluster_event_card (event_id, id);
+
+-- 协查单：聚集事件生成后推送相关机构；requestId 幂等
+CREATE TABLE IF NOT EXISTS investigation_order (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '协查单编号',
+    event_id         BIGINT NOT NULL COMMENT '聚集事件编号',
+    request_id       VARCHAR(64) NOT NULL COMMENT '幂等键',
+    institution_code VARCHAR(32) NOT NULL COMMENT '协查推送机构编码',
+    note             VARCHAR(512) COMMENT '协查说明；空值表示无',
+    status           VARCHAR(16) NOT NULL COMMENT '状态：IN_PROGRESS进行中/CONCLUDED已办结',
+    conclusion       VARCHAR(512) COMMENT '协查结论；未办结NULL',
+    created_at       TIMESTAMP NOT NULL COMMENT '创建时刻(UTC)',
+    concluded_at     TIMESTAMP COMMENT '办结时刻(UTC)；未办结NULL',
+    CONSTRAINT uk_investigation_request UNIQUE (request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_investigation_event ON investigation_order (event_id, id);
+
 -- 幂等记录：指纹覆盖 requestId 与全部业务字段
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id    VARCHAR(64) NOT NULL COMMENT '幂等键',
-    scope         VARCHAR(16) NOT NULL COMMENT '场景：SUBMIT初报/CORRECTION订正/SPECIAL特殊订正发起',
+    scope         VARCHAR(16) NOT NULL COMMENT '场景：SUBMIT初报/CORRECTION订正/SPECIAL特殊订正发起/INVESTIGATION协查单生成',
     fingerprint   VARCHAR(64) NOT NULL COMMENT '请求参数SHA-256指纹（含requestId）',
     card_no       VARCHAR(40) NOT NULL COMMENT '首次成功请求关联卡片编号',
     version_no    INT COMMENT '首次成功请求产生的版本号（特殊订正发起时为当前版本）',

@@ -60,11 +60,14 @@ public class EpidemicCardService {
     private final CardRepository repository;
     private final ClockService clock;
     private final Fingerprinter fingerprinter;
+    private final ClusterService clusterService;
 
-    public EpidemicCardService(CardRepository repository, ClockService clock, Fingerprinter fingerprinter) {
+    public EpidemicCardService(CardRepository repository, ClockService clock,
+                               Fingerprinter fingerprinter, ClusterService clusterService) {
         this.repository = repository;
         this.clock = clock;
         this.fingerprinter = fingerprinter;
+        this.clusterService = clusterService;
     }
 
     // ---------------- 初报 ----------------
@@ -140,6 +143,8 @@ public class EpidemicCardService {
         CardResponse response = toResponse(card, version, false);
         saveIdempotency(request.requestId(), SCOPE_SUBMIT, fingerprint,
                 card.getCardNo(), 1, response, now);
+        // 新卡成功落库后按合成暴露场所库自动归并（同事务）；去重命中/并发落败路径不重复归并。
+        clusterService.onCardSubmitted(card.getCardNo(), request.address(), now);
         return response;
     }
 

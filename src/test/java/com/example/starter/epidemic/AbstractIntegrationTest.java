@@ -28,6 +28,10 @@ abstract class AbstractIntegrationTest {
     @BeforeEach
     void cleanTables() {
         jdbc.update("DELETE FROM idempotency_record");
+        jdbc.update("DELETE FROM investigation_order");
+        jdbc.update("DELETE FROM cluster_event_card");
+        jdbc.update("DELETE FROM cluster_event");
+        jdbc.update("DELETE FROM card_exposure");
         jdbc.update("DELETE FROM special_correction");
         jdbc.update("DELETE FROM audit_trail");
         jdbc.update("DELETE FROM card_version");
@@ -38,6 +42,12 @@ abstract class AbstractIntegrationTest {
     /** 构造一份合法初报请求，调用方可覆盖字段。 */
     protected SubmitCardRequest submitRequest(String requestId, String patientId, String diseaseCode,
                                               Instant diagnosisTime) {
+        return submitRequestAt(requestId, patientId, diseaseCode, diagnosisTime, "示范市合成路 1 号");
+    }
+
+    /** 构造一份指定现住址的合法初报请求（用于暴露场所归并）。 */
+    protected SubmitCardRequest submitRequestAt(String requestId, String patientId, String diseaseCode,
+                                                Instant diagnosisTime, String address) {
         return new SubmitCardRequest(
                 requestId,
                 patientId,
@@ -50,7 +60,7 @@ abstract class AbstractIntegrationTest {
                 diagnosisTime,
                 "H001",
                 "张报告",
-                "示范市合成路 1 号",
+                address,
                 "13800000000",
                 null);
     }
