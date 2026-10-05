@@ -18,12 +18,13 @@ import com.example.starter.forestry.web.ApiException;
 class EligibilityTest extends AbstractForestryTest {
 
     private ApplyRequest req(String requestId, String subplotId, String harvestType) {
-        return new ApplyRequest(requestId, "OP-E", subplotId,
-                switch (subplotId) {
-                    case "SP-001", "SP-003", "SP-005" -> "PINUS_MASSONIANA";
-                    default -> "CUNNINGHAMIA";
-                },
-                harvestType, new BigDecimal("10.00"));
+        // 马尾松单株蓄积 0.5（10.00 = 20 株），杉木 0.25（10.00 = 40 株），设计值与复核口径一致
+        return switch (subplotId) {
+            case "SP-001", "SP-003", "SP-005" -> new ApplyRequest(requestId, "OP-E", subplotId,
+                    "PINUS_MASSONIANA", harvestType, 20, new BigDecimal("10.00"));
+            default -> new ApplyRequest(requestId, "OP-E", subplotId,
+                    "CUNNINGHAMIA", harvestType, 40, new BigDecimal("10.00"));
+        };
     }
 
     @Test

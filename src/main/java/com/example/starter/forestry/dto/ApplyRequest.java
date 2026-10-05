@@ -9,12 +9,14 @@ import jakarta.validation.constraints.Positive;
 /**
  * 采伐申请提交请求。
  *
- * @param requestId   幂等键
- * @param operatorId  经营主体 ID
- * @param subplotId   小班 ID
- * @param speciesCode 树种编码（同时决定年度限额档位）
- * @param harvestType 采伐类型：MAIN 主伐 / TENDING 抚育 / REFORMATION 改造
- * @param volume      申请采伐蓄积量，单位立方米
+ * @param requestId      幂等键
+ * @param operatorId     经营主体 ID
+ * @param subplotId      小班 ID
+ * @param speciesCode    树种编码（同时决定年度限额档位）
+ * @param harvestType    采伐类型：MAIN 主伐 / TENDING 抚育 / REFORMATION 改造
+ * @param treeCount      申请采伐株数，单位株
+ * @param designedVolume 小班蓄积设计值，单位立方米；系统按合成蓄积表复核，
+ *                       与复核口径（株数 × 单株蓄积）不一致不予受理
  */
 public record ApplyRequest(
         @NotBlank String requestId,
@@ -22,6 +24,7 @@ public record ApplyRequest(
         @NotBlank String subplotId,
         @NotBlank String speciesCode,
         @NotBlank String harvestType,
-        @NotNull @Positive BigDecimal volume
+        @NotNull @Positive Integer treeCount,
+        @NotNull @Positive BigDecimal designedVolume
 ) {
 }

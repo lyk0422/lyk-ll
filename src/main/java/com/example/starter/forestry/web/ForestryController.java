@@ -13,8 +13,10 @@ import com.example.starter.forestry.dto.AcceptanceRequest;
 import com.example.starter.forestry.dto.ApplicationView;
 import com.example.starter.forestry.dto.ApplyRequest;
 import com.example.starter.forestry.dto.ConfirmRequest;
+import com.example.starter.forestry.dto.CorrectionRequest;
 import com.example.starter.forestry.dto.IssueRequest;
 import com.example.starter.forestry.dto.LicenseView;
+import com.example.starter.forestry.dto.QuotaLedgerView;
 import com.example.starter.forestry.dto.RenewalView;
 import com.example.starter.forestry.dto.ReviewRequest;
 import com.example.starter.forestry.service.ForestryService;
@@ -44,6 +46,25 @@ public class ForestryController {
     public ApplicationView review(@PathVariable("id") String applicationId,
                                   @Valid @RequestBody ReviewRequest request) {
         return service.review(applicationId, request);
+    }
+
+    /**
+     * 蓄积设计值补正：仅待补正（CORRECTION_REQUIRED）状态的申请允许补正一次；
+     * 补正后仍与合成蓄积表复核口径不一致按撤回处理。
+     */
+    @PostMapping("/applications/{id}/correction")
+    public ApplicationView correct(@PathVariable("id") String applicationId,
+                                   @Valid @RequestBody CorrectionRequest request) {
+        return service.correct(applicationId, request);
+    }
+
+    /**
+     * 双口径限额台账：按树种档位输出指定年度的限额、占用与剩余（株数与蓄积）。
+     */
+    @GetMapping("/quota/ledger")
+    public java.util.List<QuotaLedgerView> quotaLedger(
+            @org.springframework.web.bind.annotation.RequestParam("year") int year) {
+        return service.quotaLedger(year);
     }
 
     @PostMapping("/licenses")

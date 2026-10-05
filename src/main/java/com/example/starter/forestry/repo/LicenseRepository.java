@@ -22,7 +22,7 @@ public class LicenseRepository {
     }
 
     private static final String COLUMNS = """
-            id, application_id, operator_id, subplot_id, species_code, quota_year, volume,
+            id, application_id, operator_id, subplot_id, species_code, quota_year, tree_count, volume,
             status, issue_date, expire_date, harvest_date, void_date
             """;
 
@@ -34,6 +34,7 @@ public class LicenseRepository {
                 rs.getString("subplot_id"),
                 rs.getString("species_code"),
                 rs.getInt("quota_year"),
+                rs.getInt("tree_count"),
                 rs.getBigDecimal("volume"),
                 rs.getString("status"),
                 rs.getDate("issue_date").toLocalDate(),
@@ -45,12 +46,12 @@ public class LicenseRepository {
     public void insert(LicensePO po) {
         jdbc.update("""
                         INSERT INTO harvest_license
-                            (id, application_id, operator_id, subplot_id, species_code, quota_year, volume,
+                            (id, application_id, operator_id, subplot_id, species_code, quota_year, tree_count, volume,
                              status, issue_date, expire_date, harvest_date, void_date)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                 po.id(), po.applicationId(), po.operatorId(), po.subplotId(), po.speciesCode(), po.quotaYear(),
-                po.volume(), po.status(), Date.valueOf(po.issueDate()), Date.valueOf(po.expireDate()),
+                po.treeCount(), po.volume(), po.status(), Date.valueOf(po.issueDate()), Date.valueOf(po.expireDate()),
                 po.harvestDate() == null ? null : Date.valueOf(po.harvestDate()),
                 po.voidDate() == null ? null : Date.valueOf(po.voidDate()));
     }

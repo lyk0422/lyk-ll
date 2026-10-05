@@ -9,6 +9,10 @@ package com.example.starter.forestry.domain;
  */
 public enum ApplicationStatus {
     SUBMITTED,
+    /** 蓄积设计值与合成蓄积表复核口径不一致，不予受理；允许一次补正 */
+    CORRECTION_REQUIRED,
+    /** 补正后设计值仍不一致，按撤回处理，不生成证照 */
+    WITHDRAWN,
     REVIEW_PASSED,
     REVIEW_REJECTED,
     LICENSED,

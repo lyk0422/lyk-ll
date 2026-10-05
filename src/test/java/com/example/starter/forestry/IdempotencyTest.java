@@ -25,8 +25,15 @@ import com.example.starter.forestry.web.ApiException;
 class IdempotencyTest extends AbstractForestryTest {
 
     private ApplyRequest apply(String requestId, String subplotId, String volume) {
-        String species = "SP-001".equals(subplotId) ? "PINUS_MASSONIANA" : "CUNNINGHAMIA";
-        return new ApplyRequest(requestId, "OP-I", subplotId, species, "MAIN", new BigDecimal(volume));
+        // 马尾松单株蓄积 0.5、杉木 0.25：株数 = 设计值 / 单株蓄积，保持设计值与复核口径一致
+        if ("SP-001".equals(subplotId)) {
+            return new ApplyRequest(requestId, "OP-I", subplotId, "PINUS_MASSONIANA", "MAIN",
+                    new BigDecimal(volume).multiply(new BigDecimal("2")).intValueExact(),
+                    new BigDecimal(volume));
+        }
+        return new ApplyRequest(requestId, "OP-I", subplotId, "CUNNINGHAMIA", "MAIN",
+                new BigDecimal(volume).multiply(new BigDecimal("4")).intValueExact(),
+                new BigDecimal(volume));
     }
 
     @Test
@@ -64,7 +71,8 @@ class IdempotencyTest extends AbstractForestryTest {
     void rejectedApplyIsReplayedWithSameOutcome() {
         // 首次：禁伐区拒绝（422）
         assertThatThrownBy(() -> service.apply(
-                new ApplyRequest("idem-app-3", "OP-I", "SP-005", "PINUS_MASSONIANA", "MAIN", new BigDecimal("10.00"))))
+                new ApplyRequest("idem-app-3", "OP-I", "SP-005", "PINUS_MASSONIANA", "MAIN",
+                        20, new BigDecimal("10.00"))))
                 .isInstanceOfSatisfying(ApiException.class, ex -> {
                     assertThat(ex.getStatus()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
                     assertThat(ex.getErrorCode()).isEqualTo("PROTECTED_ZONE_FORBIDDEN");
@@ -72,13 +80,15 @@ class IdempotencyTest extends AbstractForestryTest {
 
         // 同键同参重放：相同首次拒绝
         assertThatThrownBy(() -> service.apply(
-                new ApplyRequest("idem-app-3", "OP-I", "SP-005", "PINUS_MASSONIANA", "MAIN", new BigDecimal("10.00"))))
+                new ApplyRequest("idem-app-3", "OP-I", "SP-005", "PINUS_MASSONIANA", "MAIN",
+                        20, new BigDecimal("10.00"))))
                 .isInstanceOfSatisfying(ApiException.class, ex ->
                         assertThat(ex.getErrorCode()).isEqualTo("PROTECTED_ZONE_FORBIDDEN"));
 
         // 同键异参仍 409，不允许借同键“改道”
         assertThatThrownBy(() -> service.apply(
-                new ApplyRequest("idem-app-3", "OP-I", "SP-001", "PINUS_MASSONIANA", "MAIN", new BigDecimal("10.00"))))
+                new ApplyRequest("idem-app-3", "OP-I", "SP-001", "PINUS_MASSONIANA", "MAIN",
+                        20, new BigDecimal("10.00"))))
                 .isInstanceOfSatisfying(ApiException.class, ex ->
                         assertThat(ex.getErrorCode()).isEqualTo("IDEMPOTENCY_CONFLICT"));
     }

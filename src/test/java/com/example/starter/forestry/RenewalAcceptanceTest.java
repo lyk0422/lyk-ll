@@ -26,7 +26,7 @@ class RenewalAcceptanceTest extends AbstractForestryTest {
     /** 走到采伐确认，时钟停在 2026-04-01（更新首次期限 2027-12-31）。 */
     private String harvestedApplication(String operatorId, String prefix) {
         var app = service.apply(new ApplyRequest(prefix + "-apply", operatorId, "SP-001",
-                "PINUS_MASSONIANA", "MAIN", new BigDecimal("15.00")));
+                "PINUS_MASSONIANA", "MAIN", 30, new BigDecimal("15.00")));
         service.review(app.id(), new ReviewRequest(true, "OK"));
         LicenseView license = service.issue(new IssueRequest(prefix + "-issue", app.id()));
         clock.setToday(LocalDate.of(2026, 4, 1));
@@ -101,7 +101,7 @@ class RenewalAcceptanceTest extends AbstractForestryTest {
         // 限批期内（含截止当日）新申请一律拒绝
         clock.setToday(LocalDate.of(2028, 6, 1));
         assertThatThrownBy(() -> service.apply(new ApplyRequest("r-fail-new", "OP-R5", "SP-002",
-                "CUNNINGHAMIA", "MAIN", new BigDecimal("5.00"))))
+                "CUNNINGHAMIA", "MAIN", 20, new BigDecimal("5.00"))))
                 .isInstanceOfSatisfying(ApiException.class, ex -> {
                     assertThat(ex.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
                     assertThat(ex.getErrorCode()).isEqualTo("OPERATOR_RESTRICTED");
@@ -110,7 +110,7 @@ class RenewalAcceptanceTest extends AbstractForestryTest {
         // 限批结束次日恢复申请资格
         clock.setToday(LocalDate.of(2028, 6, 2));
         var newApp = service.apply(new ApplyRequest("r-fail-new2", "OP-R5", "SP-002",
-                "CUNNINGHAMIA", "MAIN", new BigDecimal("5.00")));
+                "CUNNINGHAMIA", "MAIN", 20, new BigDecimal("5.00")));
         assertThat(newApp.status()).isEqualTo("SUBMITTED");
     }
 

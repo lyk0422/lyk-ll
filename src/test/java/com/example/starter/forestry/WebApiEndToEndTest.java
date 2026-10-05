@@ -69,10 +69,10 @@ class WebApiEndToEndTest {
 
     @Test
     void fullFlowOverHttp() throws Exception {
-        // 1. 申请
+        // 1. 申请（马尾松单株蓄积 0.5：40 株 × 0.5 = 20.00 立方米，设计值与复核口径一致）
         var applyReq = """
                 {"requestId":"web-apply","operatorId":"OP-W","subplotId":"SP-001",
-                 "speciesCode":"PINUS_MASSONIANA","harvestType":"MAIN","volume":20.00}
+                 "speciesCode":"PINUS_MASSONIANA","harvestType":"MAIN","treeCount":40,"designedVolume":20.00}
                 """;
         ResponseEntity<String> created = rest.postForEntity(url("/api/applications"),
                 json(applyReq), String.class);
@@ -136,7 +136,7 @@ class WebApiEndToEndTest {
     void protectedZoneApplyReturns422() throws Exception {
         var req = """
                 {"requestId":"web-422","operatorId":"OP-W","subplotId":"SP-005",
-                 "speciesCode":"PINUS_MASSONIANA","harvestType":"MAIN","volume":10.00}
+                 "speciesCode":"PINUS_MASSONIANA","harvestType":"MAIN","treeCount":20,"designedVolume":10.00}
                 """;
         ResponseEntity<String> response = rest.postForEntity(url("/api/applications"),
                 json(req), String.class);
@@ -148,11 +148,11 @@ class WebApiEndToEndTest {
     void sameKeyDifferentParamsReturns409() {
         var req1 = """
                 {"requestId":"web-409","operatorId":"OP-W","subplotId":"SP-001",
-                 "speciesCode":"PINUS_MASSONIANA","harvestType":"MAIN","volume":10.00}
+                 "speciesCode":"PINUS_MASSONIANA","harvestType":"MAIN","treeCount":20,"designedVolume":10.00}
                 """;
         var req2 = """
                 {"requestId":"web-409","operatorId":"OP-W","subplotId":"SP-001",
-                 "speciesCode":"PINUS_MASSONIANA","harvestType":"MAIN","volume":11.00}
+                 "speciesCode":"PINUS_MASSONIANA","harvestType":"MAIN","treeCount":22,"designedVolume":11.00}
                 """;
         rest.postForEntity(url("/api/applications"), json(req1), String.class);
         ResponseEntity<String> response = rest.postForEntity(url("/api/applications"),
@@ -161,10 +161,62 @@ class WebApiEndToEndTest {
     }
 
     @Test
-    void invalidBeanReturns400() {
-        var req = """
+    void correctionAndQuotaLedgerOverHttp() throws Exception {
+        // 设计值 9.50 与复核口径（20 株 × 0.5 = 10.00）不一致：不予受理（待补正）
+        var applyReq = """
+                {"requestId":"web-corr-apply","operatorId":"OP-W","subplotId":"SP-001",
+                 "speciesCode":"PINUS_MASSONIANA","harvestType":"MAIN","treeCount":20,"designedVolume":9.50}
+                """;
+        ResponseEntity<String> created = rest.postForEntity(url("/api/applications"),
+                json(applyReq), String.class);
+        assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        JsonNode app = body(created);
+        assertThat(app.get("status").asText()).isEqualTo("CORRECTION_REQUIRED");
+        assertThat(new BigDecimal(app.get("volume").asText())).isEqualByComparingTo("10.00");
+        String appId = app.get("id").asText();
+
+        // 一次补正为一致口径：受理
+        var corrReq = """
+                {"requestId":"web-corr-fix","treeCount":20,"designedVolume":10.00}
+                """;
+        ResponseEntity<String> corrected = rest.postForEntity(
+                url("/api/applications/" + appId + "/correction"), json(corrReq), String.class);
+        assertThat(corrected.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(body(corrected).get("status").asText()).isEqualTo("SUBMITTED");
+
+        // 补正受理后审核发证，台账双口径占用 20 株 / 10.00 立方米
+        rest.postForEntity(url("/api/applications/" + appId + "/review"),
+                json("{\"approved\":true,\"comment\":\"OK\"}"), String.class);
+        var issueReq = """
+                {"requestId":"web-corr-issue","applicationId":"%s"}
+                """.formatted(appId);
+        ResponseEntity<String> licensed = rest.postForEntity(url("/api/licenses"),
+                json(issueReq), String.class);
+        assertThat(licensed.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+
+        ResponseEntity<String> ledger = rest.getForEntity(
+                url("/api/quota/ledger?year=2026"), String.class);
+        assertThat(ledger.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode tiers = body(ledger);
+        JsonNode pinus = null;
+        for (JsonNode tier : tiers) {
+            if ("PINUS_MASSONIANA".equals(tier.get("speciesCode").asText())) {
+                pinus = tier;
+            }
+        }
+        assertThat(pinus).isNotNull();
+        assertThat(pinus.get("heldTrees").asInt()).isEqualTo(20);
+        assertThat(new BigDecimal(pinus.get("heldVolume").asText())).isEqualByComparingTo("10.00");
+        assertThat(pinus.get("remainingTrees").asInt()).isEqualTo(230);
+        // 重复查询稳定
+        assertThat(rest.getForEntity(url("/api/quota/ledger?year=2026"), String.class).getBody())
+                .isEqualTo(ledger.getBody());
+    }
+
+    @Test
+    void invalidBeanReturns400() {        var req = """
                 {"requestId":"","operatorId":"OP-W","subplotId":"SP-001",
-                 "speciesCode":"PINUS_MASSONIANA","harvestType":"MAIN","volume":10.00}
+                 "speciesCode":"PINUS_MASSONIANA","harvestType":"MAIN","treeCount":20,"designedVolume":10.00}
                 """;
         ResponseEntity<String> response = rest.postForEntity(url("/api/applications"),
                 json(req), String.class);

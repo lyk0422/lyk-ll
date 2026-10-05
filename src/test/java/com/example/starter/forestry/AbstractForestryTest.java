@@ -45,9 +45,10 @@ abstract class AbstractForestryTest {
     /** 申请 → 审核通过 → 发证 的完整准备，返回许可证视图。 */
     protected com.example.starter.forestry.dto.LicenseView issueLicense(
             String requestPrefix, String operatorId, String subplotId,
-            String speciesCode, String harvestType, java.math.BigDecimal volume) {
+            String speciesCode, String harvestType, int treeCount, java.math.BigDecimal designedVolume) {
         var app = service.apply(new ApplyRequest(
-                requestPrefix + "-apply", operatorId, subplotId, speciesCode, harvestType, volume));
+                requestPrefix + "-apply", operatorId, subplotId, speciesCode, harvestType,
+                treeCount, designedVolume));
         service.review(app.id(), new ReviewRequest(true, "OK"));
         return service.issue(new IssueRequest(requestPrefix + "-issue", app.id()));
     }

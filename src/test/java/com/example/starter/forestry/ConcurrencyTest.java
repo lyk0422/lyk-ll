@@ -55,11 +55,11 @@ class ConcurrencyTest extends AbstractForestryTest {
 
     @Test
     void concurrentIssuesOnSameQuotaTierNeverExceedTotal() throws Exception {
-        // 杉木 2026 限额 50：两笔各 30，并发发证只可能一张成功
+        // 杉木 2026 限额 200 株 / 50 立方米：两笔各 120 株 / 30 立方米，并发发证只可能一张成功
         var app1 = service.apply(new ApplyRequest("c-q-app1", "OP-C1", "SP-002",
-                "CUNNINGHAMIA", "MAIN", new BigDecimal("30.00")));
+                "CUNNINGHAMIA", "MAIN", 120, new BigDecimal("30.00")));
         var app2 = service.apply(new ApplyRequest("c-q-app2", "OP-C2", "SP-006",
-                "CUNNINGHAMIA", "MAIN", new BigDecimal("30.00")));
+                "CUNNINGHAMIA", "MAIN", 120, new BigDecimal("30.00")));
         service.review(app1.id(), new ReviewRequest(true, "OK"));
         service.review(app2.id(), new ReviewRequest(true, "OK"));
 
@@ -103,14 +103,65 @@ class ConcurrencyTest extends AbstractForestryTest {
     }
 
     @Test
-    void concurrentSameRequestIdCreatesExactlyOneApplication() throws Exception {
-        AtomicReference<String> id1 = new AtomicReference<>();
+    void concurrentIssuesOnTreeCountBoundTierNeverExceedTotal() throws Exception {
+        // 栎类 2026 限额 90 株 / 40 立方米（株数口径先判满）：两笔各 50 株 / 20 立方米，
+        // 蓄积合计恰达 40 合法，但株数合计 100 > 90，并发发证只可能一张成功
+        var app1 = service.apply(new ApplyRequest("c-tq-app1", "OP-C6", "SP-007",
+                "QUERCUS", "MAIN", 50, new BigDecimal("20.00")));
+        var app2 = service.apply(new ApplyRequest("c-tq-app2", "OP-C7", "SP-008",
+                "QUERCUS", "MAIN", 50, new BigDecimal("20.00")));
+        service.review(app1.id(), new ReviewRequest(true, "OK"));
+        service.review(app2.id(), new ReviewRequest(true, "OK"));
+
+        final int[] success = {0};
+        final int[] rejected = {0};
+        runConcurrently(
+                () -> {
+                    try {
+                        service.issue(new IssueRequest("c-tq-issue1", app1.id()));
+                        success[0]++;
+                    } catch (ApiException e) {
+                        if ("QUOTA_EXCEEDED".equals(e.getErrorCode())) {
+                            rejected[0]++;
+                        } else {
+                            throw e;
+                        }
+                    }
+                },
+                () -> {
+                    try {
+                        service.issue(new IssueRequest("c-tq-issue2", app2.id()));
+                        success[0]++;
+                    } catch (ApiException e) {
+                        if ("QUOTA_EXCEEDED".equals(e.getErrorCode())) {
+                            rejected[0]++;
+                        } else {
+                            throw e;
+                        }
+                    }
+                });
+
+        assertThat(success[0]).isOne();
+        assertThat(rejected[0]).isOne();
+        // 株数口径占用不超过 90 株，且只有一笔台账
+        Integer heldTrees = jdbc.queryForObject(
+                "SELECT COALESCE(SUM(tree_count),0) FROM quota_ledger WHERE species_code='QUERCUS' AND quota_year=2026",
+                Integer.class);
+        assertThat(heldTrees).isEqualTo(50);
+        Integer holds = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM quota_ledger WHERE species_code='QUERCUS' AND action='HOLD'",
+                Integer.class);
+        assertThat(holds).isOne();
+    }
+
+    @Test
+    void concurrentSameRequestIdCreatesExactlyOneApplication() throws Exception {        AtomicReference<String> id1 = new AtomicReference<>();
         AtomicReference<String> id2 = new AtomicReference<>();
         runConcurrently(
                 () -> id1.set(service.apply(new ApplyRequest("c-same-key", "OP-C3", "SP-001",
-                        "PINUS_MASSONIANA", "MAIN", new BigDecimal("10.00"))).id()),
+                        "PINUS_MASSONIANA", "MAIN", 20, new BigDecimal("10.00"))).id()),
                 () -> id2.set(service.apply(new ApplyRequest("c-same-key", "OP-C3", "SP-001",
-                        "PINUS_MASSONIANA", "MAIN", new BigDecimal("10.00"))).id()));
+                        "PINUS_MASSONIANA", "MAIN", 20, new BigDecimal("10.00"))).id()));
 
         // 两个并发同键同参请求都应返回同一个首次申请单
         assertThat(id1.get()).isNotNull();
@@ -123,7 +174,7 @@ class ConcurrencyTest extends AbstractForestryTest {
     @Test
     void concurrentConfirmsProduceSingleHarvestedTerminalAndOneRenewal() throws Exception {
         LicenseView license = issueLicense("c-confirm", "OP-C4", "SP-001",
-                "PINUS_MASSONIANA", "MAIN", new BigDecimal("10.00"));
+                "PINUS_MASSONIANA", "MAIN", 20, new BigDecimal("10.00"));
         clock.setToday(LocalDate.of(2026, 5, 30)); // 恰第 90 日
 
         runConcurrently(
@@ -140,7 +191,7 @@ class ConcurrencyTest extends AbstractForestryTest {
     @Test
     void confirmOnExpiryRacingScanVoidsOnceAndReleasesOnce() throws Exception {
         LicenseView license = issueLicense("c-void", "OP-C5", "SP-001",
-                "PINUS_MASSONIANA", "MAIN", new BigDecimal("10.00"));
+                "PINUS_MASSONIANA", "MAIN", 20, new BigDecimal("10.00"));
         clock.setToday(LocalDate.of(2026, 5, 31)); // 第 91 日
 
         runConcurrently(

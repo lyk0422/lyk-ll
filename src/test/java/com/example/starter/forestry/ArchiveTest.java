@@ -24,7 +24,7 @@ class ArchiveTest extends AbstractForestryTest {
     @Test
     void repeatedArchiveIsIdempotentSuccess() {
         var app = service.apply(new ApplyRequest("arc-app", "OP-A", "SP-001",
-                "PINUS_MASSONIANA", "MAIN", new BigDecimal("10.00")));
+                "PINUS_MASSONIANA", "MAIN", 20, new BigDecimal("10.00")));
 
         var first = service.archive(app.id());
         var second = service.archive(app.id());
@@ -37,7 +37,7 @@ class ArchiveTest extends AbstractForestryTest {
     @Test
     void lateDataAfterArchiveOnlyRecordsEvent() {
         var app = service.apply(new ApplyRequest("arc-late-app", "OP-A2", "SP-001",
-                "PINUS_MASSONIANA", "MAIN", new BigDecimal("10.00")));
+                "PINUS_MASSONIANA", "MAIN", 20, new BigDecimal("10.00")));
         service.archive(app.id());
 
         // 迟到审核：冲突 + 记录一条迟到事件
@@ -62,7 +62,7 @@ class ArchiveTest extends AbstractForestryTest {
     @Test
     void lateConfirmAndAcceptanceAfterHarvestedArchiveRecordEvents() {
         var app = service.apply(new ApplyRequest("arc-h-app", "OP-A3", "SP-001",
-                "PINUS_MASSONIANA", "MAIN", new BigDecimal("10.00")));
+                "PINUS_MASSONIANA", "MAIN", 20, new BigDecimal("10.00")));
         service.review(app.id(), new ReviewRequest(true, "OK"));
         var license = service.issue(new IssueRequest("arc-h-issue", app.id()));
         clock.setToday(LocalDate.of(2026, 4, 1));

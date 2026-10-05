@@ -13,6 +13,7 @@ public record LicensePO(
         String subplotId,
         String speciesCode,
         int quotaYear,
+        Integer treeCount,
         BigDecimal volume,
         String status,
         LocalDate issueDate,
