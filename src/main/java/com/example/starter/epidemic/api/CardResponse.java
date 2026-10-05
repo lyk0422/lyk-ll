@@ -31,6 +31,7 @@ import java.time.LocalDate;
  * @param deadlineAt      报告时限终点（UTC，含端点：恰在此时刻提交为及时）
  * @param submittedAt     该版本提交时刻（UTC）
  * @param updatedAt       卡片最近更新时刻（UTC）
+ * @param exposureSiteCode 归并到的暴露场所编码，未匹配为 null
  */
 public record CardResponse(
         boolean duplicate,
@@ -55,6 +56,7 @@ public record CardResponse(
         String lateReason,
         Instant deadlineAt,
         Instant submittedAt,
-        Instant updatedAt
+        Instant updatedAt,
+        String exposureSiteCode
 ) {
 }

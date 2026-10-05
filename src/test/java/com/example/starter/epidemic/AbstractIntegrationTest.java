@@ -28,6 +28,11 @@ abstract class AbstractIntegrationTest {
     @BeforeEach
     void cleanTables() {
         jdbc.update("DELETE FROM idempotency_record");
+        jdbc.update("DELETE FROM investigation_target");
+        jdbc.update("DELETE FROM investigation");
+        jdbc.update("DELETE FROM cluster_late_record");
+        jdbc.update("DELETE FROM cluster_event_card");
+        jdbc.update("DELETE FROM cluster_event");
         jdbc.update("DELETE FROM special_correction");
         jdbc.update("DELETE FROM audit_trail");
         jdbc.update("DELETE FROM card_version");

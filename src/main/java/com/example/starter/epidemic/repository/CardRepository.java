@@ -7,6 +7,7 @@ import com.example.starter.epidemic.domain.CardStatus;
 import com.example.starter.epidemic.domain.CardVersionPo;
 import com.example.starter.epidemic.domain.DiseaseCategory;
 import com.example.starter.epidemic.domain.DiseasePo;
+import com.example.starter.epidemic.domain.ExposureSitePo;
 import com.example.starter.epidemic.domain.IdempotencyPo;
 import com.example.starter.epidemic.domain.InstitutionPo;
 import com.example.starter.epidemic.domain.SpecialCorrectionPo;
@@ -56,6 +57,23 @@ public class CardRepository {
                 INSTITUTION_MAPPER, code).stream().findFirst();
     }
 
+    // ---------------- 暴露场所库 ----------------
+
+    private static final RowMapper<ExposureSitePo> SITE_MAPPER = (rs, n) ->
+            new ExposureSitePo(rs.getString("code"), rs.getString("name"),
+                    rs.getString("address_keyword"));
+
+    public Optional<ExposureSitePo> findExposureSite(String code) {
+        return jdbc.query("SELECT code, name, address_keyword FROM exposure_site WHERE code = ?",
+                SITE_MAPPER, code).stream().findFirst();
+    }
+
+    /** 全部暴露场所（用于按地址关键词自动匹配，数据量小，全量读入内存匹配）。 */
+    public List<ExposureSitePo> findAllExposureSites() {
+        return jdbc.query("SELECT code, name, address_keyword FROM exposure_site ORDER BY code",
+                SITE_MAPPER);
+    }
+
     // ---------------- 卡片主表 ----------------
 
     private static final RowMapper<CardPo> CARD_MAPPER = (rs, n) -> {
@@ -69,6 +87,7 @@ public class CardRepository {
         po.setCurrentVersion(rs.getInt("current_version"));
         po.setStatus(CardStatus.valueOf(rs.getString("status")));
         po.setDedupKey(rs.getString("dedup_key"));
+        po.setExposureSiteCode(rs.getString("exposure_site_code"));
         po.setCreatedAt(rs.getTimestamp("created_at").toInstant());
         po.setUpdatedAt(rs.getTimestamp("updated_at").toInstant());
         return po;
@@ -77,12 +96,13 @@ public class CardRepository {
     public void insertCard(CardPo card) {
         jdbc.update("""
                 INSERT INTO card (card_no, patient_id, patient_name, disease_code, onset_date,
-                    institution_code, current_version, status, dedup_key, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    institution_code, current_version, status, dedup_key, exposure_site_code,
+                    created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 card.getCardNo(), card.getPatientId(), card.getPatientName(), card.getDiseaseCode(),
                 card.getOnsetDate(), card.getInstitutionCode(), card.getCurrentVersion(),
-                card.getStatus().name(), card.getDedupKey(),
+                card.getStatus().name(), card.getDedupKey(), card.getExposureSiteCode(),
                 Timestamp.from(card.getCreatedAt()), Timestamp.from(card.getUpdatedAt()));
     }
 
@@ -105,7 +125,8 @@ public class CardRepository {
 
     private static final String CARD_SELECT = """
             SELECT card_no, patient_id, patient_name, disease_code, onset_date,
-                   institution_code, current_version, status, dedup_key, created_at, updated_at
+                   institution_code, current_version, status, dedup_key, exposure_site_code,
+                   created_at, updated_at
             FROM card
             """;
 

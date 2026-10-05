@@ -9,3 +9,9 @@ MERGE INTO disease (code, name, category) KEY (code) VALUES
 MERGE INTO institution (code, name) KEY (code) VALUES
     ('H001', '示范市第一人民医院'),
     ('H002', '示范区疾病预防控制中心');
+
+-- 合成暴露场所库
+MERGE INTO exposure_site (code, name, address_keyword) KEY (code) VALUES
+    ('S001', '示范市第一中学食堂',   '第一中学'),
+    ('S002', '示范区合成农贸市场',   '农贸市场'),
+    ('S003', '示范市康养养老院',     '养老院');

@@ -60,11 +60,14 @@ public class EpidemicCardService {
     private final CardRepository repository;
     private final ClockService clock;
     private final Fingerprinter fingerprinter;
+    private final ClusterService clusterService;
 
-    public EpidemicCardService(CardRepository repository, ClockService clock, Fingerprinter fingerprinter) {
+    public EpidemicCardService(CardRepository repository, ClockService clock,
+                               Fingerprinter fingerprinter, ClusterService clusterService) {
         this.repository = repository;
         this.clock = clock;
         this.fingerprinter = fingerprinter;
+        this.clusterService = clusterService;
     }
 
     // ---------------- 初报 ----------------
@@ -100,6 +103,10 @@ public class EpidemicCardService {
             return response;
         }
 
+        // 按合成暴露场所库归并：显式编码优先，否则按现住址关键词自动匹配。
+        String exposureSiteCode = clusterService.resolveExposureSite(
+                request.exposureSiteCode(), request.address());
+
         CardPo card = new CardPo();
         card.setCardNo(newCardNo());
         card.setPatientId(request.patientId());
@@ -110,6 +117,7 @@ public class EpidemicCardService {
         card.setCurrentVersion(1);
         card.setStatus(CardStatus.PENDING_REVIEW);
         card.setDedupKey(dedupKey);
+        card.setExposureSiteCode(exposureSiteCode);
         card.setCreatedAt(now);
         card.setUpdatedAt(now);
 
@@ -140,6 +148,8 @@ public class EpidemicCardService {
         CardResponse response = toResponse(card, version, false);
         saveIdempotency(request.requestId(), SCOPE_SUBMIT, fingerprint,
                 card.getCardNo(), 1, response, now);
+        // 新卡落库后按暴露场所归并：同事务生成聚集事件与自动协查单。
+        clusterService.onCardSubmitted(card);
         return response;
     }
 
@@ -530,7 +540,8 @@ public class EpidemicCardService {
                 v.lateReason(),
                 deadline(v.diagnosisTime(), DiseaseCategory.valueOf(v.category())),
                 v.submittedAt(),
-                card.getUpdatedAt());
+                card.getUpdatedAt(),
+                card.getExposureSiteCode());
     }
 
     private SpecialCorrectionResponse toSpecialResponse(SpecialCorrectionPo po) {

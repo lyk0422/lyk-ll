@@ -28,6 +28,8 @@ public class CardPo {
     private CardStatus status;
     /** 有效卡去重指纹；撤回后为 null。 */
     private String dedupKey;
+    /** 归并到的暴露场所编码；未匹配场所为 null，不参与聚集归并。 */
+    private String exposureSiteCode;
     /** 创建时刻（UTC）。 */
     private Instant createdAt;
     /** 最近更新时刻（UTC）。 */
@@ -51,6 +53,8 @@ public class CardPo {
     public void setStatus(CardStatus status) { this.status = status; }
     public String getDedupKey() { return dedupKey; }
     public void setDedupKey(String dedupKey) { this.dedupKey = dedupKey; }
+    public String getExposureSiteCode() { return exposureSiteCode; }
+    public void setExposureSiteCode(String exposureSiteCode) { this.exposureSiteCode = exposureSiteCode; }
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }

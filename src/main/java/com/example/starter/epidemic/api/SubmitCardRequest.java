@@ -25,6 +25,7 @@ import java.time.LocalDate;
  * @param address         现住址（合成）
  * @param phone           联系电话（合成）
  * @param lateReason      迟报原因；迟报时强制非空
+ * @param exposureSiteCode 暴露场所编码（合成场所库），可空；为空时按现住址关键词自动匹配，未匹配不参与聚集归并
  */
 public record SubmitCardRequest(
         @NotBlank String requestId,
@@ -40,6 +41,15 @@ public record SubmitCardRequest(
         @NotBlank String reporter,
         String address,
         String phone,
-        String lateReason
+        String lateReason,
+        String exposureSiteCode
 ) {
+    /** 兼容旧签名：不含暴露场所，按地址关键词自动匹配。 */
+    public SubmitCardRequest(String requestId, String patientId, String patientName, Integer age,
+                             String gender, String diseaseCode, String caseType, LocalDate onsetDate,
+                             Instant diagnosisTime, String institutionCode, String reporter,
+                             String address, String phone, String lateReason) {
+        this(requestId, patientId, patientName, age, gender, diseaseCode, caseType, onsetDate,
+                diagnosisTime, institutionCode, reporter, address, phone, lateReason, null);
+    }
 }

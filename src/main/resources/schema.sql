@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS card (
     current_version   INT NOT NULL COMMENT '当前最新版本号，初报为1',
     status            VARCHAR(20) NOT NULL COMMENT '状态：PENDING_REVIEW待审核/PENDING_FINAL待终审/ARCHIVED已归档(只读)/WITHDRAWN已撤回(终态)',
     dedup_key         VARCHAR(96) COMMENT '有效卡去重指纹(患者|病种|发病日期)；撤回后置NULL，唯一索引仅约束有效卡',
+    exposure_site_code VARCHAR(32) COMMENT '归并到的暴露场所编码；未匹配场所为NULL，不参与聚集归并',
     created_at        TIMESTAMP NOT NULL COMMENT '创建时刻(UTC)',
     updated_at        TIMESTAMP NOT NULL COMMENT '最近更新时刻(UTC)',
     CONSTRAINT uk_card_dedup UNIQUE (dedup_key)
@@ -86,6 +87,70 @@ CREATE TABLE IF NOT EXISTS special_correction (
     effective_version  INT COMMENT '生效后生成的新版本号；未生效NULL',
     created_at         TIMESTAMP NOT NULL COMMENT '创建时刻(UTC)',
     CONSTRAINT uk_special_request UNIQUE (request_id)
+);
+
+-- 合成暴露场所库：报告卡按场所编码或地址关键词自动归并
+CREATE TABLE IF NOT EXISTS exposure_site (
+    code            VARCHAR(32) PRIMARY KEY COMMENT '暴露场所编码',
+    name            VARCHAR(128) NOT NULL COMMENT '暴露场所名称（合成）',
+    address_keyword VARCHAR(128) NOT NULL COMMENT '地址匹配关键词：报告卡现住址包含该词即归入本场所'
+);
+
+-- 聚集事件：同一场所72小时(UTC)内3例及以上报告触发，恰3例即生成
+CREATE TABLE IF NOT EXISTS cluster_event (
+    id            BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+    event_no      VARCHAR(40) NOT NULL COMMENT '聚集事件编号（业务主键）',
+    site_code     VARCHAR(32) NOT NULL COMMENT '暴露场所编码',
+    status        VARCHAR(16) NOT NULL COMMENT '状态：OPEN进行中/CONFIRMED协查确认/EXCLUDED协查排除/CLOSED已关闭(终态)',
+    first_case_at TIMESTAMP NOT NULL COMMENT '首例报告时刻(UTC)',
+    last_case_at  TIMESTAMP NOT NULL COMMENT '末例报告时刻(UTC)，随新卡归入推进',
+    card_count    INT NOT NULL COMMENT '涉及报告卡数量',
+    open_key      VARCHAR(32) COMMENT '未关闭事件占位键=场所编码，关闭置NULL；唯一约束保证同场所同时刻只有一个未关闭事件',
+    created_at    TIMESTAMP NOT NULL COMMENT '事件生成时刻(UTC)',
+    closed_at     TIMESTAMP COMMENT '关闭时刻(UTC)；未关闭NULL',
+    CONSTRAINT uk_cluster_event_no UNIQUE (event_no),
+    CONSTRAINT uk_cluster_open UNIQUE (open_key)
+);
+
+-- 聚集事件涉及卡号（不可变追加）
+CREATE TABLE IF NOT EXISTS cluster_event_card (
+    event_id    BIGINT NOT NULL COMMENT '聚集事件ID',
+    card_no     VARCHAR(40) NOT NULL COMMENT '报告卡编号',
+    attached_at TIMESTAMP NOT NULL COMMENT '归入时刻(UTC)',
+    CONSTRAINT pk_cluster_card PRIMARY KEY (event_id, card_no)
+);
+
+-- 迟到记录：事件关闭后迟到的报告卡只记迟到事件，可另行归并成新事件
+CREATE TABLE IF NOT EXISTS cluster_late_record (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+    site_code       VARCHAR(32) NOT NULL COMMENT '暴露场所编码',
+    card_no         VARCHAR(40) NOT NULL COMMENT '迟到的报告卡编号',
+    closed_event_no VARCHAR(40) NOT NULL COMMENT '此前已关闭的聚集事件编号',
+    recorded_at     TIMESTAMP NOT NULL COMMENT '记录时刻(UTC)'
+);
+
+-- 协查单：聚集事件生成时自动推送相关机构；同一事件同时刻只允许一张进行中协查单
+CREATE TABLE IF NOT EXISTS investigation (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键（协查单号）',
+    event_no          VARCHAR(40) NOT NULL COMMENT '所属聚集事件编号',
+    request_id        VARCHAR(64) NOT NULL COMMENT '幂等键（自动生成时为 auto-事件编号）',
+    status            VARCHAR(16) NOT NULL COMMENT '状态：OPEN进行中/CONCLUDED已结案',
+    conclusion        VARCHAR(16) COMMENT '协查结论：CONFIRMED确认聚集/EXCLUDED排除；未结案NULL',
+    note              VARCHAR(512) COMMENT '协查说明，空值表示无',
+    creator           VARCHAR(64) NOT NULL COMMENT '发起人（自动生成为system）',
+    operator          VARCHAR(64) COMMENT '结案操作人；未结案NULL',
+    active_event_key  VARCHAR(40) COMMENT '进行中占位键=事件编号，结案置NULL；唯一约束保证同事件仅一张进行中协查单',
+    created_at        TIMESTAMP NOT NULL COMMENT '生成时刻(UTC)',
+    concluded_at      TIMESTAMP COMMENT '结案时刻(UTC)；未结案NULL',
+    CONSTRAINT uk_investigation_request UNIQUE (request_id),
+    CONSTRAINT uk_investigation_active UNIQUE (active_event_key)
+);
+
+-- 协查单推送机构（相关机构=涉及卡片的报告机构，或手工指定）
+CREATE TABLE IF NOT EXISTS investigation_target (
+    investigation_id BIGINT NOT NULL COMMENT '协查单号',
+    institution_code VARCHAR(32) NOT NULL COMMENT '被推送机构编码',
+    CONSTRAINT pk_investigation_target PRIMARY KEY (investigation_id, institution_code)
 );
 
 -- 幂等记录：指纹覆盖 requestId 与全部业务字段
