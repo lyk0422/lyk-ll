@@ -65,14 +65,23 @@ public class RedFlushService {
 
     private CreateRedFlushResponse doCreateRequest(CreateRedFlushRequest request, String fingerprint) {
         idempotencyService.begin(ENDPOINT_CREATE, request.requestId(), fingerprint);
+        CreateRedFlushResponse response = createCore(request);
+        idempotencyService.complete(ENDPOINT_CREATE, request.requestId(), 200, response);
+        return response;
+    }
+
+    /**
+     * 红字信息表受理核心逻辑（须在事务内调用）：校验蓝票状态、行级差异暂停与可红冲余额后落库。
+     * 未结差异（PENDING/ESCALATED）只暂停对应行的新增红冲，无争议行仍按原规则处理；
+     * 全额红冲仅在无任何未结差异时沿用原路径。
+     */
+    CreateRedFlushResponse createCore(CreateRedFlushRequest request) {
         BlueInvoiceRow blue = lockBlueByNo(request.blueInvoiceNo());
         BigDecimal remaining = blue.totalAmount().subtract(blue.redFlushedAmount());
         if (remaining.compareTo(BigDecimal.ZERO) <= 0) {
             // 已全额红冲：终态幂等，不产生新红票
-            CreateRedFlushResponse response = new CreateRedFlushResponse(
+            return new CreateRedFlushResponse(
                     "ALREADY_RED_FLUSHED", null, null, blue.invoiceNo(), BigDecimal.ZERO);
-            idempotencyService.complete(ENDPOINT_CREATE, request.requestId(), 200, response);
-            return response;
         }
         if (!List.of("DELIVERED", "PARTIAL_RED", "ARCHIVED").contains(blue.status())) {
             throw ApiException.conflict("INVALID_STATE",
@@ -83,6 +92,10 @@ public class RedFlushService {
         BigDecimal amount;
         List<RedLineRequest> lines = List.of();
         if ("FULL".equals(request.flushType())) {
+            if (hasOpenDiscrepancy(blue.id(), null)) {
+                throw ApiException.conflict("LINE_DISPUTED",
+                        "存在未结对账差异，全额红冲暂停，待差异处置后重试");
+            }
             if (remainingForNew.compareTo(BigDecimal.ZERO) <= 0) {
                 throw ApiException.conflict("NO_REMAINING_BALANCE", "可红冲余额已被在途申请占满");
             }
@@ -92,6 +105,10 @@ public class RedFlushService {
             Map<Integer, BigDecimal> linePending = pendingLineAmounts(blue.id());
             amount = BigDecimal.ZERO;
             for (RedLineRequest line : request.lines()) {
+                if (hasOpenDiscrepancy(blue.id(), line.lineNo())) {
+                    throw ApiException.conflict("LINE_DISPUTED",
+                            "行 " + line.lineNo() + " 存在未结对账差异，新增红冲暂停，无争议行不受影响");
+                }
                 BigDecimal balance = lineBalances.get(line.lineNo());
                 if (balance == null) {
                     throw ApiException.badRequest("LINE_NOT_FOUND", "蓝票不存在行号: " + line.lineNo());
@@ -121,10 +138,42 @@ public class RedFlushService {
                     "INSERT INTO red_flush_line (request_id, blue_line_id, line_no, amount) VALUES (?, ?, ?, ?)",
                     requestId, blueLineId, line.lineNo(), line.amount());
         }
-        CreateRedFlushResponse response = new CreateRedFlushResponse(
+        return new CreateRedFlushResponse(
                 "CREATED", requestNo, "PENDING", blue.invoiceNo(), amount);
-        idempotencyService.complete(ENDPOINT_CREATE, request.requestId(), 200, response);
-        return response;
+    }
+
+    /**
+     * 差异单双方确认后按原红字信息表流程创建部分红冲申请（须在事务内调用）。
+     * 复用受理核心校验；返回红字信息表编号，余额不足等校验失败时抛出让调用事务整体回滚。
+     */
+    public String createLinkedRequest(String blueInvoiceNo, int lineNo, BigDecimal amount) {
+        CreateRedFlushResponse response = createCore(new CreateRedFlushRequest(
+                "DISCREPANCY-LINKED", blueInvoiceNo, "PARTIAL",
+                List.of(new RedLineRequest(lineNo, amount))));
+        if (response.requestNo() == null) {
+            throw ApiException.conflict("NO_REMAINING_BALANCE", "可红冲余额不足，差异确认整体回滚且额度不变");
+        }
+        return response.requestNo();
+    }
+
+    /**
+     * 指定蓝票（某行）是否存在未结差异（PENDING/ESCALATED）；lineNo 为 null 时检查整票。
+     */
+    private boolean hasOpenDiscrepancy(long blueInvoiceId, Integer lineNo) {
+        Integer count;
+        if (lineNo == null) {
+            count = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM discrepancy_sheet"
+                            + " WHERE blue_invoice_id = ? AND status IN ('PENDING', 'ESCALATED')",
+                    Integer.class, blueInvoiceId);
+        } else {
+            count = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM discrepancy_sheet"
+                            + " WHERE blue_invoice_id = ? AND line_no = ?"
+                            + " AND status IN ('PENDING', 'ESCALATED')",
+                    Integer.class, blueInvoiceId, lineNo);
+        }
+        return count != null && count > 0;
     }
 
     /**

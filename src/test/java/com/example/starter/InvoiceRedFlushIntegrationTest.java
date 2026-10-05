@@ -54,6 +54,8 @@ class InvoiceRedFlushIntegrationTest {
     @BeforeEach
     void cleanDatabase() {
         jdbc.update("DELETE FROM idempotency_record");
+        jdbc.update("DELETE FROM discrepancy_audit");
+        jdbc.update("DELETE FROM discrepancy_sheet");
         jdbc.update("DELETE FROM red_flush_confirmation");
         jdbc.update("DELETE FROM red_flush_line");
         jdbc.update("DELETE FROM red_flush_request");
