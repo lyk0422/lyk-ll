@@ -2,6 +2,7 @@ package com.example.starter.repo;
 
 import com.example.starter.domain.DiscrepancyStatus;
 import com.example.starter.domain.PlanStatus;
+import com.example.starter.domain.PlanType;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -16,6 +17,7 @@ import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 
@@ -39,6 +41,10 @@ public class ReplenishRepository {
 
     public Optional<Atm> findAtmById(long id) {
         return queryOne("SELECT * FROM atm WHERE id = ?", ATM_MAPPER, id);
+    }
+
+    public List<Atm> findAllAtms() {
+        return jdbc.query("SELECT * FROM atm ORDER BY id", ATM_MAPPER);
     }
 
     @Transactional
@@ -77,16 +83,19 @@ public class ReplenishRepository {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(con -> {
             PreparedStatement ps = con.prepareStatement(
-                    "INSERT INTO replenish_plan (plan_no, atm_id, business_date, predicted_amount, planned_amount, "
+                    "INSERT INTO replenish_plan (plan_no, atm_id, business_date, plan_type, queue_position, "
+                            + "predicted_amount, planned_amount, "
                             + "status, approved_at, escort_deadline, escort_completed_at, counted_amount, counted_at, "
                             + "count_custodian_id, device_amount, device_confirmed_at, reconciled_at, discrepancy_id, "
                             + "sealed_at, created_at) "
-                            + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     Statement.RETURN_GENERATED_KEYS);
             int i = 1;
             ps.setString(i++, row.getPlanNo());
             ps.setLong(i++, row.getAtmId());
             ps.setDate(i++, java.sql.Date.valueOf(row.getBusinessDate()));
+            ps.setString(i++, row.getPlanType().name());
+            ps.setInt(i++, row.getQueuePosition());
             ps.setLong(i++, row.getPredictedAmount());
             ps.setLong(i++, row.getPlannedAmount());
             ps.setString(i++, row.getStatus().name());
@@ -116,6 +125,39 @@ public class ReplenishRepository {
     public Optional<PlanRow> findPlanByAtmAndDate(long atmId, LocalDate businessDate) {
         return queryOne("SELECT * FROM replenish_plan WHERE atm_id = ? AND business_date = ?",
                 PLAN_MAPPER, atmId, java.sql.Date.valueOf(businessDate));
+    }
+
+    /** 同 ATM 当日同类型计划查询，用于临时计划当日唯一受理判定。 */
+    public Optional<PlanRow> findPlanByAtmDateAndType(long atmId, LocalDate businessDate, PlanType planType) {
+        return queryOne("SELECT * FROM replenish_plan WHERE atm_id = ? AND business_date = ? AND plan_type = ?",
+                PLAN_MAPPER, atmId, java.sql.Date.valueOf(businessDate), planType.name());
+    }
+
+    /** 执行中计划（已审批且未完结）：同一 ATM 同时刻只允许一张。 */
+    public List<PlanRow> findExecutingByAtm(long atmId) {
+        return jdbc.query(
+                "SELECT * FROM replenish_plan WHERE atm_id = ? AND status IN ('APPROVED','ESCORTED','COUNTED') "
+                        + "ORDER BY id",
+                PLAN_MAPPER, atmId);
+    }
+
+    /** 让路计划按排队位置升序，恢复执行时按队列顺序受理。 */
+    public List<PlanRow> findYieldedByAtm(long atmId) {
+        return jdbc.query(
+                "SELECT * FROM replenish_plan WHERE atm_id = ? AND status = 'YIELDED' ORDER BY queue_position, id",
+                PLAN_MAPPER, atmId);
+    }
+
+    /** 同一 ATM 当前最大排队位置；无计划时返回 0。 */
+    public int maxQueuePosition(long atmId) {
+        Integer n = jdbc.queryForObject(
+                "SELECT MAX(queue_position) FROM replenish_plan WHERE atm_id = ?", Integer.class, atmId);
+        return n == null ? 0 : n;
+    }
+
+    public List<PlanRow> findPlansByBusinessDate(LocalDate businessDate) {
+        return jdbc.query("SELECT * FROM replenish_plan WHERE business_date = ? ORDER BY id",
+                PLAN_MAPPER, java.sql.Date.valueOf(businessDate));
     }
 
     /** 行锁加载，用于状态机推进与并发串行化。 */
@@ -247,6 +289,45 @@ public class ReplenishRepository {
         return n == null ? 0L : n;
     }
 
+    // ---------------- 节假日日历 ----------------
+
+    public Optional<HolidayRow> findHolidayByDate(LocalDate holidayDate) {
+        return queryOne("SELECT * FROM holiday_calendar WHERE holiday_date = ?",
+                HOLIDAY_MAPPER, java.sql.Date.valueOf(holidayDate));
+    }
+
+    // ---------------- 快速通道留痕 ----------------
+
+    @Transactional
+    public long insertFastTrackAudit(long planId, String decision, String detail, Instant now) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(con -> {
+            PreparedStatement ps = con.prepareStatement(
+                    "INSERT INTO fast_track_audit (plan_id, decision, detail, created_at) VALUES (?,?,?,?)",
+                    Statement.RETURN_GENERATED_KEYS);
+            ps.setLong(1, planId);
+            ps.setString(2, decision);
+            ps.setString(3, detail);
+            ps.setTimestamp(4, Timestamp.from(now));
+            return ps;
+        }, keyHolder);
+        return extractKey(keyHolder);
+    }
+
+    public List<FastTrackAuditRow> findFastTrackAuditsByPlan(long planId) {
+        return jdbc.query("SELECT * FROM fast_track_audit WHERE plan_id = ? ORDER BY id",
+                AUDIT_MAPPER, planId);
+    }
+
+    /** 按 UTC 日界查询留痕，纳入日结核对。 */
+    public List<FastTrackAuditRow> findFastTrackAuditsByCreatedDate(LocalDate date) {
+        return jdbc.query(
+                "SELECT * FROM fast_track_audit WHERE created_at >= ? AND created_at < ? ORDER BY id",
+                AUDIT_MAPPER,
+                Timestamp.from(date.atStartOfDay(ZoneOffset.UTC).toInstant()),
+                Timestamp.from(date.plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant()));
+    }
+
     // ---------------- 幂等记录 ----------------
 
     /** 单条幂等留痕插入；并发同键可能抛唯一键冲突，由服务层捕获裁决，不加独立事务边界。 */
@@ -343,6 +424,8 @@ public class ReplenishRepository {
         r.setPlanNo(rs.getString("plan_no"));
         r.setAtmId(rs.getLong("atm_id"));
         r.setBusinessDate(rs.getDate("business_date").toLocalDate());
+        r.setPlanType(PlanType.valueOf(rs.getString("plan_type")));
+        r.setQueuePosition(rs.getInt("queue_position"));
         r.setPredictedAmount(rs.getLong("predicted_amount"));
         r.setPlannedAmount(rs.getLong("planned_amount"));
         r.setStatus(PlanStatus.valueOf(rs.getString("status")));
@@ -402,5 +485,19 @@ public class ReplenishRepository {
             (Long) rs.getObject("plan_id"),
             (Integer) rs.getObject("status_code"),
             rs.getString("response_body"),
+            rs.getTimestamp("created_at").toInstant());
+
+    private static final RowMapper<HolidayRow> HOLIDAY_MAPPER = (rs, n) -> new HolidayRow(
+            rs.getLong("id"),
+            rs.getDate("holiday_date").toLocalDate(),
+            rs.getString("name"),
+            rs.getInt("peak_factor_bp"),
+            rs.getTimestamp("created_at").toInstant());
+
+    private static final RowMapper<FastTrackAuditRow> AUDIT_MAPPER = (rs, n) -> new FastTrackAuditRow(
+            rs.getLong("id"),
+            rs.getLong("plan_id"),
+            rs.getString("decision"),
+            rs.getString("detail"),
             rs.getTimestamp("created_at").toInstant());
 }

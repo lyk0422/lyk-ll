@@ -26,9 +26,11 @@ CREATE TABLE IF NOT EXISTS replenish_plan (
     business_date       DATE        NOT NULL, -- 计划归属营业日（UTC 日界）
     predicted_amount    BIGINT      NOT NULL, -- 预测加钞额（元）
     planned_amount      BIGINT      NOT NULL, -- 计划加钞额（元），不得超过钞箱容量
+    plan_type           VARCHAR(16) NOT NULL DEFAULT 'REGULAR', -- 计划类型：REGULAR 常规 / TEMPORARY 节假日临时
+    queue_position      INT         NOT NULL, -- 同一 ATM 加钞队列位置（按创建先后递增），冲突让路后保留
     status              VARCHAR(32) NOT NULL, -- 计划状态，见 PlanStatus
-    approved_at         TIMESTAMP   NULL,     -- 审批通过时刻（UTC），押运 4 小时时限起点
-    escort_deadline     TIMESTAMP   NULL,     -- 押运时限=审批通过时刻+4h，恰满未完成双人打卡即异常
+    approved_at         TIMESTAMP   NULL,     -- 审批通过时刻（UTC），常规 4 小时/临时 2 小时押运时限起点
+    escort_deadline     TIMESTAMP   NULL,     -- 押运时限=审批通过时刻+4h（常规）/+2h（临时），恰满未完成双人打卡即异常
     escort_completed_at TIMESTAMP   NULL,     -- 第二名押运员打卡完成时刻（UTC）
     counted_amount      BIGINT      NULL,     -- 押运员双人清点数（元），NULL 表示尚未清点
     counted_at          TIMESTAMP   NULL,
@@ -40,7 +42,7 @@ CREATE TABLE IF NOT EXISTS replenish_plan (
     sealed_at           TIMESTAMP   NULL,     -- 日结封存时刻（UTC），非 NULL 即终态
     created_at          TIMESTAMP   NOT NULL,
     CONSTRAINT uk_plan_no UNIQUE (plan_no),
-    CONSTRAINT uk_plan_atm_date UNIQUE (atm_id, business_date) -- 同一 ATM 每个 UTC 日唯一计划，兼作并发唯一受理约束
+    CONSTRAINT uk_plan_atm_date_type UNIQUE (atm_id, business_date, plan_type) -- 同一 ATM 每个 UTC 日每类计划唯一，兼作并发唯一受理约束
 );
 
 CREATE TABLE IF NOT EXISTS escort_checkin (
@@ -90,3 +92,22 @@ CREATE TABLE IF NOT EXISTS seq_plan_no (
     seq_value BIGINT NOT NULL -- 计划单号自增序列值
 );
 MERGE INTO seq_plan_no (id, seq_value) KEY(id) VALUES (1, 0);
+
+-- 合成节假日日历：节前 3 日取现峰值预测依据
+CREATE TABLE IF NOT EXISTS holiday_calendar (
+    id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+    holiday_date   DATE        NOT NULL,
+    name           VARCHAR(64) NOT NULL,
+    peak_factor_bp INT         NOT NULL, -- 峰值系数（基点）：节前 3 日预测取现=日均×bp/100，150 即 1.5 倍
+    created_at     TIMESTAMP   NOT NULL,
+    CONSTRAINT uk_holiday_date UNIQUE (holiday_date)
+);
+
+-- 临时计划快速通道结论留痕：免逐级审批的裁决记录，纳入日结核对
+CREATE TABLE IF NOT EXISTS fast_track_audit (
+    id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+    plan_id    BIGINT       NOT NULL, -- 关联的临时/被让路计划 ID
+    decision   VARCHAR(32)  NOT NULL, -- 结论：AUTO_APPROVED 快速放行 / CONFLICT_WIN 冲突优先 / CONFLICT_YIELD 冲突让路 / RESUMED 恢复执行
+    detail     VARCHAR(512) NOT NULL, -- 结论说明（含金额对比、时限等）
+    created_at TIMESTAMP    NOT NULL
+);

@@ -70,6 +70,18 @@ public class ReplenishController {
         return result(service.seal(planId, request));
     }
 
+    /** 节假日峰值预测：节前 3 日窗口内对超 150% 阈值网点自动生成临时计划（快速通道）。 */
+    @PostMapping("/temporary/generate")
+    public ResponseEntity<Object> generateTemporary(@Valid @RequestBody ForecastGenerateRequest request) {
+        return result(service.generateTemporaryPlans(request));
+    }
+
+    /** 让路计划恢复执行：按排队位置受理，重新起算押运时限。 */
+    @PostMapping("/{planId}/resume")
+    public ResponseEntity<Object> resume(@PathVariable long planId, @Valid @RequestBody ResumeRequest request) {
+        return result(service.resume(planId, request));
+    }
+
     private static ResponseEntity<Object> result(ReplenishService.Outcome outcome) {
         return ResponseEntity.status(outcome.statusCode()).body(outcome.body());
     }
@@ -95,5 +107,11 @@ public class ReplenishController {
     @GetMapping("/{planId}/discrepancy")
     public DiscrepancyResponse discrepancy(@PathVariable long planId) {
         return service.getDiscrepancy(planId);
+    }
+
+    /** 计划的快速通道结论留痕。 */
+    @GetMapping("/{planId}/fast-track-audits")
+    public List<FastTrackAuditResponse> fastTrackAudits(@PathVariable long planId) {
+        return service.fastTrackAudits(planId);
     }
 }

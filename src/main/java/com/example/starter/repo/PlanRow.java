@@ -1,6 +1,7 @@
 package com.example.starter.repo;
 
 import com.example.starter.domain.PlanStatus;
+import com.example.starter.domain.PlanType;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -9,6 +10,7 @@ import java.time.LocalDate;
  * 加钞计划行（可变工作流实体）。金额单位均为元；时间字段均为 UTC 时刻。
  * countedAmount/deviceAmount 为 NULL 表示尚未清点/设备尚未确认；
  * discrepancyId 为 NULL 表示无挂账；sealedAt 非 NULL 表示已日结封存（终态）。
+ * planType 区分常规/节假日临时计划；queuePosition 为同一 ATM 队列位置，让路后保留。
  */
 public class PlanRow {
 
@@ -16,6 +18,8 @@ public class PlanRow {
     private String planNo;
     private long atmId;
     private LocalDate businessDate;
+    private PlanType planType;
+    private int queuePosition;
     private long predictedAmount;
     private long plannedAmount;
     private PlanStatus status;
@@ -62,6 +66,22 @@ public class PlanRow {
 
     public void setBusinessDate(LocalDate businessDate) {
         this.businessDate = businessDate;
+    }
+
+    public PlanType getPlanType() {
+        return planType;
+    }
+
+    public void setPlanType(PlanType planType) {
+        this.planType = planType;
+    }
+
+    public int getQueuePosition() {
+        return queuePosition;
+    }
+
+    public void setQueuePosition(int queuePosition) {
+        this.queuePosition = queuePosition;
     }
 
     public long getPredictedAmount() {
