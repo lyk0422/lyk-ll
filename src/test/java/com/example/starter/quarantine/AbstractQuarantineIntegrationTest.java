@@ -42,6 +42,7 @@ public abstract class AbstractQuarantineIntegrationTest {
 
     @BeforeEach
     void resetDatabaseAndClock() {
+        jdbc.update("DELETE FROM transit_alert_event");
         jdbc.update("DELETE FROM arrival_report");
         jdbc.update("DELETE FROM cert_batch_hold");
         jdbc.update("DELETE FROM quarantine_certificate");

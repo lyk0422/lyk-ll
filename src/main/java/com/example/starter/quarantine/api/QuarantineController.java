@@ -1,5 +1,8 @@
 package com.example.starter.quarantine.api;
 
+import com.example.starter.quarantine.api.ApiDtos.AlertHandleCmd;
+import com.example.starter.quarantine.api.ApiDtos.AlertScanView;
+import com.example.starter.quarantine.api.ApiDtos.AlertView;
 import com.example.starter.quarantine.api.ApiDtos.ArrivalCmd;
 import com.example.starter.quarantine.api.ApiDtos.ArrivalView;
 import com.example.starter.quarantine.api.ApiDtos.CertificateView;
@@ -11,6 +14,7 @@ import com.example.starter.quarantine.api.ApiDtos.LockdownCmd;
 import com.example.starter.quarantine.api.ApiDtos.LockdownView;
 import com.example.starter.quarantine.api.ApiDtos.StockCmd;
 import com.example.starter.quarantine.api.ApiDtos.StockView;
+import com.example.starter.quarantine.api.ApiDtos.TrajectoryView;
 import com.example.starter.quarantine.service.IssueExecutor;
 import com.example.starter.quarantine.service.QuarantineService;
 import jakarta.validation.Valid;
@@ -91,5 +95,29 @@ public class QuarantineController {
                               @RequestParam String species,
                               @RequestParam String earTagRange) {
         return service.getStock(farmId, species, earTagRange);
+    }
+
+    /** 扫描超时未核销的过境在途证并生成预警（幂等）。 */
+    @PostMapping("/quarantine/transit-alerts/scan")
+    public AlertScanView scanTransitOverdue() {
+        return service.scanTransitOverdue();
+    }
+
+    /** 查询预警事件。 */
+    @GetMapping("/quarantine/transit-alerts/{id}")
+    public AlertView getAlert(@PathVariable long id) {
+        return service.getAlert(id);
+    }
+
+    /** 预警事件处理闭环（幂等）。 */
+    @PostMapping("/quarantine/transit-alerts/handle")
+    public AlertView handleAlert(@Valid @RequestBody AlertHandleCmd cmd) {
+        return service.handleAlert(cmd);
+    }
+
+    /** 证书轨迹查询：证书状态 + 落地报告 + 预警事件（审计口径）。 */
+    @GetMapping("/quarantine/certificates/{certNo}/trajectory")
+    public TrajectoryView getTrajectory(@PathVariable String certNo) {
+        return service.getTrajectory(certNo);
     }
 }

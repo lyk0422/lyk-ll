@@ -1,9 +1,12 @@
 package com.example.starter.quarantine.repo;
 
+import com.example.starter.quarantine.AlertStatus;
 import com.example.starter.quarantine.ArrivalResult;
 import com.example.starter.quarantine.CertificateStatus;
 import com.example.starter.quarantine.DeclarationStatus;
 import com.example.starter.quarantine.Species;
+import com.example.starter.quarantine.TransportType;
+import com.example.starter.quarantine.model.Rows.AlertRow;
 import com.example.starter.quarantine.model.Rows.ArrivalRow;
 import com.example.starter.quarantine.model.Rows.CertificateRow;
 import com.example.starter.quarantine.model.Rows.DeclarationRow;
@@ -49,6 +52,8 @@ public class QuarantineRepository {
             rs.getString("ear_tag_range"),
             DeclarationStatus.valueOf(rs.getString("status")),
             rs.getString("reject_reason"),
+            TransportType.valueOf(rs.getString("transport_type")),
+            (Integer) rs.getObject("transit_hours"),
             rs.getTimestamp("created_at").toInstant());
 
     private static final RowMapper<CertificateRow> CERTIFICATE_MAPPER = (rs, n) -> new CertificateRow(
@@ -64,6 +69,10 @@ public class QuarantineRepository {
             rs.getString("ear_tag_range"),
             CertificateStatus.valueOf(rs.getString("status")),
             rs.getBoolean("quarantine_observation"),
+            TransportType.valueOf(rs.getString("transport_type")),
+            (Integer) rs.getObject("transit_hours"),
+            Optional.ofNullable(rs.getTimestamp("transit_deadline")).map(Timestamp::toInstant).orElse(null),
+            rs.getBoolean("enhanced_monitoring"),
             rs.getInt("reported_qty"),
             rs.getTimestamp("issued_at").toInstant(),
             rs.getTimestamp("expires_at").toInstant(),
@@ -86,6 +95,20 @@ public class QuarantineRepository {
             ArrivalResult.valueOf(rs.getString("result")),
             rs.getString("note"),
             rs.getTimestamp("created_at").toInstant());
+
+    private static final RowMapper<AlertRow> ALERT_MAPPER = (rs, n) -> new AlertRow(
+            rs.getLong("id"),
+            rs.getString("request_id"),
+            rs.getString("fingerprint"),
+            rs.getString("cert_no"),
+            rs.getString("event_type"),
+            AlertStatus.valueOf(rs.getString("status")),
+            rs.getString("note"),
+            rs.getString("handle_request_id"),
+            rs.getString("handle_fingerprint"),
+            rs.getString("handle_note"),
+            rs.getTimestamp("created_at").toInstant(),
+            Optional.ofNullable(rs.getTimestamp("handled_at")).map(Timestamp::toInstant).orElse(null));
 
     private final JdbcTemplate jdbc;
 
@@ -150,13 +173,15 @@ public class QuarantineRepository {
     public long insertDeclaration(String requestId, String fingerprint, String farmId,
                                   String destination, Species species, int quantity,
                                   String earTagRange, DeclarationStatus status,
-                                  String rejectReason, Instant now) {
+                                  String rejectReason, TransportType transportType,
+                                  Integer transitHours, Instant now) {
         KeyHolder keys = new GeneratedKeyHolder();
         jdbc.update(con -> {
             PreparedStatement ps = con.prepareStatement(
                     "INSERT INTO quarantine_declaration (request_id, fingerprint, farm_id, destination,"
-                            + " species, quantity, ear_tag_range, status, reject_reason, created_at, updated_at)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            + " species, quantity, ear_tag_range, status, reject_reason,"
+                            + " transport_type, transit_hours, created_at, updated_at)"
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     Statement.RETURN_GENERATED_KEYS);
             ps.setString(1, requestId);
             ps.setString(2, fingerprint);
@@ -167,8 +192,14 @@ public class QuarantineRepository {
             ps.setString(7, earTagRange);
             ps.setString(8, status.name());
             ps.setString(9, rejectReason);
-            ps.setTimestamp(10, Timestamp.from(now));
-            ps.setTimestamp(11, Timestamp.from(now));
+            ps.setString(10, transportType.name());
+            if (transitHours == null) {
+                ps.setNull(11, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(11, transitHours);
+            }
+            ps.setTimestamp(12, Timestamp.from(now));
+            ps.setTimestamp(13, Timestamp.from(now));
             return ps;
         }, keys);
         return keys.getKey().longValue();
@@ -200,15 +231,17 @@ public class QuarantineRepository {
     public long insertCertificate(String placeholderCertNo, String issueRequestId, String fingerprint,
                                   String declarationRequestId, String farmId, String destination,
                                   Species species, int quantity, String earTagRange,
+                                  TransportType transportType, Integer transitHours,
                                   Instant issuedAt, Instant expiresAt, Instant now) {
         KeyHolder keys = new GeneratedKeyHolder();
         jdbc.update(con -> {
             PreparedStatement ps = con.prepareStatement(
                     "INSERT INTO quarantine_certificate (cert_no, issue_request_id, fingerprint,"
                             + " declaration_request_id, farm_id, destination, species, quantity, ear_tag_range,"
-                            + " status, quarantine_observation, reported_qty, issued_at, expires_at,"
+                            + " status, quarantine_observation, transport_type, transit_hours,"
+                            + " enhanced_monitoring, reported_qty, issued_at, expires_at,"
                             + " created_at, updated_at)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ISSUED', FALSE, 0, ?, ?, ?, ?)",
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ISSUED', FALSE, ?, ?, FALSE, 0, ?, ?, ?, ?)",
                     Statement.RETURN_GENERATED_KEYS);
             ps.setString(1, placeholderCertNo);
             ps.setString(2, issueRequestId);
@@ -219,10 +252,16 @@ public class QuarantineRepository {
             ps.setString(7, species.name());
             ps.setInt(8, quantity);
             ps.setString(9, earTagRange);
-            ps.setTimestamp(10, Timestamp.from(issuedAt));
-            ps.setTimestamp(11, Timestamp.from(expiresAt));
-            ps.setTimestamp(12, Timestamp.from(now));
-            ps.setTimestamp(13, Timestamp.from(now));
+            ps.setString(10, transportType.name());
+            if (transitHours == null) {
+                ps.setNull(11, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(11, transitHours);
+            }
+            ps.setTimestamp(12, Timestamp.from(issuedAt));
+            ps.setTimestamp(13, Timestamp.from(expiresAt));
+            ps.setTimestamp(14, Timestamp.from(now));
+            ps.setTimestamp(15, Timestamp.from(now));
             return ps;
         }, keys);
         return keys.getKey().longValue();
@@ -276,11 +315,22 @@ public class QuarantineRepository {
                 Timestamp.from(now), farmId);
     }
 
-    public void markDeparted(String certNo, Instant departedAt, Instant now) {
+    /** 启运：置为在途；过境证同时写入抵达核销时限终点（可空）。 */
+    public void markDeparted(String certNo, Instant departedAt, Instant transitDeadline, Instant now) {
         jdbc.update(
-                "UPDATE quarantine_certificate SET status = 'IN_TRANSIT', departed_at = ?, updated_at = ?"
-                        + " WHERE cert_no = ? AND status = 'ISSUED'",
-                Timestamp.from(departedAt), Timestamp.from(now), certNo);
+                "UPDATE quarantine_certificate SET status = 'IN_TRANSIT', departed_at = ?,"
+                        + " transit_deadline = ?, updated_at = ? WHERE cert_no = ? AND status = 'ISSUED'",
+                Timestamp.from(departedAt),
+                transitDeadline == null ? null : Timestamp.from(transitDeadline),
+                Timestamp.from(now), certNo);
+    }
+
+    /** 过境途经疫区：置加强监测标记（与抵达记录同事务）。 */
+    public void setEnhancedMonitoring(String certNo, Instant now) {
+        jdbc.update(
+                "UPDATE quarantine_certificate SET enhanced_monitoring = TRUE, updated_at = ?"
+                        + " WHERE cert_no = ?",
+                Timestamp.from(now), certNo);
     }
 
     public void updateCertStatus(String certNo, CertificateStatus status, Instant now) {
@@ -380,6 +430,70 @@ public class QuarantineRepository {
 
     public Optional<ArrivalRow> findArrivalByRequestId(String requestId) {
         return queryOne("SELECT * FROM arrival_report WHERE request_id = ?", ARRIVAL_MAPPER, requestId);
+    }
+
+    /** 按证号查询全部落地报告留痕（轨迹查询，按主键升序）。 */
+    public List<ArrivalRow> findArrivalsByCertNo(String certNo) {
+        return jdbc.query("SELECT * FROM arrival_report WHERE cert_no = ? ORDER BY id",
+                ARRIVAL_MAPPER, certNo);
+    }
+
+    // ---------- 合成疫区清单 ----------
+
+    /** 判断区域是否在合成疫区清单内。 */
+    public boolean isEpidemicArea(String region) {
+        return !jdbc.queryForList(
+                "SELECT region FROM epidemic_area WHERE region = ?", String.class, region).isEmpty();
+    }
+
+    // ---------- 过境预警事件 ----------
+
+    /** 插入预警事件；同一证同一事件类型唯一（并发/重复生成兜底）。 */
+    public void insertAlert(String requestId, String fingerprint, String certNo, String eventType,
+                            String note, Instant now) {
+        jdbc.update(
+                "INSERT INTO transit_alert_event (request_id, fingerprint, cert_no, event_type,"
+                        + " status, note, created_at) VALUES (?, ?, ?, ?, 'OPEN', ?, ?)",
+                requestId, fingerprint, certNo, eventType, note, Timestamp.from(now));
+    }
+
+    public Optional<AlertRow> findAlertById(long id) {
+        return queryOne("SELECT * FROM transit_alert_event WHERE id = ?", ALERT_MAPPER, id);
+    }
+
+    public Optional<AlertRow> findAlertByCertAndType(String certNo, String eventType) {
+        return queryOne("SELECT * FROM transit_alert_event WHERE cert_no = ? AND event_type = ?",
+                ALERT_MAPPER, certNo, eventType);
+    }
+
+    public Optional<AlertRow> findAlertByHandleRequestId(String handleRequestId) {
+        return queryOne("SELECT * FROM transit_alert_event WHERE handle_request_id = ?",
+                ALERT_MAPPER, handleRequestId);
+    }
+
+    /** 按证号查询全部预警事件（轨迹查询，按主键升序）。 */
+    public List<AlertRow> findAlertsByCertNo(String certNo) {
+        return jdbc.query("SELECT * FROM transit_alert_event WHERE cert_no = ? ORDER BY id",
+                ALERT_MAPPER, certNo);
+    }
+
+    /** 处理闭环：置为已闭环并记录处理留痕。 */
+    public void closeAlert(long id, String handleRequestId, String handleFingerprint,
+                           String handleNote, Instant now) {
+        jdbc.update(
+                "UPDATE transit_alert_event SET status = 'CLOSED', handle_request_id = ?,"
+                        + " handle_fingerprint = ?, handle_note = ?, handled_at = ?"
+                        + " WHERE id = ? AND status = 'OPEN'",
+                handleRequestId, handleFingerprint, handleNote, Timestamp.from(now), id);
+    }
+
+    /** 扫描超时未核销的过境在途证（严格超过时限终点；恰满时限不算超时）。 */
+    public List<CertificateRow> findOverdueTransitCerts(Instant now) {
+        return jdbc.query(
+                "SELECT * FROM quarantine_certificate WHERE transport_type = 'TRANSIT'"
+                        + " AND status = 'IN_TRANSIT' AND transit_deadline IS NOT NULL"
+                        + " AND transit_deadline < ?",
+                CERTIFICATE_MAPPER, Timestamp.from(now));
     }
 
     // ---------- 内部工具 ----------

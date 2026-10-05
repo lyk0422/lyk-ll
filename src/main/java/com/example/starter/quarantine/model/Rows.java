@@ -1,9 +1,11 @@
 package com.example.starter.quarantine.model;
 
+import com.example.starter.quarantine.AlertStatus;
 import com.example.starter.quarantine.ArrivalResult;
 import com.example.starter.quarantine.CertificateStatus;
 import com.example.starter.quarantine.DeclarationStatus;
 import com.example.starter.quarantine.Species;
+import com.example.starter.quarantine.TransportType;
 import java.time.Instant;
 
 /**
@@ -37,6 +39,8 @@ public final class Rows {
             String earTagRange,
             DeclarationStatus status,
             String rejectReason,
+            TransportType transportType,
+            Integer transitHours,
             Instant createdAt) {
     }
 
@@ -54,6 +58,10 @@ public final class Rows {
             String earTagRange,
             CertificateStatus status,
             boolean quarantineObservation,
+            TransportType transportType,
+            Integer transitHours,
+            Instant transitDeadline,
+            boolean enhancedMonitoring,
             int reportedQty,
             Instant issuedAt,
             Instant expiresAt,
@@ -80,5 +88,21 @@ public final class Rows {
             ArrivalResult result,
             String note,
             Instant createdAt) {
+    }
+
+    /** 过境预警事件行。 */
+    public record AlertRow(
+            long id,
+            String requestId,
+            String fingerprint,
+            String certNo,
+            String eventType,
+            AlertStatus status,
+            String note,
+            String handleRequestId,
+            String handleFingerprint,
+            String handleNote,
+            Instant createdAt,
+            Instant handledAt) {
     }
 }

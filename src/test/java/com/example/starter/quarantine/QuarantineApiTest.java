@@ -99,6 +99,63 @@ class QuarantineApiTest extends AbstractQuarantineIntegrationTest {
     }
 
     @Test
+    void transitFlowOverHttp() throws Exception {
+        // 过境申报（给定时限 2 小时）。
+        mvc.perform(post("/api/quarantine/declarations").contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"requestId":"D-HTTP-TR","farmId":"F-HTTP-TR","destination":"DEST-PORT",
+                         "species":"PIG","quantity":4,"earTagRange":"TAG-TR",
+                         "transportType":"TRANSIT","transitHours":2}
+                        """)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.transportType").value("TRANSIT"))
+                .andExpect(jsonPath("$.transitHours").value(2));
+
+        // 出证：证书标注过境属性。
+        mvc.perform(post("/api/stocks").contentType(MediaType.APPLICATION_JSON).content("""
+                {"farmId":"F-HTTP-TR","species":"PIG","earTagRange":"TAG-TR","quantity":10}
+                """)).andExpect(status().isOk());
+        String certNo = mvc.perform(post("/api/quarantine/certificates")
+                .contentType(MediaType.APPLICATION_JSON).content("""
+                        {"requestId":"I-HTTP-TR","declarationRequestId":"D-HTTP-TR"}
+                        """)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.transportType").value("TRANSIT"))
+                .andReturn().getResponse().getContentAsString()
+                .replaceAll(".*\"certNo\":\"", "").replaceAll("\".*", "");
+
+        // 过境证用于本地流向登记 → 422 拦截。
+        mvc.perform(post("/api/stocks").contentType(MediaType.APPLICATION_JSON).content("""
+                {"farmId":"F-HTTP-TR-IN","species":"PIG","earTagRange":"TAG-TR","quantity":4,
+                 "certNo":"%s"}
+                """.formatted(certNo))).andExpect(status().isUnprocessableEntity());
+
+        // 启运后途经合成疫区抵达核销：加强监测标记置真。
+        mvc.perform(post("/api/quarantine/departures").contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"requestId":"DEP-HTTP-TR","certNo":"%s"}
+                        """.formatted(certNo))).andExpect(status().isOk())
+                .andExpect(jsonPath("$.transitDeadline").exists());
+        mvc.perform(post("/api/quarantine/arrivals").contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"requestId":"A-HTTP-TR","certNo":"%s","quantity":4,
+                         "viaRegions":["SYNTH-EPICENTER-ALPHA"]}
+                        """.formatted(certNo))).andExpect(status().isOk())
+                .andExpect(jsonPath("$.result").value("ACCEPTED_FINAL"))
+                .andExpect(jsonPath("$.enhancedMonitoring").value(true));
+
+        // 轨迹查询：证书 + 抵达记录 + 预警列表。
+        mvc.perform(get("/api/quarantine/certificates/{certNo}/trajectory", certNo))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.certificate.certNo").value(certNo))
+                .andExpect(jsonPath("$.arrivals[0].result").value("ACCEPTED_FINAL"))
+                .andExpect(jsonPath("$.alerts").isArray());
+
+        // 超时扫描端点可用。
+        mvc.perform(post("/api/quarantine/transit-alerts/scan"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.generated").isNumber());
+    }
+
+    @Test
     void issueOnLockedFarmReturns422() throws Exception {
         mvc.perform(post("/api/quarantine/declarations").contentType(MediaType.APPLICATION_JSON)
                 .content("""
