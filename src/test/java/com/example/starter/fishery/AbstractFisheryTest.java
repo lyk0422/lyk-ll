@@ -44,6 +44,12 @@ public abstract class AbstractFisheryTest {
         return vesselCode;
     }
 
+    /** 为已注册渔船补登指定年度配额（千克）。 */
+    protected void addQuota(String vesselCode, String species, int year, String quotaKg) {
+        jdbc.update("INSERT INTO quota(vessel_code, species_code, quota_year, quota_kg, used_kg, version) "
+                + "VALUES (?, ?, ?, ?, 0, 0)", vesselCode, species, year, new BigDecimal(quotaKg));
+    }
+
     protected String registerVesselWithQuota(String species, String quota) {
         String vessel = "VT-" + UUID.randomUUID().toString().substring(0, 8);
         return registerVessel(vessel, java.util.Map.of(species, new BigDecimal(quota)));
@@ -129,6 +135,12 @@ public abstract class AbstractFisheryTest {
             String in = String.join("','", registeredVessels);
             String vesselExpr = "'" + in + "'";
             String tripExpr = "SELECT trip_code FROM trip WHERE vessel_code IN (" + vesselExpr + ")";
+            jdbc.update("DELETE FROM carryover_settlement WHERE vessel_code IN (" + vesselExpr + ")");
+            jdbc.update("DELETE FROM quota_carryover WHERE vessel_code IN (" + vesselExpr + ")");
+            jdbc.update("DELETE FROM origin_alert WHERE vessel_code IN (" + vesselExpr + ")");
+            jdbc.update("DELETE FROM transfer_active_guard WHERE vessel_code IN (" + vesselExpr + ")");
+            jdbc.update("DELETE FROM quota_transfer WHERE from_vessel_code IN (" + vesselExpr
+                    + ") OR to_vessel_code IN (" + vesselExpr + ")");
             jdbc.update("DELETE FROM settlement WHERE vessel_code IN (" + vesselExpr + ")");
             jdbc.update("DELETE FROM review_case WHERE vessel_code IN (" + vesselExpr + ")");
             jdbc.update("DELETE FROM late_log_event WHERE vessel_code IN (" + vesselExpr + ")");

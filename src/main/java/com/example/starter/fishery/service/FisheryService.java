@@ -18,6 +18,8 @@ import com.example.starter.fishery.api.dto.ReviewDecisionResponse;
 import com.example.starter.fishery.api.dto.SettlementRequest;
 import com.example.starter.fishery.api.dto.SettlementResponse;
 import com.example.starter.fishery.api.dto.WeightLineView;
+import com.example.starter.fishery.db.CarryoverRepository;
+import com.example.starter.fishery.db.CarryoverRow;
 import com.example.starter.fishery.db.CatalogRepository;
 import com.example.starter.fishery.db.IdempotencyRepository;
 import com.example.starter.fishery.db.IdempotencyRepository.AcquireResult;
@@ -72,6 +74,8 @@ public class FisheryService {
     static final BigDecimal BYCATCH_LIMIT_PCT = new BigDecimal("5.0000");
     /** 卸渔偏差允许比例（含边界，恰 3% 视为一致）。 */
     static final BigDecimal DEVIATION_LIMIT_PCT = new BigDecimal("3.0000");
+    /** 产地预警触发阈值（核销用量占年度配额百分比，达 90% 即触发，已触发额度不得结转）。 */
+    static final BigDecimal ORIGIN_ALERT_THRESHOLD_PCT = new BigDecimal("90.0000");
 
     private static final String OP_DEPARTURE = "DEPARTURE";
     private static final String OP_LOGBOOK = "LOGBOOK";
@@ -84,6 +88,7 @@ public class FisheryService {
     private final LandingRepository landingRepo;
     private final ReviewRepository reviewRepo;
     private final QuotaRepository quotaRepo;
+    private final CarryoverRepository carryoverRepo;
     private final CatalogRepository catalogRepo;
     private final IdempotencyRepository idempotencyRepo;
     private final ObjectMapper objectMapper;
@@ -91,13 +96,15 @@ public class FisheryService {
 
     public FisheryService(TripRepository tripRepo, LogbookRepository logbookRepo,
                           LandingRepository landingRepo, ReviewRepository reviewRepo,
-                          QuotaRepository quotaRepo, CatalogRepository catalogRepo,
+                          QuotaRepository quotaRepo, CarryoverRepository carryoverRepo,
+                          CatalogRepository catalogRepo,
                           IdempotencyRepository idempotencyRepo, ObjectMapper objectMapper, Clock clock) {
         this.tripRepo = tripRepo;
         this.logbookRepo = logbookRepo;
         this.landingRepo = landingRepo;
         this.reviewRepo = reviewRepo;
         this.quotaRepo = quotaRepo;
+        this.carryoverRepo = carryoverRepo;
         this.catalogRepo = catalogRepo;
         this.idempotencyRepo = idempotencyRepo;
         this.objectMapper = objectMapper;
@@ -145,11 +152,14 @@ public class FisheryService {
                     .orElse(null);
             BigDecimal quotaLimit = quota == null ? BigDecimal.ZERO : quota.quotaKg();
             BigDecimal used = quota == null ? BigDecimal.ZERO : quota.usedKg();
+            // 可用上限含次年结转单列余额（结转额度优先核销，申报护栏同样认可）。
+            BigDecimal limit = quotaLimit.add(carryoverRemaining(
+                    request.vesselCode(), entry.getKey(), year));
             BigDecimal cumulative = used.add(entry.getValue());
-            if (cumulative.compareTo(quotaLimit) > 0) {
+            if (cumulative.compareTo(limit) > 0) {
                 throw new BusinessRuleException("申报量使渔船 " + request.vesselCode() + " 鱼种 "
                         + entry.getKey() + " " + year + " 年度累计 " + cumulative.toPlainString()
-                        + "kg 超过配额 " + quotaLimit.toPlainString() + "kg，整笔拒绝");
+                        + "kg 超过配额（含结转）" + limit.toPlainString() + "kg，整笔拒绝");
             }
         }
 
@@ -413,7 +423,7 @@ public class FisheryService {
         Map<String, BigDecimal> finalCatch = finalCatchMap(tripCode);
         Instant now = Instant.now(clock);
 
-        // 持锁校验并扣减，两航次并发核销同一配额不会合计超配额。
+        // 持锁校验并扣减，两航次并发核销同一配额不会合计超配额；结转额度次年优先核销。
         List<WeightLineView> deducted = new ArrayList<>();
         for (Map.Entry<String, BigDecimal> entry : finalCatch.entrySet()) {
             SpeciesRow species = catalogRepo.findSpecies(entry.getKey());
@@ -426,13 +436,37 @@ public class FisheryService {
                     .orElse(null);
             BigDecimal quotaLimit = quota == null ? BigDecimal.ZERO : quota.quotaKg();
             BigDecimal used = quota == null ? BigDecimal.ZERO : quota.usedKg();
-            if (used.add(amount).compareTo(quotaLimit) > 0) {
+            CarryoverRow carryover = carryoverRepo
+                    .findForUpdate(trip.vesselCode(), entry.getKey(), year).orElse(null);
+            BigDecimal carryRemaining = carryover == null ? BigDecimal.ZERO : carryover.remainingKg();
+            BigDecimal limit = quotaLimit.add(carryRemaining);
+            if (used.add(amount).compareTo(limit) > 0) {
                 throw new BusinessRuleException("核销使渔船 " + trip.vesselCode() + " 鱼种 "
                         + entry.getKey() + " 累计 " + used.add(amount).toPlainString()
-                        + "kg 超过配额 " + quotaLimit.toPlainString() + "kg，核销整笔回滚");
+                        + "kg 超过配额（含结转）" + limit.toPlainString() + "kg，核销整笔回滚");
             }
-            quotaRepo.deductLocked(quota, amount);
-            quotaRepo.insertSettlement(tripCode, trip.vesselCode(), year, entry.getKey(), amount, now);
+            // 先扣结转单列余额，再扣年度配额；两本账分别记明细，台账可复算。
+            BigDecimal fromCarryover = amount.min(carryRemaining);
+            if (fromCarryover.signum() > 0) {
+                carryoverRepo.deductLocked(carryover, fromCarryover);
+                carryoverRepo.insertSettlement(tripCode, trip.vesselCode(), year,
+                        entry.getKey(), fromCarryover, now);
+            }
+            BigDecimal fromQuota = amount.subtract(fromCarryover);
+            if (fromQuota.signum() > 0) {
+                quotaRepo.deductLocked(quota, fromQuota);
+                quotaRepo.insertSettlement(tripCode, trip.vesselCode(), year,
+                        entry.getKey(), fromQuota, now);
+                // 核销用量达年度配额 90% 触发产地预警（已触发额度不得结转）。
+                if (quotaLimit.signum() > 0) {
+                    BigDecimal usagePct = used.add(fromQuota).multiply(BigDecimal.valueOf(100))
+                            .divide(quotaLimit, 4, RoundingMode.HALF_UP);
+                    if (usagePct.compareTo(ORIGIN_ALERT_THRESHOLD_PCT) >= 0) {
+                        quotaRepo.insertOriginAlertIfAbsent(trip.vesselCode(), entry.getKey(), year,
+                                usagePct, now);
+                    }
+                }
+            }
             deducted.add(new WeightLineView(entry.getKey(), amount.setScale(3, RoundingMode.HALF_UP)));
         }
         deducted.sort(Comparator.comparing(WeightLineView::speciesCode));
@@ -668,6 +702,13 @@ public class FisheryService {
         if (catalogRepo.findVessel(vesselCode) == null) {
             throw new NotFoundException("渔船 " + vesselCode + " 不存在");
         }
+    }
+
+    /** 次年结转单列余额（千克），无结转台账为 0。 */
+    private BigDecimal carryoverRemaining(String vesselCode, String speciesCode, int year) {
+        return carryoverRepo.find(vesselCode, speciesCode, year)
+                .map(CarryoverRow::remainingKg)
+                .orElse(BigDecimal.ZERO);
     }
 
     private void requireSpecies(String speciesCode) {

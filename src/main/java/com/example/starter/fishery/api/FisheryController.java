@@ -1,5 +1,8 @@
 package com.example.starter.fishery.api;
 
+import com.example.starter.fishery.api.dto.CarryoverRequest;
+import com.example.starter.fishery.api.dto.CarryoverResponse;
+import com.example.starter.fishery.api.dto.CarryoverView;
 import com.example.starter.fishery.api.dto.DepartureRequest;
 import com.example.starter.fishery.api.dto.DepartureResponse;
 import com.example.starter.fishery.api.dto.LandingRequest;
@@ -12,7 +15,12 @@ import com.example.starter.fishery.api.dto.ReviewDecisionRequest;
 import com.example.starter.fishery.api.dto.ReviewDecisionResponse;
 import com.example.starter.fishery.api.dto.SettlementRequest;
 import com.example.starter.fishery.api.dto.SettlementResponse;
+import com.example.starter.fishery.api.dto.TransferConfirmRequest;
+import com.example.starter.fishery.api.dto.TransferRequest;
+import com.example.starter.fishery.api.dto.TransferResponse;
+import com.example.starter.fishery.service.CarryoverService;
 import com.example.starter.fishery.service.FisheryService;
+import com.example.starter.fishery.service.TransferService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -34,9 +42,14 @@ import java.util.List;
 public class FisheryController {
 
     private final FisheryService service;
+    private final TransferService transferService;
+    private final CarryoverService carryoverService;
 
-    public FisheryController(FisheryService service) {
+    public FisheryController(FisheryService service, TransferService transferService,
+                             CarryoverService carryoverService) {
         this.service = service;
+        this.transferService = transferService;
+        this.carryoverService = carryoverService;
     }
 
     @PostMapping("/departures")
@@ -78,5 +91,34 @@ public class FisheryController {
     public List<QuotaView> quotas(@RequestParam(required = false) String vesselCode,
                                   @RequestParam(required = false) Integer year) {
         return service.quotas(vesselCode, year);
+    }
+
+    @PostMapping("/transfers")
+    @ResponseStatus(HttpStatus.CREATED)
+    public TransferResponse createTransfer(@Valid @RequestBody TransferRequest request) {
+        return transferService.create(request);
+    }
+
+    @PostMapping("/transfers/{transferId}/confirm")
+    public TransferResponse confirmTransfer(@PathVariable long transferId,
+                                            @Valid @RequestBody TransferConfirmRequest request) {
+        return transferService.confirm(transferId, request);
+    }
+
+    @GetMapping("/transfers/{transferId}")
+    public TransferResponse transfer(@PathVariable long transferId) {
+        return transferService.get(transferId);
+    }
+
+    @PostMapping("/carryovers")
+    @ResponseStatus(HttpStatus.CREATED)
+    public CarryoverResponse carryover(@Valid @RequestBody CarryoverRequest request) {
+        return carryoverService.carryover(request);
+    }
+
+    @GetMapping("/carryovers")
+    public List<CarryoverView> carryovers(@RequestParam(required = false) String vesselCode,
+                                          @RequestParam(required = false) Integer year) {
+        return carryoverService.list(vesselCode, year);
     }
 }

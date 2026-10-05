@@ -121,4 +121,51 @@ public class QuotaRepository {
                 BigDecimal.class, vesselCode, speciesCode, year);
         return sum == null ? BigDecimal.ZERO : sum;
     }
+
+    /**
+     * 在已持有的配额行锁上调整核定配额（正数为调入/初始化，负数为调出）；
+     * 调用方须先校验调出后剩余额度不为负。
+     */
+    public void adjustQuotaKgLocked(QuotaRow quota, BigDecimal deltaKg) {
+        int updated = jdbc.update(
+                "UPDATE quota SET quota_kg = quota_kg + ?, version = version + 1 "
+                        + "WHERE vessel_code = ? AND species_code = ? AND quota_year = ? AND version = ?",
+                deltaKg, quota.vesselCode(), quota.speciesCode(), quota.year(), quota.version());
+        if (updated != 1) {
+            throw new IllegalStateException("配额台账乐观锁冲突: " + quota.vesselCode()
+                    + "/" + quota.speciesCode() + "/" + quota.year());
+        }
+    }
+
+    /** 次年额度初始化：不存在则插入 0 基数配额行（结转额度在结转台账单列），已存在则不变。 */
+    public void insertIfAbsent(String vesselCode, String speciesCode, int year) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(1) FROM quota WHERE vessel_code = ? AND species_code = ? AND quota_year = ?",
+                Integer.class, vesselCode, speciesCode, year);
+        if (count == null || count == 0) {
+            jdbc.update("INSERT INTO quota(vessel_code, species_code, quota_year, quota_kg, used_kg, version) "
+                    + "VALUES (?, ?, ?, 0, 0, 0)", vesselCode, speciesCode, year);
+        }
+    }
+
+    /** 记录产地预警（同船同鱼种同年度只记一次）。 */
+    public void insertOriginAlertIfAbsent(String vesselCode, String speciesCode, int year,
+                                          BigDecimal usagePct, Instant triggeredAt) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(1) FROM origin_alert WHERE vessel_code = ? AND species_code = ? AND quota_year = ?",
+                Integer.class, vesselCode, speciesCode, year);
+        if (count == null || count == 0) {
+            jdbc.update("INSERT INTO origin_alert(vessel_code, species_code, quota_year, usage_pct, triggered_at) "
+                    + "VALUES (?, ?, ?, ?, ?)", vesselCode, speciesCode, year, usagePct,
+                    Timestamp.from(triggeredAt));
+        }
+    }
+
+    /** 是否已触发产地预警（已触发的额度不得结转）。 */
+    public boolean originAlertExists(String vesselCode, String speciesCode, int year) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(1) FROM origin_alert WHERE vessel_code = ? AND species_code = ? AND quota_year = ?",
+                Integer.class, vesselCode, speciesCode, year);
+        return count != null && count > 0;
+    }
 }
