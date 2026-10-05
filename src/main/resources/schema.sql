@@ -174,6 +174,66 @@ COMMENT ON COLUMN idempotency_record.response_status IS '首次响应 HTTP 状�
 COMMENT ON COLUMN idempotency_record.response_body IS '首次响应报文快照';
 COMMENT ON COLUMN idempotency_record.created_at IS '记录创建时间（UTC）';
 
+CREATE TABLE IF NOT EXISTS image_feature (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    handover_id BIGINT NOT NULL,
+    contract_id BIGINT NOT NULL,
+    handover_type VARCHAR(16) NOT NULL,
+    feature_code VARCHAR(64) NOT NULL,
+    feature_value VARCHAR(256) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_image_feature UNIQUE (handover_id, feature_code)
+);
+COMMENT ON TABLE image_feature IS '点交合成影像特征清单：出借点交（DELIVERY）留存基线，归还点交（RETURN）登记后逐项比对，与点交单同一事务落库';
+COMMENT ON COLUMN image_feature.id IS '影像特征主键';
+COMMENT ON COLUMN image_feature.handover_id IS '所属点交单主键（同一点交单同一特征编码仅一条）';
+COMMENT ON COLUMN image_feature.contract_id IS '所属借展合同主键';
+COMMENT ON COLUMN image_feature.handover_type IS '点交类型：DELIVERY 出借点交 / RETURN 归还点交';
+COMMENT ON COLUMN image_feature.feature_code IS '合成影像特征编码，如 FEATURE_SEAL 印鉴区位、FEATURE_EDGE 卷边形态';
+COMMENT ON COLUMN image_feature.feature_value IS '合成影像特征值（特征摘要/哈希样式的合成字符串），空值无业务含义故不允许';
+COMMENT ON COLUMN image_feature.created_at IS '特征登记时间（UTC）';
+
+CREATE TABLE IF NOT EXISTS discrepancy_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    contract_id BIGINT NOT NULL,
+    request_id VARCHAR(64) DEFAULT NULL,
+    status VARCHAR(16) NOT NULL,
+    diff_count INT NOT NULL,
+    active_contract_id BIGINT DEFAULT NULL,
+    created_at TIMESTAMP NOT NULL,
+    closed_at TIMESTAMP DEFAULT NULL,
+    closed_by VARCHAR(128) DEFAULT NULL
+);
+COMMENT ON TABLE discrepancy_order IS '影像差异工单：归还点交比对差异项超过 0 时自动生成；OPEN 进行中未闭环前合同不得结案，CLOSED 为已闭环终态';
+COMMENT ON COLUMN discrepancy_order.id IS '差异工单主键';
+COMMENT ON COLUMN discrepancy_order.contract_id IS '所属借展合同主键';
+COMMENT ON COLUMN discrepancy_order.request_id IS '触发工单的归还点交确认幂等请求号，NULL 表示未经 HTTP 入口的服务内触发';
+COMMENT ON COLUMN discrepancy_order.status IS '工单状态：OPEN 进行中（未闭环）/ CLOSED 已闭环';
+COMMENT ON COLUMN discrepancy_order.diff_count IS '本次比对差异项数量（大于 0 才生成工单）';
+COMMENT ON COLUMN discrepancy_order.active_contract_id IS '进行中水位：OPEN 时等于合同主键，闭环后置 NULL；唯一索引保证同一合同同一时刻仅一个进行中工单';
+COMMENT ON COLUMN discrepancy_order.created_at IS '工单生成时间（UTC）';
+COMMENT ON COLUMN discrepancy_order.closed_at IS '工单闭环时间（UTC），NULL 表示未闭环';
+COMMENT ON COLUMN discrepancy_order.closed_by IS '工单闭环处置人姓名（合成数据），NULL 表示未闭环';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_discrepancy_active
+    ON discrepancy_order (active_contract_id);
+
+CREATE TABLE IF NOT EXISTS discrepancy_item (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id BIGINT NOT NULL,
+    feature_code VARCHAR(64) NOT NULL,
+    diff_type VARCHAR(24) NOT NULL,
+    delivery_value VARCHAR(256) DEFAULT NULL,
+    return_value VARCHAR(256) DEFAULT NULL
+);
+COMMENT ON TABLE discrepancy_item IS '影像差异明细：一个差异工单下逐项列出出借与归还点交特征清单的差异';
+COMMENT ON COLUMN discrepancy_item.id IS '差异明细主键';
+COMMENT ON COLUMN discrepancy_item.order_id IS '所属差异工单主键';
+COMMENT ON COLUMN discrepancy_item.feature_code IS '差异特征编码';
+COMMENT ON COLUMN discrepancy_item.diff_type IS '差异类型：VALUE_MISMATCH 同编码特征值不一致 / MISSING_ON_RETURN 归还清单缺失 / MISSING_ON_DELIVERY 出借清单缺失（归还新增）';
+COMMENT ON COLUMN discrepancy_item.delivery_value IS '出借点交登记的特征值，NULL 表示出借清单无此特征';
+COMMENT ON COLUMN discrepancy_item.return_value IS '归还点交登记的特征值，NULL 表示归还清单无此特征';
+
 -- 合成种子数据：两件文物、两个展柜
 MERGE INTO artifact KEY(id) VALUES
     (1, '宋代纸本山水卷', 'LEVEL_ONE', 'PAPER'),

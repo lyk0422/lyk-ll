@@ -77,10 +77,12 @@ public class LoanService {
 
     private final JdbcTemplate jdbc;
     private final Clock clock;
+    private final ImageHandoverService imageHandoverService;
 
-    public LoanService(JdbcTemplate jdbc, Clock clock) {
+    public LoanService(JdbcTemplate jdbc, Clock clock, ImageHandoverService imageHandoverService) {
         this.jdbc = jdbc;
         this.clock = clock;
+        this.imageHandoverService = imageHandoverService;
     }
 
     /**
@@ -147,6 +149,18 @@ public class LoanService {
      */
     @Transactional
     public Map<String, Object> confirmHandover(long contractId, String handoverType, String party) {
+        return confirmHandover(contractId, handoverType, party, null);
+    }
+
+    /**
+     * 点交确认（携带幂等请求号）：归还点交双方确认生效时，在同一事务内自动比对
+     * 出借与归还合成影像特征清单，差异项超过 0 生成差异工单；恰一致则放行。
+     *
+     * @param requestId 触发本次确认的幂等请求号，服务内直接调用时为 null
+     */
+    @Transactional
+    public Map<String, Object> confirmHandover(long contractId, String handoverType, String party,
+            String requestId) {
         Contract contract = getContract(contractId);
         String expectedStatus;
         String targetStatus;
@@ -172,6 +186,7 @@ public class LoanService {
         boolean bothConfirmed = Boolean.TRUE.equals(handover.get("museum_confirmed"))
                 && Boolean.TRUE.equals(handover.get("borrower_confirmed"));
         boolean completed = handover.get("completed_at") != null;
+        Map<String, Object> imageComparison = null;
         if (bothConfirmed && !completed) {
             Instant now = Instant.now(clock);
             int updated = jdbc.update(
@@ -189,6 +204,10 @@ public class LoanService {
                     throw ApiException.conflict("合同状态已并发变更，点交未生效（与续展等流程互斥）");
                 }
             }
+            if (completed && "RETURN".equals(handoverType)) {
+                // 归还点交生效：同事务自动比对合成影像特征，差异项超过 0 生成差异工单
+                imageComparison = imageHandoverService.compareOnReturn(contractId, requestId);
+            }
         }
         Map<String, Object> view = new LinkedHashMap<>();
         view.put("contractId", contractId);
@@ -197,6 +216,9 @@ public class LoanService {
         view.put("museumConfirmed", handover.get("museum_confirmed"));
         view.put("borrowerConfirmed", handover.get("borrower_confirmed"));
         view.put("effective", bothConfirmed && completed);
+        if (imageComparison != null) {
+            view.put("imageComparison", imageComparison);
+        }
         view.put("contractStatus", getContract(contractId).status());
         return view;
     }
@@ -256,9 +278,12 @@ public class LoanService {
             throw ApiException.conflict("合同状态为 " + contract.status() + "，须完成归还点交后方可结案");
         }
         Instant now = Instant.now(clock);
+        // 结案校验与差异工单状态原子判定：仅当不存在进行中差异工单时条件更新才能命中一行
         int updated = jdbc.update(
                 "UPDATE loan_contract SET status = ?, version = version + 1, updated_at = ?"
-                        + " WHERE id = ? AND status = ?",
+                        + " WHERE id = ? AND status = ? AND NOT EXISTS ("
+                        + " SELECT 1 FROM discrepancy_order o WHERE o.contract_id = loan_contract.id"
+                        + " AND o.status = 'OPEN')",
                 STATUS_CLOSED, Timestamp.from(now), contractId, STATUS_RETURNED);
         if (updated == 0) {
             Contract current = getContract(contractId);
@@ -266,6 +291,9 @@ public class LoanService {
                 Map<String, Object> view = contractView(current);
                 view.put("idempotentReplay", true);
                 return view;
+            }
+            if (imageHandoverService.countOpenOrders(contractId) > 0) {
+                throw ApiException.conflict("存在未闭环的影像差异工单，须先闭环后方可结案");
             }
             throw ApiException.conflict("合同状态已变更，结案未生效");
         }
