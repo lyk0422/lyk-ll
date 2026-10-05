@@ -50,17 +50,30 @@ class LocalInitScriptsTest {
                     assertThat(rs.next()).isTrue();
                     assertThat(rs.getBigDecimal(1)).isEqualByComparingTo("10000.00");
                 }
-                // 全部业务表建表成功（11 张）
+                // 全部业务表建表成功（16 张）
                 for (String table : new String[]{"meter_station", "pipeline_contract",
                         "daily_nomination", "meter_reading", "custody_voucher",
                         "station_day_voucher", "voucher_confirmation", "voucher_dispute",
-                        "voucher_reading_diff", "daily_assessment", "idempotent_request"}) {
+                        "voucher_reading_diff", "daily_assessment", "idempotent_request",
+                        "component_heating_value", "quality_verification",
+                        "station_day_verification", "quality_sample", "quality_diff_signoff"}) {
                     try (ResultSet rs = st.executeQuery(
                             "SELECT COUNT(1) FROM information_schema.tables "
                                     + "WHERE lower(table_name)='" + table + "'")) {
                         assertThat(rs.next()).isTrue();
                         assertThat(rs.getInt(1)).as("表 %s 应存在", table).isEqualTo(1);
                     }
+                }
+                // 合成组分热值表种子数据（5 个组分）
+                try (ResultSet rs = st.executeQuery(
+                        "SELECT COUNT(1) FROM component_heating_value")) {
+                    assertThat(rs.next()).isTrue();
+                    assertThat(rs.getInt(1)).isEqualTo(5);
+                }
+                try (ResultSet rs = st.executeQuery(
+                        "SELECT heating_value FROM component_heating_value WHERE component_code='CH4'")) {
+                    assertThat(rs.next()).isTrue();
+                    assertThat(rs.getBigDecimal(1)).isEqualByComparingTo("40.000000");
                 }
             }
         }

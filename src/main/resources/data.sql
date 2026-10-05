@@ -17,3 +17,12 @@ VALUES ('ST01', DATE '2026-09-20', 10000.00),
        ('ST01', DATE '2026-09-23', 10000.00),
        ('ST01', DATE '2026-09-24', 10000.00),
        ('ST01', DATE '2026-09-25', 10000.00);
+
+-- 合成组分热值表（虚构数据，仅用于本地演示与测试）
+MERGE INTO component_heating_value (component_code, component_name, heating_value)
+KEY (component_code)
+VALUES ('CH4', '甲烷', 40.000000),
+       ('C2H6', '乙烷', 44.000000),
+       ('C3H8', '丙烷', 50.000000),
+       ('N2', '氮气', 0.000000),
+       ('CO2', '二氧化碳', 0.000000);

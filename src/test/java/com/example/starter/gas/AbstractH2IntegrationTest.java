@@ -23,6 +23,11 @@ abstract class AbstractH2IntegrationTest {
         jdbc.update("DELETE FROM station_day_voucher");
         jdbc.update("DELETE FROM custody_voucher");
         jdbc.update("DELETE FROM meter_reading");
+        jdbc.update("DELETE FROM quality_diff_signoff");
+        jdbc.update("DELETE FROM quality_sample");
+        jdbc.update("DELETE FROM station_day_verification");
+        jdbc.update("DELETE FROM quality_verification");
+        jdbc.update("DELETE FROM component_heating_value");
         jdbc.update("DELETE FROM idempotent_request");
         jdbc.update("DELETE FROM daily_nomination");
         jdbc.update("DELETE FROM pipeline_contract");
@@ -31,6 +36,14 @@ abstract class AbstractH2IntegrationTest {
                 + "VALUES ('ST01', '门东交接计量站', '甲方销售公司', '乙方燃气公司')");
         jdbc.update("INSERT INTO pipeline_contract (contract_no, station_code, penalty_unit_price) "
                 + "VALUES ('C-T-001', 'ST01', 0.5000)");
+        seedComponentHeatingValues(jdbc);
+    }
+
+    /** 合成组分热值表（虚构数据）：与 data.sql 保持一致。 */
+    static void seedComponentHeatingValues(JdbcTemplate jdbc) {
+        jdbc.update("INSERT INTO component_heating_value (component_code, component_name, heating_value) "
+                + "VALUES ('CH4', '甲烷', 40.000000), ('C2H6', '乙烷', 44.000000), "
+                + "('C3H8', '丙烷', 50.000000), ('N2', '氮气', 0.000000), ('CO2', '二氧化碳', 0.000000)");
     }
 
     void addNomination(JdbcTemplate jdbc, LocalDate gasDate, String nominatedEnergy) {
