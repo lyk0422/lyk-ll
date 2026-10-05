@@ -62,6 +62,7 @@ public class CutoverService {
             Set.of(RequestStatus.APPROVED.name(), RequestStatus.EXECUTING.name());
 
     private final CutoverRepository repo;
+    private final BatchService batchService;
 
     /** 窗口最大分钟数，默认 240（4 小时，恰达合法）。 */
     @Value("${cutover.max-window-minutes:240}")
@@ -71,8 +72,9 @@ public class CutoverService {
     @Value("${cutover.verification-timeout-minutes:10}")
     private long verificationTimeoutMinutes;
 
-    public CutoverService(CutoverRepository repo) {
+    public CutoverService(CutoverRepository repo, BatchService batchService) {
         this.repo = repo;
+        this.batchService = batchService;
     }
 
     // ---------------- 申请 ----------------
@@ -270,6 +272,12 @@ public class CutoverService {
         if (req.startTime().isBefore(po.getWindowStart())
                 || req.startTime().isAfter(po.getWindowEnd())) {
             throw new BusinessRuleException("执行开始时间必须落在窗口 [start,end] 内");
+        }
+        // 批次门禁（同事务）：依赖阻断 422；直接前置未全部封板返回等待且不写步骤；
+        // 未绑定批次的旧单申请直接放行，行为不变。
+        String waitMessage = batchService.checkStartGateAndMark(req.requestId());
+        if (waitMessage != null) {
+            return new ActionResult(false, waitMessage, toView(po));
         }
         po.setStatus(RequestStatus.EXECUTING.name());
         po.setExecStartedAt(req.startTime());
@@ -604,6 +612,9 @@ public class CutoverService {
                     FingerprintUtil.sha256("ROLLBACK", po.getRequestId(), cause, triggerSeq),
                     "命中回退判据: " + cause, false);
         }
+
+        // 批次阻断传播（同事务，不依赖后台扫描）：尚未开始的全部可达后继转依赖阻断。
+        batchService.propagateDependencyBlock(po.getRequestId());
     }
 
     private void persistStep(CutoverStepPO step) {
@@ -700,7 +711,7 @@ public class CutoverService {
         return new RequestView(po.getRequestId(), po.getTitle(), po.getDeviceCode(),
                 po.getPriority(), po.getWindowStart(), po.getWindowEnd(), po.getStatus(),
                 po.getImpactSystems() == null ? null : impacts,
-                po.getRejectReason(), po.getRollbackCause(), stepViews);
+                po.getRejectReason(), po.getRollbackCause(), stepViews, po.getVersion());
     }
 
     private String writeSnapshot(String message) {

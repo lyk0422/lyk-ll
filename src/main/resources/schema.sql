@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS cutover_request (
     reject_reason    VARCHAR(500) COMMENT '拒绝原因;NULL表示未拒绝',
     exec_started_at  TIMESTAMP    COMMENT '窗口执行开始时间;NULL表示尚未进入执行',
     rollback_cause   VARCHAR(32)  COMMENT '回退判据:HARDCHECK_FAILED硬性检查失败/CRITICAL_TIMEOUT验证点超时/CRITICAL_FAILED验证点失败/STEP_FAILED普通步骤失败/WINDOW_EXPIRED窗口超期;NULL表示未回退',
+    version          INT          NOT NULL DEFAULT 1 COMMENT '乐观锁版本,从1开始,每次成功变更加1;批次发布按expectedVersion校验',
     created_at       TIMESTAMP    NOT NULL COMMENT '创建时间',
     updated_at       TIMESTAMP    NOT NULL COMMENT '最近更新时间',
     UNIQUE (request_id)
@@ -76,3 +77,45 @@ CREATE TABLE IF NOT EXISTS cutover_event (
 
 CREATE INDEX IF NOT EXISTS idx_step_request ON cutover_step(request_id);
 CREATE INDEX IF NOT EXISTS idx_event_request ON cutover_event(request_id);
+
+-- 割接批次主表：发布时原子冻结成员、依赖与窗口快照
+CREATE TABLE IF NOT EXISTS cutover_batch (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id     VARCHAR(64)  NOT NULL COMMENT '批次编号,兼作发布幂等键requestId',
+    batch_name   VARCHAR(200) NOT NULL COMMENT '批次名称',
+    status       VARCHAR(24)  NOT NULL COMMENT '状态:PUBLISHED已发布(未结束)/CLOSED已结束',
+    version      INT          NOT NULL DEFAULT 1 COMMENT '乐观锁版本,从1开始,成功变更(如结束批次)加1',
+    fingerprint  VARCHAR(128) NOT NULL COMMENT 'requestId+成员版本集合+依赖集合+精确时刻的SHA-256指纹',
+    created_at   TIMESTAMP    NOT NULL COMMENT '创建时间,Asia/Shanghai',
+    updated_at   TIMESTAMP    NOT NULL COMMENT '最近更新时间,Asia/Shanghai',
+    UNIQUE (batch_id)
+);
+
+-- 批次成员表：发布时冻结的申请版本与窗口快照；一项申请最多属于一个未结束批次
+CREATE TABLE IF NOT EXISTS cutover_batch_member (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id        VARCHAR(64)  NOT NULL COMMENT '所属批次编号',
+    request_id      VARCHAR(64)  NOT NULL COMMENT '成员割接申请ID',
+    request_version INT          NOT NULL COMMENT '发布时冻结的成员申请版本快照',
+    window_start    TIMESTAMP    NOT NULL COMMENT '发布时冻结的窗口开始快照(含),Asia/Shanghai',
+    window_end      TIMESTAMP    NOT NULL COMMENT '发布时冻结的窗口结束快照(不含),Asia/Shanghai',
+    member_status   VARCHAR(24)  NOT NULL COMMENT '成员状态:READY待执行/STARTED已启动/BLOCKED依赖阻断',
+    block_sources   VARCHAR(1000) COMMENT '首个阻断来源集合(直接前置中已回退/超期/被阻断者),逗号分隔,升序;NULL表示未阻断,一旦写入不再覆盖',
+    created_at      TIMESTAMP    NOT NULL COMMENT '创建时间,Asia/Shanghai',
+    updated_at      TIMESTAMP    NOT NULL COMMENT '最近更新时间,Asia/Shanghai',
+    UNIQUE (batch_id, request_id)
+);
+
+-- 批次有向前置依赖边：两端必须都在批内，禁止自环与环路
+CREATE TABLE IF NOT EXISTS cutover_batch_edge (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id    VARCHAR(64) NOT NULL COMMENT '所属批次编号',
+    predecessor VARCHAR(64) NOT NULL COMMENT '前置申请ID,须先验证通过并封板',
+    successor   VARCHAR(64) NOT NULL COMMENT '后继申请ID,前置未封板前不得开始执行',
+    created_at  TIMESTAMP   NOT NULL COMMENT '创建时间,Asia/Shanghai',
+    UNIQUE (batch_id, predecessor, successor)
+);
+
+CREATE INDEX IF NOT EXISTS idx_batch_member_request ON cutover_batch_member(request_id);
+CREATE INDEX IF NOT EXISTS idx_batch_edge_successor ON cutover_batch_edge(batch_id, successor);
+CREATE INDEX IF NOT EXISTS idx_batch_edge_predecessor ON cutover_batch_edge(batch_id, predecessor);

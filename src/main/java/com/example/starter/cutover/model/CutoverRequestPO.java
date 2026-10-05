@@ -19,6 +19,7 @@ public class CutoverRequestPO {
     private String rejectReason;
     private LocalDateTime execStartedAt;
     private String rollbackCause;
+    private Integer version;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
@@ -48,6 +49,8 @@ public class CutoverRequestPO {
     public void setExecStartedAt(LocalDateTime execStartedAt) { this.execStartedAt = execStartedAt; }
     public String getRollbackCause() { return rollbackCause; }
     public void setRollbackCause(String rollbackCause) { this.rollbackCause = rollbackCause; }
+    public Integer getVersion() { return version; }
+    public void setVersion(Integer version) { this.version = version; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }

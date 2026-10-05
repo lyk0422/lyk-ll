@@ -28,18 +28,19 @@ public class CutoverRepository {
     // ---------------- 申请主表 ----------------
 
     public void insertRequest(CutoverRequestPO po) {
+        po.setVersion(1);
         jdbc.update("""
                 INSERT INTO cutover_request
                   (request_id, title, device_code, priority, window_start, window_end,
                    status, impact_systems, fingerprint, reject_reason, exec_started_at,
-                   rollback_cause, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   rollback_cause, version, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 po.getRequestId(), po.getTitle(), po.getDeviceCode(), po.getPriority(),
                 Timestamp.valueOf(po.getWindowStart()), Timestamp.valueOf(po.getWindowEnd()),
                 po.getStatus(), po.getImpactSystems(), po.getFingerprint(), po.getRejectReason(),
                 po.getExecStartedAt() == null ? null : Timestamp.valueOf(po.getExecStartedAt()),
-                po.getRollbackCause(),
+                po.getRollbackCause(), po.getVersion(),
                 Timestamp.valueOf(po.getCreatedAt()), Timestamp.valueOf(po.getUpdatedAt()));
     }
 
@@ -78,16 +79,19 @@ public class CutoverRepository {
                 Timestamp.valueOf(start), excludeRequestId);
     }
 
+    /** 更新可变字段并同步乐观锁版本：成功变更 version+1（SQL 与内存对象保持一致）。 */
     public void updateMutable(CutoverRequestPO po) {
+        po.setVersion(po.getVersion() == null ? 2 : po.getVersion() + 1);
         jdbc.update("""
                 UPDATE cutover_request SET
                   status = ?, impact_systems = ?, reject_reason = ?,
-                  exec_started_at = ?, rollback_cause = ?, updated_at = ?
+                  exec_started_at = ?, rollback_cause = ?, version = ?, updated_at = ?
                 WHERE request_id = ?
                 """,
                 po.getStatus(), po.getImpactSystems(), po.getRejectReason(),
                 po.getExecStartedAt() == null ? null : Timestamp.valueOf(po.getExecStartedAt()),
-                po.getRollbackCause(), Timestamp.valueOf(po.getUpdatedAt()),
+                po.getRollbackCause(), po.getVersion(),
+                Timestamp.valueOf(po.getUpdatedAt()),
                 po.getRequestId());
     }
 
@@ -214,6 +218,7 @@ public class CutoverRepository {
         po.setRejectReason(rs.getString("reject_reason"));
         po.setExecStartedAt(toLdt(rs, "exec_started_at"));
         po.setRollbackCause(rs.getString("rollback_cause"));
+        po.setVersion(rs.getInt("version"));
         po.setCreatedAt(toLdt(rs, "created_at"));
         po.setUpdatedAt(toLdt(rs, "updated_at"));
         return po;
