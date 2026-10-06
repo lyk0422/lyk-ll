@@ -17,16 +17,23 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import com.example.starter.hazmat.api.ApiException;
 import com.example.starter.hazmat.clock.MutableClock;
+import com.example.starter.hazmat.domain.RelayStatus;
 import com.example.starter.hazmat.domain.RouteApprovalStatus;
 import com.example.starter.hazmat.domain.ShipmentStatus;
 import com.example.starter.hazmat.domain.WaypointState;
 import com.example.starter.hazmat.dto.ApplyRequest;
 import com.example.starter.hazmat.dto.CheckinRequest;
+import com.example.starter.hazmat.dto.RelayCheckinRequest;
+import com.example.starter.hazmat.dto.RelayRequest;
 import com.example.starter.hazmat.dto.RerouteRequest;
 import com.example.starter.hazmat.po.ApprovalWaypoint;
 import com.example.starter.hazmat.po.Checkin;
+import com.example.starter.hazmat.po.DisposalRecord;
 import com.example.starter.hazmat.po.GoodsCategory;
 import com.example.starter.hazmat.po.IdempotentRecord;
+import com.example.starter.hazmat.po.NightCurfew;
+import com.example.starter.hazmat.po.RelayCheckin;
+import com.example.starter.hazmat.po.RelaySegment;
 import com.example.starter.hazmat.po.RouteApproval;
 import com.example.starter.hazmat.po.RouteInfo;
 import com.example.starter.hazmat.po.RouteWaypointDef;
@@ -53,6 +60,9 @@ public class HazmatService {
     public static final String EVT_DEVIATION_WARNING = "DEVIATION_WARNING";
     public static final String EVT_LOST_CONTACT = "LOST_CONTACT";
     public static final String EVT_LATE_CHECKIN_AFTER_CLOSE = "LATE_CHECKIN_AFTER_CLOSE";
+    public static final String EVT_RELAY_CHECKIN_REVERSED = "RELAY_CHECKIN_REVERSED";
+    public static final String EVT_RELAY_SHIFT_COMPLETED = "RELAY_SHIFT_COMPLETED";
+    public static final String EVT_CURFEW_FROZEN = "CURFEW_FROZEN";
 
     /** 连续超时途经点数达到该值即升级失联（恰 2 个触发）。 */
     static final int LOST_CONTACT_CONSECUTIVE_TIMEOUTS = 2;
@@ -191,8 +201,184 @@ public class HazmatService {
             throw ApiException.conflict("INVALID_STATUS",
                     "运单当前状态 " + shipment.status() + "，不可发运");
         }
+        // 夜间禁行：计划到达禁行起点的运单，发运前必须已设置安全接力点。
+        RouteApproval approval = currentApproval(shipment);
+        LocalDateTime curfewStart = applicableCurfewStart(approval.routeCode(),
+                repository.findWaypoints(approval.id()));
+        if (curfewStart != null && repository.findRelaysByShipment(shipment.id()).isEmpty()) {
+            throw ApiException.conflict("CURFEW_RELAY_REQUIRED",
+                    "路线计划到达夜间禁行起点 " + curfewStart + "，须先设置安全接力点方可发运");
+        }
         repository.updateStatus(shipment.id(), ShipmentStatus.DISPATCHED);
         return ServiceResult.ok(shipmentView(shipmentNo));
+    }
+
+    // ============================ 夜间接力押运 ============================
+
+    public ServiceResult createRelay(String shipmentNo, RelayRequest request) {
+        String fingerprint = fingerprint("RELAY_CREATE", request.requestId(), shipmentNo,
+                String.valueOf(request.waypointSeq()), request.outgoingEscort(), request.incomingEscort());
+        return withIdempotency(request.requestId(), fingerprint,
+                () -> tx.execute(status -> doCreateRelay(shipmentNo, request)));
+    }
+
+    private ServiceResult doCreateRelay(String shipmentNo, RelayRequest request) {
+        Shipment shipment = loadShipment(shipmentNo);
+        if (shipment.status().isTerminal()) {
+            throw ApiException.conflict("SHIPMENT_TERMINAL",
+                    "运单终态 " + shipment.status() + "，不可设置接力点");
+        }
+        if (shipment.status() == ShipmentStatus.APPLIED) {
+            throw ApiException.conflict("INVALID_STATUS", "路线核准通过后方可设置安全接力点");
+        }
+        if (request.outgoingEscort().equals(request.incomingEscort())) {
+            throw ApiException.badRequest("ESCORT_SAME", "交班与接班押运员编号不得相同");
+        }
+        RouteApproval approval = currentApproval(shipment);
+        List<ApprovalWaypoint> waypoints = repository.findWaypoints(approval.id());
+        ApprovalWaypoint target = waypoints.stream()
+                .filter(w -> w.seq() == request.waypointSeq()).findFirst()
+                .orElseThrow(() -> ApiException.badRequest("WAYPOINT_NOT_FOUND",
+                        "当前路线无途经点序号 " + request.waypointSeq()));
+        LocalDateTime curfewStart = applicableCurfewStart(approval.routeCode(), waypoints);
+        if (curfewStart == null) {
+            throw ApiException.badRequest("CURFEW_NOT_APPLICABLE",
+                    "路线 " + approval.routeCode() + " 计划不触及夜间禁行时段，无需设置接力点");
+        }
+        if (!target.plannedTime().isBefore(curfewStart)) {
+            throw ApiException.badRequest("RELAY_POINT_IN_CURFEW",
+                    "接力点计划通过时刻 " + target.plannedTime() + " 不早于夜间禁行起点 " + curfewStart
+                            + "，须选择禁行起点前的安全接力点");
+        }
+        LocalDateTime now = now();
+        long relayId = repository.insertRelaySegment(shipment.id(), approval.id(), target.seq(),
+                request.outgoingEscort(), request.incomingEscort(), curfewStart, request.requestId(), now);
+        try {
+            // 主键冲突即并发占用失败：同一运单同时刻只允许一个进行中接力段。
+            repository.occupyRelay(shipment.id(), relayId);
+        } catch (DuplicateKeyException e) {
+            throw ApiException.conflict("RELAY_IN_PROGRESS",
+                    "运单已存在进行中接力段，同时刻只允许一个");
+        }
+        Map<String, Object> body = shipmentView(shipmentNo);
+        body.put("relayId", relayId);
+        body.put("message", "安全接力点已设置，须在禁行起点 " + curfewStart + " 前完成双方打卡换班");
+        return ServiceResult.ok(body);
+    }
+
+    public ServiceResult relayCheckin(String shipmentNo, long relayId, RelayCheckinRequest request) {
+        String fingerprint = fingerprint("RELAY_CHECKIN", request.requestId(), shipmentNo,
+                String.valueOf(relayId), request.escortNo(), request.checkTime().toString());
+        return withIdempotency(request.requestId(), fingerprint,
+                () -> tx.execute(status -> doRelayCheckin(shipmentNo, relayId, request)));
+    }
+
+    private ServiceResult doRelayCheckin(String shipmentNo, long relayId, RelayCheckinRequest request) {
+        Shipment shipment = loadShipment(shipmentNo);
+        LocalDateTime now = now();
+        if (shipment.status().isTerminal()) {
+            // 禁行冻结/失联/结案均为终态：冻结后不再接受新打卡。
+            throw ApiException.conflict("SHIPMENT_TERMINAL",
+                    "运单终态 " + shipment.status() + "，接力打卡已冻结");
+        }
+        RelaySegment relay = repository.findRelayById(relayId)
+                .orElseThrow(() -> ApiException.notFound("RELAY_NOT_FOUND", "接力段不存在: " + relayId));
+        if (relay.shipmentId() != shipment.id()) {
+            throw ApiException.badRequest("RELAY_MISMATCH", "接力段不属于该运单");
+        }
+        if (relay.status() != RelayStatus.IN_PROGRESS) {
+            throw ApiException.conflict("RELAY_NOT_IN_PROGRESS",
+                    "接力段当前状态 " + relay.status() + "，不可打卡");
+        }
+        boolean outgoing = request.escortNo().equals(relay.outgoingEscort());
+        if (!outgoing && !request.escortNo().equals(relay.incomingEscort())) {
+            throw ApiException.badRequest("ESCORT_NOT_IN_SEGMENT",
+                    "押运员 " + request.escortNo() + " 不是该接力段交班/接班押运员");
+        }
+        Optional<RelayCheckin> duplicate = repository.findRelayCheckin(
+                shipment.id(), relay.waypointSeq(), request.escortNo());
+        if (duplicate.isPresent()) {
+            throw ApiException.conflict("RELAY_ALREADY_CHECKED",
+                    "押运员 " + request.escortNo() + " 已在接力点 " + relay.waypointSeq()
+                            + " 打卡（运单+途经点序号去重），首次打卡时刻 " + duplicate.get().checkTime());
+        }
+        if (!request.checkTime().isBefore(relay.deadline())) {
+            // 恰满禁行起点判定：打卡时刻 >= 换班截止即未按时换班，冻结与处置登记在同一事务内提交。
+            freezeForCurfew(shipment, relay, now);
+            Map<String, Object> body = shipmentView(shipmentNo);
+            body.put("errorCode", "CURFEW_REACHED");
+            body.put("message", "打卡时刻 " + request.checkTime() + " 已到达夜间禁行起点 " + relay.deadline()
+                    + "，换班未按时完成，运单冻结并转处置");
+            return ServiceResult.status(409, body);
+        }
+        // 时序校验：接班时刻不得早于交班时刻；乱序回传按时刻归位，逆序拒绝并告警。
+        if (outgoing && relay.incomingTime() != null && relay.incomingTime().isBefore(request.checkTime())) {
+            rejectRelayReverse(shipment, relay, request.checkTime(),
+                    "接班打卡时刻 " + relay.incomingTime() + " 早于交班打卡时刻 " + request.checkTime(), now);
+        }
+        if (!outgoing && relay.outgoingTime() != null && request.checkTime().isBefore(relay.outgoingTime())) {
+            rejectRelayReverse(shipment, relay, request.checkTime(),
+                    "接班打卡时刻 " + request.checkTime() + " 早于交班打卡时刻 " + relay.outgoingTime(), now);
+        }
+        repository.insertRelayCheckin(relay.id(), shipment.id(), relay.waypointSeq(),
+                request.escortNo(), request.checkTime(), request.requestId(), now);
+        repository.updateRelayEscortTime(relay.id(), outgoing, request.checkTime());
+        LocalDateTime outgoingTime = outgoing ? request.checkTime() : relay.outgoingTime();
+        LocalDateTime incomingTime = outgoing ? relay.incomingTime() : request.checkTime();
+        if (outgoingTime != null && incomingTime != null) {
+            // 双方打卡齐全换班才生效（单人打卡不生效）；生效时刻=接班打卡时刻。
+            repository.completeRelay(relay.id(), incomingTime);
+            repository.releaseRelay(shipment.id());
+            repository.insertEvent(shipment.id(), EVT_RELAY_SHIFT_COMPLETED,
+                    "接力点 " + relay.waypointSeq() + " 换班完成：交班 " + relay.outgoingEscort()
+                            + " @" + outgoingTime + "，接班 " + relay.incomingEscort() + " @" + incomingTime, now);
+        }
+        Map<String, Object> body = shipmentView(shipmentNo);
+        body.put("relayId", relay.id());
+        return ServiceResult.ok(body);
+    }
+
+    private void rejectRelayReverse(Shipment shipment, RelaySegment relay, LocalDateTime checkTime,
+                                    String detail, LocalDateTime now) {
+        String message = "接力点 " + relay.waypointSeq() + " 打卡时刻逆序：" + detail + "，拒绝并告警";
+        eventRecorder.recordNewTransaction(shipment.id(), EVT_RELAY_CHECKIN_REVERSED, message, now);
+        throw ApiException.badRequest("RELAY_CHECKIN_REVERSED", message);
+    }
+
+    /**
+     * 夜间禁行冻结：未在禁行起点前完成换班的运单，终态 CAS 保证与失联/核销竞争唯一终态；
+     * 冻结成功时接力段冻结、释放占用、处置登记与事件在同一事务内完成。
+     *
+     * @return true 表示本次调用完成冻结；false 表示他方已先终态化
+     */
+    private boolean freezeForCurfew(Shipment shipment, RelaySegment relay, LocalDateTime now) {
+        int rows = repository.compareAndSetTerminal(shipment.id(), ShipmentStatus.CURFEW_FROZEN);
+        if (rows == 0) {
+            return false;
+        }
+        repository.freezeRelay(relay.id());
+        repository.releaseRelay(shipment.id());
+        repository.insertDisposal(shipment.id(), relay.id(),
+                "未在夜间禁行起点 " + relay.deadline() + " 前完成押运换班，运单冻结并转处置", now);
+        repository.insertEvent(shipment.id(), EVT_CURFEW_FROZEN,
+                "接力段 " + relay.id() + " 恰满禁行起点 " + relay.deadline() + " 仍未完成换班，冻结新打卡并转处置", now);
+        return true;
+    }
+
+    /**
+     * 计算路线计划触及的夜间禁行起点：任一途经点计划通过时刻落入 [curfewStart, curfewEnd)
+     * （恰等于起点即触及），返回最早禁行起点；不触及返回 null。
+     */
+    private LocalDateTime applicableCurfewStart(String routeCode, List<ApprovalWaypoint> waypoints) {
+        LocalDateTime result = null;
+        for (NightCurfew curfew : repository.findNightCurfews(routeCode)) {
+            boolean hit = waypoints.stream().anyMatch(w ->
+                    !w.plannedTime().isBefore(curfew.curfewStart()) && w.plannedTime().isBefore(curfew.curfewEnd()));
+            if (hit && (result == null || curfew.curfewStart().isBefore(result))) {
+                result = curfew.curfewStart();
+            }
+        }
+        return result;
     }
 
     // ============================ 押运打卡 ============================
@@ -404,12 +590,18 @@ public class HazmatService {
         if (shipment.status() == ShipmentStatus.LOST_CONTACT) {
             throw ApiException.conflict("ALREADY_LOST_CONTACT", "运单已失联冻结，不可核销");
         }
-        // 条件更新：与失联升级竞争，败者拿不到终态。
+        if (shipment.status() == ShipmentStatus.CURFEW_FROZEN) {
+            throw ApiException.conflict("ALREADY_CURFEW_FROZEN", "运单已夜间禁行冻结，不可核销");
+        }
+        // 条件更新：与失联升级/禁行冻结竞争，败者拿不到终态。
         int rows = repository.compareAndSetTerminal(shipment.id(), ShipmentStatus.COMPLETED);
         if (rows == 0) {
             Shipment current = repository.findShipmentById(shipment.id()).orElseThrow();
             if (current.status() == ShipmentStatus.COMPLETED) {
                 return ServiceResult.ok(shipmentView(shipmentNo));
+            }
+            if (current.status() == ShipmentStatus.CURFEW_FROZEN) {
+                throw ApiException.conflict("ALREADY_CURFEW_FROZEN", "运单已夜间禁行冻结，不可核销");
             }
             throw ApiException.conflict("ALREADY_LOST_CONTACT", "运单已失联冻结，不可核销");
         }
@@ -451,6 +643,25 @@ public class HazmatService {
         Shipment shipment = repository.findShipmentById(shipmentId).orElseThrow();
         if (shipment.status().isTerminal()) {
             return Map.of();
+        }
+        // 夜间禁行冻结优先：恰满禁行起点未完成换班即终态化，冻结后不再标记超时计程（唯一终态）。
+        Optional<Long> activeRelayId = repository.findActiveRelay(shipmentId);
+        if (activeRelayId.isPresent()) {
+            RelaySegment relay = repository.findRelayById(activeRelayId.get()).orElse(null);
+            if (relay != null && relay.status() == RelayStatus.IN_PROGRESS
+                    && !now.isBefore(relay.deadline())) {
+                boolean frozen = freezeForCurfew(shipment, relay, now);
+                if (!frozen) {
+                    return Map.of(); // 终态竞争败者：他方已终态化
+                }
+                Map<String, Object> changed = new LinkedHashMap<>();
+                changed.put("changed", true);
+                changed.put("shipmentNo", shipment.shipmentNo());
+                changed.put("newlyTimedOut", List.of());
+                changed.put("lostContact", false);
+                changed.put("curfewFrozen", true);
+                return changed;
+            }
         }
         long approvalId = shipment.currentApprovalId();
         List<ApprovalWaypoint> waypoints = repository.findWaypoints(approvalId);
@@ -577,6 +788,41 @@ public class HazmatService {
             approvalViews.add(av);
         }
         body.put("approvals", approvalViews);
+
+        List<Map<String, Object>> relayViews = new ArrayList<>();
+        for (RelaySegment relay : repository.findRelaysByShipment(shipment.id())) {
+            Map<String, Object> rv = new LinkedHashMap<>();
+            rv.put("relayId", relay.id());
+            rv.put("waypointSeq", relay.waypointSeq());
+            rv.put("status", relay.status().name());
+            rv.put("outgoingEscort", relay.outgoingEscort());
+            rv.put("incomingEscort", relay.incomingEscort());
+            rv.put("deadline", relay.deadline().toString());
+            rv.put("outgoingTime", relay.outgoingTime() == null ? null : relay.outgoingTime().toString());
+            rv.put("incomingTime", relay.incomingTime() == null ? null : relay.incomingTime().toString());
+            rv.put("completedAt", relay.completedAt() == null ? null : relay.completedAt().toString());
+            List<Map<String, Object>> rcViews = new ArrayList<>();
+            for (RelayCheckin rc : repository.findRelayCheckins(relay.id())) {
+                Map<String, Object> rcv = new LinkedHashMap<>();
+                rcv.put("escortNo", rc.escortNo());
+                rcv.put("checkTime", rc.checkTime().toString());
+                rcv.put("requestId", rc.requestId());
+                rcViews.add(rcv);
+            }
+            rv.put("checkins", rcViews);
+            relayViews.add(rv);
+        }
+        body.put("relays", relayViews);
+
+        List<Map<String, Object>> disposalViews = new ArrayList<>();
+        for (DisposalRecord d : repository.findDisposals(shipment.id())) {
+            Map<String, Object> dv = new LinkedHashMap<>();
+            dv.put("relayId", d.relayId());
+            dv.put("reason", d.reason());
+            dv.put("createdAt", d.createdAt().toString());
+            disposalViews.add(dv);
+        }
+        body.put("disposals", disposalViews);
 
         List<Map<String, Object>> eventViews = new ArrayList<>();
         for (ShipmentEvent e : repository.findEvents(shipment.id())) {

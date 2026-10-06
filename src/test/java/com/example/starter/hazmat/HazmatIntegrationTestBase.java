@@ -12,6 +12,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import com.example.starter.hazmat.clock.MutableClock;
 import com.example.starter.hazmat.dto.ApplyRequest;
 import com.example.starter.hazmat.dto.CheckinRequest;
+import com.example.starter.hazmat.dto.RelayCheckinRequest;
+import com.example.starter.hazmat.dto.RelayRequest;
 import com.example.starter.hazmat.dto.RerouteRequest;
 import com.example.starter.hazmat.repo.HazmatRepository;
 import com.example.starter.hazmat.service.HazmatService;
@@ -39,6 +41,10 @@ abstract class HazmatIntegrationTestBase {
     @BeforeEach
     void cleanUp() {
         jdbc.execute("DELETE FROM idempotent_record");
+        jdbc.execute("DELETE FROM relay_checkin");
+        jdbc.execute("DELETE FROM shipment_active_relay");
+        jdbc.execute("DELETE FROM relay_segment");
+        jdbc.execute("DELETE FROM disposal_record");
         jdbc.execute("DELETE FROM checkin_record");
         jdbc.execute("DELETE FROM approval_waypoint");
         jdbc.execute("DELETE FROM route_approval");
@@ -80,6 +86,32 @@ abstract class HazmatIntegrationTestBase {
 
     protected ServiceResult scan(LocalDateTime at) {
         return service.scanTimeouts(at);
+    }
+
+    protected ServiceResult createRelay(String shipmentNo, String requestId, int seq,
+                                        String outgoing, String incoming) {
+        return service.createRelay(shipmentNo, new RelayRequest(requestId, seq, outgoing, incoming));
+    }
+
+    protected ServiceResult relayCheckin(String shipmentNo, long relayId, String requestId,
+                                         String escortNo, LocalDateTime time) {
+        return service.relayCheckin(shipmentNo, relayId, new RelayCheckinRequest(requestId, escortNo, time));
+    }
+
+    @SuppressWarnings("unchecked")
+    protected List<Map<String, Object>> relays(Map<String, Object> view) {
+        return (List<Map<String, Object>>) view.get("relays");
+    }
+
+    @SuppressWarnings("unchecked")
+    protected List<Map<String, Object>> disposals(Map<String, Object> view) {
+        return (List<Map<String, Object>>) view.get("disposals");
+    }
+
+    protected Map<String, Object> relay(String shipmentNo, long relayId) {
+        return relays(view(shipmentNo)).stream()
+                .filter(r -> Long.valueOf(relayId).equals(((Number) r.get("relayId")).longValue()))
+                .findFirst().orElseThrow();
     }
 
     @SuppressWarnings("unchecked")

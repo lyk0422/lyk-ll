@@ -5,7 +5,8 @@ package com.example.starter.hazmat.domain;
  *
  * <p>流转：APPLIED（已申请）→ ROUTE_APPROVED（路线核准）→ DISPATCHED（发运）
  * → IN_TRANSIT（在途打卡）→ COMPLETED（到达核销结案，终态）。
- * 路线驳回为 ROUTE_REJECTED（终态）；连续 2 点超时升级 LOST_CONTACT（失联终态，并冻结车辆）。
+ * 路线驳回为 ROUTE_REJECTED（终态）；连续 2 点超时升级 LOST_CONTACT（失联终态，并冻结车辆）；
+ * 夜间接力未在禁行起点前完成换班升级 CURFEW_FROZEN（禁行冻结终态，转处置，与失联/核销互斥唯一终态）。
  */
 public enum ShipmentStatus {
 
@@ -21,8 +22,10 @@ public enum ShipmentStatus {
     IN_TRANSIT(false),
     /** 到达核销结案（唯一正常终态）。 */
     COMPLETED(true),
-    /** 失联（唯一异常终态，车辆冻结）。 */
-    LOST_CONTACT(true);
+    /** 失联（异常终态，车辆冻结）。 */
+    LOST_CONTACT(true),
+    /** 夜间禁行冻结（异常终态：未在禁行起点前完成押运换班，冻结新打卡并转处置）。 */
+    CURFEW_FROZEN(true);
 
     private final boolean terminal;
 
