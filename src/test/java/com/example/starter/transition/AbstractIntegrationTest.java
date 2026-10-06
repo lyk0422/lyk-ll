@@ -21,6 +21,10 @@ public abstract class AbstractIntegrationTest {
             Clock.fixed(Instant.parse("2026-09-25T02:00:00Z"), ZoneId.of("Asia/Shanghai"));
 
     private static final List<String> BUSINESS_TABLES = List.of(
+            "blend_control_event",
+            "blend_control_state",
+            "blend_reading",
+            "blend_ratio_version",
             "late_event",
             "idempotent_request",
             "roll_verdict_event",

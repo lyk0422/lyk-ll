@@ -25,6 +25,17 @@ public final class QualityThresholds {
     /** 灰分等级差合法直切上限：恰 2 级合法，超过须冲洗网部。 */
     public static final int ASH_FLUSH_LEVEL = 2;
 
+    /** 回抄浆掺配比例合成允许区间下限（含边界），单位 %。 */
+    public static final BigDecimal BLEND_RATIO_MIN_PCT = new BigDecimal("5.000");
+    /** 回抄浆掺配比例合成允许区间上限（含边界），单位 %。 */
+    public static final BigDecimal BLEND_RATIO_MAX_PCT = new BigDecimal("30.000");
+    /** 实际掺配偏离目标比例的合格容差（恰 2% 合格），单位 %。 */
+    public static final BigDecimal BLEND_DEVIATION_TOLERANCE_PCT = new BigDecimal("2.0000");
+    /** 连续超差采样点数达到该值判失控。 */
+    public static final int BLEND_OUT_OF_CONTROL_STREAK = 3;
+    /** 相邻比例版本差值在线直调上限（含边界），单位 %；超出须降速调整。 */
+    public static final BigDecimal BLEND_DIRECT_ADJUST_MAX_DELTA_PCT = new BigDecimal("5.0000");
+
     private QualityThresholds() {
     }
 }

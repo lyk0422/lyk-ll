@@ -71,4 +71,31 @@ public final class TransitionRules {
                 && tensileIndex.compareTo(QualityThresholds.TENSILE_MIN) >= 0
                 && weightDeviation.compareTo(QualityThresholds.BASIS_WEIGHT_TOLERANCE_PCT) <= 0;
     }
+
+    /** 掺配比例允许区间含边界判定：5.000% ≤ ratio ≤ 30.000%。 */
+    public static boolean withinBlendRatioRange(BigDecimal ratioPct) {
+        return ratioPct.compareTo(QualityThresholds.BLEND_RATIO_MIN_PCT) >= 0
+                && ratioPct.compareTo(QualityThresholds.BLEND_RATIO_MAX_PCT) <= 0;
+    }
+
+    /** 实际掺配偏离目标比例的绝对偏差，保留 4 位小数，单位 %。 */
+    public static BigDecimal blendDeviationPct(BigDecimal actualRatioPct, BigDecimal targetRatioPct) {
+        return actualRatioPct.subtract(targetRatioPct).abs()
+                .setScale(4, RoundingMode.HALF_UP);
+    }
+
+    /** 偏差恰 2.0000% 合格；超过才超差。 */
+    public static boolean withinBlendTolerance(BigDecimal deviationPct) {
+        return deviationPct.compareTo(QualityThresholds.BLEND_DEVIATION_TOLERANCE_PCT) <= 0;
+    }
+
+    /** 连续超差采样点达 3 个判失控。 */
+    public static boolean isBlendOutOfControl(int consecutiveOutOfTolerance) {
+        return consecutiveOutOfTolerance >= QualityThresholds.BLEND_OUT_OF_CONTROL_STREAK;
+    }
+
+    /** 比例变更方式判定：相邻版本差值恰 5.0000% 在线直调，超出须降速调整。 */
+    public static boolean isDirectBlendAdjust(BigDecimal ratioDeltaPct) {
+        return ratioDeltaPct.compareTo(QualityThresholds.BLEND_DIRECT_ADJUST_MAX_DELTA_PCT) <= 0;
+    }
 }
