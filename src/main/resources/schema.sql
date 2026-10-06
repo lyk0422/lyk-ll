@@ -1,5 +1,6 @@
 -- 数电发票红冲与授信额度恢复服务建表脚本（H2 MySQL 兼容模式，仅合成数据）
--- 金额单位：元；时间均为应用服务器本地时间（Asia/Shanghai）；NULL 含义见各列注释。
+-- 金额单位：元；既有业务表时间均为应用服务器本地时间（Asia/Shanghai）；
+-- 差异单（discrepancy*）相关表按 72 小时升级规则统一使用 UTC 时间；NULL 含义见各列注释。
 
 CREATE TABLE IF NOT EXISTS credit_account (
     seller_id    VARCHAR(64)   NOT NULL COMMENT '开票方ID（合成）',
@@ -90,4 +91,41 @@ CREATE TABLE IF NOT EXISTS idempotency_record (
     response_body   CLOB         NOT NULL COMMENT '首次响应报文，重放原样返回',
     created_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     PRIMARY KEY (request_id, endpoint)
+);
+
+CREATE TABLE IF NOT EXISTS discrepancy (
+    id              BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
+    discrepancy_no  VARCHAR(64)   NOT NULL COMMENT '差异单编号，全局唯一',
+    blue_invoice_id BIGINT        NOT NULL COMMENT '蓝票ID',
+    blue_invoice_no VARCHAR(64)   NOT NULL COMMENT '蓝票号码',
+    blue_line_id    BIGINT        NOT NULL COMMENT '蓝票行ID',
+    line_no         INT           NOT NULL COMMENT '蓝票行号',
+    claimed_amount  DECIMAL(19,2) NOT NULL COMMENT '购方主张的该行正确金额，单位元',
+    diff_amount     DECIMAL(19,2) NOT NULL COMMENT '需冲减差异金额=行金额-购方主张金额，单位元',
+    evidence_ref    VARCHAR(128)  NOT NULL COMMENT '合成凭据标识',
+    status          VARCHAR(16)   NOT NULL COMMENT '状态：OPEN待销方答复/CONFIRMED销方已确认/REJECTED销方已驳回/ESCALATED满72小时未答复升级人工',
+    red_request_no  VARCHAR(64)   NULL COMMENT '销方确认后按原红字信息表流程创建的申请编号；未创建为NULL',
+    created_at      TIMESTAMP     NOT NULL COMMENT '提交时间（UTC）',
+    responded_at    TIMESTAMP     NULL COMMENT '销方答复时间（UTC）；未答复为NULL',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_discrepancy_no (discrepancy_no)
+);
+
+CREATE TABLE IF NOT EXISTS discrepancy_event (
+    id             BIGINT      NOT NULL AUTO_INCREMENT COMMENT '主键',
+    discrepancy_id BIGINT      NOT NULL COMMENT '差异单ID',
+    event          VARCHAR(16) NOT NULL COMMENT '事件：SUBMITTED提交/CONFIRMED确认/REJECTED驳回/ESCALATED升级人工',
+    created_at     TIMESTAMP   NOT NULL COMMENT '事件时间（UTC）',
+    PRIMARY KEY (id)
+);
+
+CREATE TABLE IF NOT EXISTS discrepancy_conflict (
+    id              BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
+    blue_invoice_no VARCHAR(64)   NOT NULL COMMENT '蓝票号码',
+    line_no         INT           NOT NULL COMMENT '蓝票行号',
+    claimed_amount  DECIMAL(19,2) NOT NULL COMMENT '购方主张的该行正确金额，单位元',
+    evidence_ref    VARCHAR(128)  NOT NULL COMMENT '合成凭据标识',
+    reason          VARCHAR(32)   NOT NULL COMMENT '冲突原因：RED_FLUSH_IN_PROGRESS红冲在途/RED_FLUSH_COMPLETED红冲已完成',
+    created_at      TIMESTAMP     NOT NULL COMMENT '记录时间（UTC）',
+    PRIMARY KEY (id)
 );

@@ -8,6 +8,7 @@ import java.util.Map;
 
 import com.example.starter.common.ApiException;
 import com.example.starter.credit.CreditService;
+import com.example.starter.discrepancy.DiscrepancyGuard;
 import com.example.starter.idempotency.IdempotencyService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,6 +23,8 @@ import org.springframework.transaction.support.TransactionTemplate;
  * 累计红冲金额不得超过可红冲余额，恰红至余额为零合法；已全额红冲蓝票为终态，
  * 进一步红冲返回幂等结果不产生新红票；红字信息表须经购销双方在同一事务内
  * 先后确认方可开具红票，单方确认不生效，意见不一致挂起；红票确认后额度同事务恢复。
+ * 行级争议隔离：蓝票行存在未结对账差异（OPEN/ESCALATED）时，只暂停该行的新增红冲，
+ * 无争议行仍按原规则处理；购方未入账且没有差异的全额红冲沿用原路径，不新增挂起门槛。
  */
 @Service
 public class RedFlushService {
@@ -31,15 +34,17 @@ public class RedFlushService {
     private final JdbcTemplate jdbc;
     private final CreditService creditService;
     private final IdempotencyService idempotencyService;
+    private final DiscrepancyGuard discrepancyGuard;
     private final TransactionTemplate transactionTemplate;
     private final ObjectMapper objectMapper;
 
     public RedFlushService(JdbcTemplate jdbc, CreditService creditService,
-                           IdempotencyService idempotencyService,
+                           IdempotencyService idempotencyService, DiscrepancyGuard discrepancyGuard,
                            TransactionTemplate transactionTemplate, ObjectMapper objectMapper) {
         this.jdbc = jdbc;
         this.creditService = creditService;
         this.idempotencyService = idempotencyService;
+        this.discrepancyGuard = discrepancyGuard;
         this.transactionTemplate = transactionTemplate;
         this.objectMapper = objectMapper;
     }
@@ -78,11 +83,17 @@ public class RedFlushService {
             throw ApiException.conflict("INVALID_STATE",
                     "蓝票状态 " + blue.status() + " 不允许红冲（须已交付或已归档）");
         }
+        // 满 72 小时未答复的差异恰满即升级（同事务落库）；未结差异只暂停对应行的新增红冲
+        discrepancyGuard.escalateExpired(blue.id());
         BigDecimal pendingTotal = pendingAmount(blue.id());
         BigDecimal remainingForNew = remaining.subtract(pendingTotal);
         BigDecimal amount;
         List<RedLineRequest> lines = List.of();
         if ("FULL".equals(request.flushType())) {
+            if (discrepancyGuard.hasBlocking(blue.id())) {
+                throw ApiException.conflict("LINE_DISPUTED",
+                        "蓝票存在未结对账差异，全额红冲暂停，待差异处置后重试");
+            }
             if (remainingForNew.compareTo(BigDecimal.ZERO) <= 0) {
                 throw ApiException.conflict("NO_REMAINING_BALANCE", "可红冲余额已被在途申请占满");
             }
@@ -95,6 +106,10 @@ public class RedFlushService {
                 BigDecimal balance = lineBalances.get(line.lineNo());
                 if (balance == null) {
                     throw ApiException.badRequest("LINE_NOT_FOUND", "蓝票不存在行号: " + line.lineNo());
+                }
+                if (discrepancyGuard.isLineBlocked(blue.id(), line.lineNo())) {
+                    throw ApiException.conflict("LINE_DISPUTED",
+                            "行 " + line.lineNo() + " 存在未结对账差异，该行新增红冲暂停，无争议行可单独申请");
                 }
                 BigDecimal allowed = balance.subtract(linePending.getOrDefault(line.lineNo(), BigDecimal.ZERO));
                 if (line.amount().compareTo(allowed) > 0) {
@@ -414,6 +429,36 @@ public class RedFlushService {
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("幂等响应反序列化失败", e);
         }
+    }
+
+    /**
+     * 差异单确认后按原红字信息表流程创建部分红冲申请（系统内部调用，无独立幂等键，
+     * 幂等性由差异处置的 requestId 保证）。须在调用方事务内执行；
+     * 只创建 PENDING 申请，不开红票、不动额度，额度仍只在红票确认生效后恢复。
+     *
+     * @return 新建红字信息表编号
+     */
+    public String createSystemRequest(String blueInvoiceNo, int lineNo, BigDecimal amount) {
+        BlueInvoiceRow blue = lockBlueByNo(blueInvoiceNo);
+        Map<Integer, BigDecimal> balances = lineBalances(blue.id());
+        BigDecimal balance = balances.get(lineNo);
+        if (balance == null) {
+            throw ApiException.badRequest("LINE_NOT_FOUND", "蓝票不存在行号: " + lineNo);
+        }
+        if (amount.compareTo(balance) > 0) {
+            throw ApiException.conflict("RED_FLUSH_EXCEEDS_LINE",
+                    "行 " + lineNo + " 差异冲减金额超可红冲余额：可冲 " + balance + "，本次 " + amount);
+        }
+        long requestId = insertRequest(blue, "PARTIAL", amount);
+        String requestNo = jdbc.queryForObject(
+                "SELECT request_no FROM red_flush_request WHERE id = ?", String.class, requestId);
+        Long blueLineId = jdbc.queryForObject(
+                "SELECT id FROM invoice_line WHERE invoice_id = ? AND line_no = ?",
+                Long.class, blue.id(), lineNo);
+        jdbc.update(
+                "INSERT INTO red_flush_line (request_id, blue_line_id, line_no, amount) VALUES (?, ?, ?, ?)",
+                requestId, blueLineId, lineNo, amount);
+        return requestNo;
     }
 
     /**
