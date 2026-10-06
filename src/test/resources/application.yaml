@@ -1,0 +1,31 @@
+spring:
+  application:
+    name: gitcangku1
+  datasource:
+    # 测试专用命名内存库（MySQL 兼容模式），与本地运行库隔离；JVM 退出后数据丢失。
+    url: "jdbc:h2:mem:test_demo;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000"
+    username: "sa"
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 1
+      connection-timeout: 10000
+      validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+  jackson:
+    time-zone: Asia/Shanghai
+
+# 测试不加载合成种子数据，由用例自行准备。
+app:
+  seed:
+    enabled: false
+
+server:
+  port: 0
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
