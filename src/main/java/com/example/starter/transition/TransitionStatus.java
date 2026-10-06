@@ -8,6 +8,8 @@ public final class TransitionStatus {
     public static final String APPLIED = "APPLIED";
     public static final String DECIDED = "DECIDED";
     public static final String EXECUTED = "EXECUTED";
+    /** 掺配失控暂停：已转人工，须复核确认后恢复为 EXECUTED。 */
+    public static final String PAUSED = "PAUSED";
     public static final String DISPOSED = "DISPOSED";
     public static final String COMPLETED = "COMPLETED";
     /** 归档：终态。 */

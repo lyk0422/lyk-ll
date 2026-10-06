@@ -35,6 +35,12 @@ public class TransitionOrderRepository {
         o.setMachineSpeedMMin(rs.getBigDecimal("machine_speed_m_min"));
         o.setStockConsistencyPct(rs.getBigDecimal("stock_consistency_pct"));
         o.setTransitionLengthM(rs.getBigDecimal("transition_length_m"));
+        o.setCurrentBlendVersion(rs.getObject("current_blend_version", Integer.class));
+        o.setConsecutiveOutOfTolerance(rs.getInt("consecutive_out_of_tolerance"));
+        Timestamp paused = rs.getTimestamp("paused_at");
+        o.setPausedAt(paused == null ? null : paused.toLocalDateTime());
+        Timestamp resumed = rs.getTimestamp("resumed_at");
+        o.setResumedAt(resumed == null ? null : resumed.toLocalDateTime());
         o.setStatus(rs.getString("status"));
         o.setAppliedRequestId(rs.getString("applied_request_id"));
         o.setAppliedAt(rs.getTimestamp("applied_at").toLocalDateTime());
@@ -114,6 +120,44 @@ public class TransitionOrderRepository {
                              java.time.LocalDateTime time) {
         jdbc.update("UPDATE transition_order SET status = ?, " + timeColumn + " = ? WHERE order_no = ?",
                 status, Timestamp.valueOf(time), orderNo);
+    }
+
+    /** 申请携带比例：判定结论同事务写入当前比例版本号。 */
+    public void updateBlendVersion(String orderNo, int versionNo) {
+        jdbc.update("UPDATE transition_order SET current_blend_version = ? WHERE order_no = ?",
+                versionNo, orderNo);
+    }
+
+    /** 比例调整：切换当前版本并清零连续超差计数；仅执行中允许，返回更新行数。 */
+    public int updateBlendAdjust(String orderNo, int versionNo) {
+        return jdbc.update("""
+                        UPDATE transition_order
+                        SET current_blend_version = ?, consecutive_out_of_tolerance = 0
+                        WHERE order_no = ? AND status = 'EXECUTED'
+                        """,
+                versionNo, orderNo);
+    }
+
+    /** 读数登记后回写连续超差计数；达到失控阈值时同事务置 PAUSED 转人工。仅执行中允许，返回更新行数。 */
+    public int updateBlendControl(TransitionOrder o) {
+        return jdbc.update("""
+                        UPDATE transition_order
+                        SET consecutive_out_of_tolerance = ?, status = ?, paused_at = ?
+                        WHERE order_no = ? AND status = 'EXECUTED'
+                        """,
+                o.getConsecutiveOutOfTolerance(), o.getStatus(),
+                o.getPausedAt() == null ? null : Timestamp.valueOf(o.getPausedAt()),
+                o.getOrderNo());
+    }
+
+    /** 复核确认恢复：回到 EXECUTED，清零连续超差计数并登记恢复时间；仅暂停中允许，返回更新行数。 */
+    public int updateResume(String orderNo, java.time.LocalDateTime resumedAt) {
+        return jdbc.update("""
+                        UPDATE transition_order
+                        SET status = 'EXECUTED', consecutive_out_of_tolerance = 0, resumed_at = ?
+                        WHERE order_no = ? AND status = 'PAUSED'
+                        """,
+                Timestamp.valueOf(resumedAt), orderNo);
     }
 
     private static Boolean getNullableBoolean(java.sql.ResultSet rs, String column)

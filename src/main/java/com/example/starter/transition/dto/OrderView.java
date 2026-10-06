@@ -23,6 +23,8 @@ public record OrderView(
         BigDecimal machineSpeedMMin,
         BigDecimal stockConsistencyPct,
         BigDecimal transitionLengthM,
+        Integer currentBlendVersion,
+        int consecutiveOutOfTolerance,
         String status,
         LocalDateTime appliedAt,
         LocalDateTime decidedAt,

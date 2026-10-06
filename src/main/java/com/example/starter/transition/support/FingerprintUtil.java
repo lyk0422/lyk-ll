@@ -3,6 +3,7 @@ package com.example.starter.transition.support;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -16,6 +17,7 @@ public final class FingerprintUtil {
 
     private static final JsonMapper ORDERED = JsonMapper.builder()
             .configure(MapperFeature.SORT_PROPERTIES_ALPHABETICALLY, true)
+            .addModule(new JavaTimeModule())
             .build();
 
     private FingerprintUtil() {

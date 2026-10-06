@@ -1,21 +1,33 @@
 package com.example.starter.transition.service;
 
 import com.example.starter.transition.ApiException;
+import com.example.starter.transition.QualityThresholds;
 import com.example.starter.transition.TransitionStatus;
+import com.example.starter.transition.dto.AdjustBlendRatioRequest;
 import com.example.starter.transition.dto.ApplyOrderRequest;
+import com.example.starter.transition.dto.BlendReadingRequest;
+import com.example.starter.transition.dto.BlendReadingView;
+import com.example.starter.transition.dto.BlendRecomputeView;
+import com.example.starter.transition.dto.BlendVersionView;
 import com.example.starter.transition.dto.DisposeRollsRequest;
 import com.example.starter.transition.dto.ExecuteOrderRequest;
 import com.example.starter.transition.dto.IdempotentResult;
 import com.example.starter.transition.dto.InspectionRequest;
 import com.example.starter.transition.dto.OrderView;
 import com.example.starter.transition.dto.ReexamRequest;
+import com.example.starter.transition.dto.ResumeExecutionRequest;
 import com.example.starter.transition.dto.RollView;
 import com.example.starter.transition.dto.TransitionRecomputeView;
+import com.example.starter.transition.model.BlendRatioVersion;
+import com.example.starter.transition.model.BlendReading;
 import com.example.starter.transition.model.Grade;
 import com.example.starter.transition.model.IdempotentRequest;
 import com.example.starter.transition.model.RollInspection;
 import com.example.starter.transition.model.TransitionOrder;
 import com.example.starter.transition.model.TransitionRoll;
+import com.example.starter.transition.repo.BlendControlEventRepository;
+import com.example.starter.transition.repo.BlendRatioVersionRepository;
+import com.example.starter.transition.repo.BlendReadingRepository;
 import com.example.starter.transition.repo.CleaningWindowRepository;
 import com.example.starter.transition.repo.GradeRepository;
 import com.example.starter.transition.repo.IdempotentRequestRepository;
@@ -53,9 +65,17 @@ public class TransitionService {
     static final String BIZ_APPLY = "APPLY_ORDER";
     static final String BIZ_INSPECTION = "SUBMIT_INSPECTION";
     static final String BIZ_REEXAM = "SUBMIT_REEXAM";
+    static final String BIZ_ADJUST_BLEND = "ADJUST_BLEND_RATIO";
+    static final String BIZ_BLEND_READING = "SUBMIT_BLEND_READING";
+    static final String BIZ_RESUME = "RESUME_EXECUTION";
 
     static final String INSPECTION_INITIAL = "INITIAL";
     static final String INSPECTION_REEXAM = "REEXAM";
+
+    static final String BLEND_SOURCE_APPLY = "APPLY";
+    static final String BLEND_SOURCE_ADJUST = "ADJUST";
+    static final String EVENT_OUT_OF_CONTROL_PAUSE = "OUT_OF_CONTROL_PAUSE";
+    static final String EVENT_MANUAL_RESUME = "MANUAL_RESUME";
 
     private static final DateTimeFormatter NO_FORMAT = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -69,6 +89,9 @@ public class TransitionService {
     private final VerdictEventRepository verdictEventRepository;
     private final IdempotentRequestRepository idempotentRequestRepository;
     private final LateEventRepository lateEventRepository;
+    private final BlendRatioVersionRepository blendRatioVersionRepository;
+    private final BlendReadingRepository blendReadingRepository;
+    private final BlendControlEventRepository blendControlEventRepository;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -81,6 +104,9 @@ public class TransitionService {
                              VerdictEventRepository verdictEventRepository,
                              IdempotentRequestRepository idempotentRequestRepository,
                              LateEventRepository lateEventRepository,
+                             BlendRatioVersionRepository blendRatioVersionRepository,
+                             BlendReadingRepository blendReadingRepository,
+                             BlendControlEventRepository blendControlEventRepository,
                              ObjectMapper objectMapper,
                              Clock clock) {
         this.gradeRepository = gradeRepository;
@@ -92,11 +118,14 @@ public class TransitionService {
         this.verdictEventRepository = verdictEventRepository;
         this.idempotentRequestRepository = idempotentRequestRepository;
         this.lateEventRepository = lateEventRepository;
+        this.blendRatioVersionRepository = blendRatioVersionRepository;
+        this.blendReadingRepository = blendReadingRepository;
+        this.blendControlEventRepository = blendControlEventRepository;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
 
-    /** 申请改品种单（requestId 幂等；同一纸机同时刻唯一受理）。 */
+    /** 申请改品种单（requestId 幂等；同一纸机同时刻唯一受理）。携带掺配比例时须重新走方式判定，判定结论与比例版本在同一事务内落库。 */
     @Transactional
     public IdempotentResult<OrderView> apply(ApplyOrderRequest request) {
         String fingerprint = FingerprintUtil.sha256(request.requestId(), request);
@@ -104,6 +133,14 @@ public class TransitionService {
         if (existing != null) {
             return replay(existing, new TypeReference<OrderView>() {
             });
+        }
+
+        // 掺配比例须在合成允许区间内，恰在区间边界合法；先校验再占用资源。
+        if (request.targetBlendRatioPct() != null
+                && !TransitionRules.withinBlendInterval(request.targetBlendRatioPct())) {
+            throw ApiException.badRequest("掺配比例 " + request.targetBlendRatioPct()
+                    + " 超出合成允许区间 [" + QualityThresholds.BLEND_RATIO_MIN_PCT
+                    + ", " + QualityThresholds.BLEND_RATIO_MAX_PCT + "] %");
         }
 
         Grade fromGrade = gradeRepository.findByCode(request.fromGrade())
@@ -131,6 +168,21 @@ public class TransitionService {
         order.setAppliedAt(now());
         orderRepository.insert(order);
 
+        // 携带比例变更的申请：重新走方式判定，判定结论与比例版本在同一事务内落库。
+        if (request.targetBlendRatioPct() != null) {
+            applyDecision(order);
+            BlendRatioVersion version = new BlendRatioVersion();
+            version.setOrderNo(orderNo);
+            version.setVersionNo(1);
+            version.setTargetRatioPct(request.targetBlendRatioPct());
+            version.setSource(BLEND_SOURCE_APPLY);
+            version.setRequestId(request.requestId());
+            version.setCreatedAt(now());
+            blendRatioVersionRepository.tryInsert(version);
+            orderRepository.updateBlendVersion(orderNo, 1);
+            order.setCurrentBlendVersion(1);
+        }
+
         registerIdempotent(request.requestId(), BIZ_APPLY, fingerprint, orderNo, toView(order));
         return new IdempotentResult<>(request.requestId(), false, toView(order));
     }
@@ -140,7 +192,12 @@ public class TransitionService {
     public OrderView decide(String orderNo) {
         TransitionOrder order = requireOrder(orderNo);
         requireStatus(order, TransitionStatus.APPLIED);
+        applyDecision(order);
+        return toView(order);
+    }
 
+    /** 判定结论计算与落库：申请携带比例时与比例版本同事务调用，独立判定走 decide。 */
+    private void applyDecision(TransitionOrder order) {
         BigDecimal from = order.getBasisWeightFrom();
         BigDecimal delta = TransitionRules.basisWeightDeltaPct(from, order.getBasisWeightTo());
         int ashDelta = TransitionRules.ashLevelDelta(order.getAshLevelFrom(), order.getAshLevelTo());
@@ -154,7 +211,6 @@ public class TransitionService {
         order.setStatus(TransitionStatus.DECIDED);
         order.setDecidedAt(now());
         orderRepository.updateDecision(order);
-        return toView(order);
     }
 
     /** 执行：参数须在新品种工艺窗口内（含边界）；过渡料长度 = 车速×切换时间/60。 */
@@ -415,6 +471,169 @@ public class TransitionService {
                 sumLength, rolls);
     }
 
+    /**
+     * 执行中掺配比例调整（requestId 幂等）：生成新版本并切换当前版本，连续超差计数清零；
+     * 同一订单同时刻只允许一次执行中调整（唯一索引 (order_no, source, created_at) 保证）。
+     */
+    @Transactional
+    public IdempotentResult<BlendVersionView> adjustBlendRatio(String orderNo,
+                                                               AdjustBlendRatioRequest request) {
+        String fingerprint = FingerprintUtil.sha256(request.requestId(), request);
+        IdempotentRequest existing = lookupIdempotent(request.requestId(), BIZ_ADJUST_BLEND, fingerprint);
+        if (existing != null) {
+            return replay(existing, new TypeReference<BlendVersionView>() {
+            });
+        }
+
+        TransitionOrder order = requireOrder(orderNo);
+        if (TransitionStatus.PAUSED.equals(order.getStatus())) {
+            throw ApiException.conflict("改品种单已失控暂停转人工，须复核确认恢复后再调整比例");
+        }
+        requireStatus(order, TransitionStatus.EXECUTED);
+        if (!TransitionRules.withinBlendInterval(request.targetBlendRatioPct())) {
+            throw ApiException.badRequest("掺配比例 " + request.targetBlendRatioPct()
+                    + " 超出合成允许区间 [" + QualityThresholds.BLEND_RATIO_MIN_PCT
+                    + ", " + QualityThresholds.BLEND_RATIO_MAX_PCT + "] %");
+        }
+
+        BlendRatioVersion version = new BlendRatioVersion();
+        version.setOrderNo(orderNo);
+        version.setVersionNo(blendRatioVersionRepository.nextVersionNo(orderNo));
+        version.setTargetRatioPct(request.targetBlendRatioPct());
+        version.setSource(BLEND_SOURCE_ADJUST);
+        version.setRequestId(request.requestId());
+        version.setCreatedAt(now());
+        if (!blendRatioVersionRepository.tryInsert(version)) {
+            throw ApiException.conflict("同一订单同时刻只允许一次执行中调整: " + orderNo);
+        }
+        if (orderRepository.updateBlendAdjust(orderNo, version.getVersionNo()) == 0) {
+            throw ApiException.conflict("改品种单执行状态已变更，比例调整失败: " + orderNo);
+        }
+
+        BlendVersionView view = toVersionView(version);
+        registerIdempotent(request.requestId(), BIZ_ADJUST_BLEND, fingerprint, orderNo, view);
+        return new IdempotentResult<>(request.requestId(), false, view);
+    }
+
+    /**
+     * 实际掺配读数提交（requestId 幂等；按订单与采样时刻去重）：
+     * 偏离目标超过 ±2%（恰 2% 合格）记超差，连续 3 个采样点超差判失控，
+     * 失控即暂停执行并转人工，读数与暂停在同一事务内落库。
+     */
+    @Transactional
+    public IdempotentResult<BlendReadingView> submitBlendReading(BlendReadingRequest request) {
+        String fingerprint = FingerprintUtil.sha256(request.requestId(), request);
+        IdempotentRequest existing = lookupIdempotent(request.requestId(), BIZ_BLEND_READING, fingerprint);
+        if (existing != null) {
+            return replay(existing, new TypeReference<BlendReadingView>() {
+            });
+        }
+
+        TransitionOrder order = requireOrder(request.orderNo());
+        if (TransitionStatus.PAUSED.equals(order.getStatus())) {
+            throw ApiException.conflict("改品种单已失控暂停转人工，复核确认恢复前不得登记读数");
+        }
+        requireStatus(order, TransitionStatus.EXECUTED);
+        BlendRatioVersion current = blendRatioVersionRepository.findLatest(request.orderNo())
+                .orElseThrow(() -> ApiException.conflict(
+                        "改品种单未携带掺配比例维度，不得登记读数: " + request.orderNo()));
+
+        BigDecimal deviation = TransitionRules.blendDeviationPct(
+                request.actualRatioPct(), current.getTargetRatioPct());
+        boolean outOfTolerance = TransitionRules.isBlendOutOfTolerance(deviation);
+
+        BlendReading reading = new BlendReading();
+        reading.setOrderNo(request.orderNo());
+        reading.setVersionNo(current.getVersionNo());
+        reading.setSampledAt(request.sampledAt());
+        reading.setActualRatioPct(request.actualRatioPct());
+        reading.setDeviationPct(deviation);
+        reading.setOutOfTolerance(outOfTolerance);
+        reading.setRequestId(request.requestId());
+        reading.setCreatedAt(now());
+        if (!blendReadingRepository.tryInsert(reading)) {
+            throw ApiException.conflict("同一订单同一采样时刻已存在掺配读数: "
+                    + request.orderNo() + " @ " + request.sampledAt());
+        }
+
+        int streak = outOfTolerance ? order.getConsecutiveOutOfTolerance() + 1 : 0;
+        order.setConsecutiveOutOfTolerance(streak);
+        if (streak >= QualityThresholds.BLEND_OUT_OF_CONTROL_STREAK) {
+            // 失控即暂停执行并转人工；与读数登记在同一事务内落库。
+            order.setStatus(TransitionStatus.PAUSED);
+            order.setPausedAt(now());
+            blendControlEventRepository.insert(request.orderNo(), EVENT_OUT_OF_CONTROL_PAUSE,
+                    request.requestId(), null,
+                    "连续 " + streak + " 个采样点偏离目标超过 ±2%，暂停执行转人工", now());
+        }
+        if (orderRepository.updateBlendControl(order) == 0) {
+            // 并发读数已先行暂停/变更状态：本次登记随事务回滚。
+            throw ApiException.conflict("改品种单执行状态已变更，读数登记失败: " + request.orderNo());
+        }
+
+        BlendReadingView view = toReadingView(reading);
+        registerIdempotent(request.requestId(), BIZ_BLEND_READING, fingerprint,
+                request.orderNo(), view);
+        return new IdempotentResult<>(request.requestId(), false, view);
+    }
+
+    /** 失控暂停后复核确认恢复（requestId 幂等）：恢复为执行中，连续超差计数清零。 */
+    @Transactional
+    public IdempotentResult<OrderView> resumeExecution(String orderNo, ResumeExecutionRequest request) {
+        String fingerprint = FingerprintUtil.sha256(request.requestId(), request);
+        IdempotentRequest existing = lookupIdempotent(request.requestId(), BIZ_RESUME, fingerprint);
+        if (existing != null) {
+            return replay(existing, new TypeReference<OrderView>() {
+            });
+        }
+
+        TransitionOrder order = requireOrder(orderNo);
+        requireStatus(order, TransitionStatus.PAUSED);
+        if (!Boolean.TRUE.equals(request.reviewConfirmed())) {
+            throw ApiException.badRequest("恢复执行须复核确认（reviewConfirmed=true）");
+        }
+
+        LocalDateTime resumedAt = now();
+        if (orderRepository.updateResume(orderNo, resumedAt) == 0) {
+            throw ApiException.conflict("改品种单状态已变更，恢复失败: " + orderNo);
+        }
+        blendControlEventRepository.insert(orderNo, EVENT_MANUAL_RESUME,
+                request.requestId(), request.reviewedBy(), "复核确认恢复执行", resumedAt);
+
+        OrderView view = getOrder(orderNo);
+        registerIdempotent(request.requestId(), BIZ_RESUME, fingerprint, orderNo, view);
+        return new IdempotentResult<>(request.requestId(), false, view);
+    }
+
+    /** 比例版本链查询：与改品种单号绑定留档。 */
+    public List<BlendVersionView> listBlendVersions(String orderNo) {
+        requireOrder(orderNo);
+        return blendRatioVersionRepository.findByOrderNo(orderNo).stream()
+                .map(this::toVersionView).toList();
+    }
+
+    /** 掺配轨迹复算：版本链 + 按读数留存版本的目标复算偏离，历史订单（含已归档）均可复算。 */
+    public BlendRecomputeView recomputeBlend(String orderNo) {
+        TransitionOrder order = requireOrder(orderNo);
+        List<BlendVersionView> versions = listBlendVersions(orderNo);
+        java.util.Map<Integer, BigDecimal> targetByVersion = new java.util.HashMap<>();
+        for (BlendVersionView v : versions) {
+            targetByVersion.put(v.versionNo(), v.targetRatioPct());
+        }
+        List<BlendReadingView> readings = blendReadingRepository.findByOrderNo(orderNo).stream()
+                .map(r -> {
+                    BigDecimal target = targetByVersion.get(r.getVersionNo());
+                    BigDecimal recomputedDeviation = TransitionRules.blendDeviationPct(
+                            r.getActualRatioPct(), target);
+                    return new BlendReadingView(r.getOrderNo(), r.getVersionNo(), r.getSampledAt(),
+                            r.getActualRatioPct(), recomputedDeviation,
+                            TransitionRules.isBlendOutOfTolerance(recomputedDeviation));
+                })
+                .toList();
+        return new BlendRecomputeView(orderNo, order.getStatus(), order.getCurrentBlendVersion(),
+                order.getConsecutiveOutOfTolerance(), versions, readings);
+    }
+
     // ------------------------------------------------------------------
     // 私有辅助方法（置于作用域末尾）
     // ------------------------------------------------------------------
@@ -549,7 +768,8 @@ public class TransitionService {
                 o.getBasisWeightFrom(), o.getBasisWeightTo(), o.getAshLevelFrom(), o.getAshLevelTo(),
                 o.getBasisWeightDeltaPct(), o.getAshLevelDelta(), o.getDirectSwitch(), o.getWireFlush(),
                 o.getSwitchTimeSec(), o.getMachineSpeedMMin(), o.getStockConsistencyPct(),
-                o.getTransitionLengthM(), o.getStatus(), o.getAppliedAt(), o.getDecidedAt(),
+                o.getTransitionLengthM(), o.getCurrentBlendVersion(), o.getConsecutiveOutOfTolerance(),
+                o.getStatus(), o.getAppliedAt(), o.getDecidedAt(),
                 o.getExecutedAt(), o.getDisposedAt(), o.getCompletedAt(), o.getArchivedAt());
     }
 
@@ -558,5 +778,15 @@ public class TransitionService {
                 r.getVerdict(), r.getWarehouseStatus(), r.isEligibleReexam(), r.getReexamCount(),
                 r.getRegisteredAt(), r.getVerdictChangedAt(),
                 verdictEventRepository.findByRollNo(r.getRollNo()));
+    }
+
+    private BlendVersionView toVersionView(BlendRatioVersion v) {
+        return new BlendVersionView(v.getOrderNo(), v.getVersionNo(), v.getTargetRatioPct(),
+                v.getSource(), v.getRequestId(), v.getCreatedAt());
+    }
+
+    private BlendReadingView toReadingView(BlendReading r) {
+        return new BlendReadingView(r.getOrderNo(), r.getVersionNo(), r.getSampledAt(),
+                r.getActualRatioPct(), r.getDeviationPct(), r.isOutOfTolerance());
     }
 }

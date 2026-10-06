@@ -54,6 +54,22 @@ public final class TransitionRules {
                 .divide(BigDecimal.valueOf(60), 3, RoundingMode.HALF_UP);
     }
 
+    /** 掺配比例恰在合成允许区间边界合法：min ≤ ratio ≤ max。 */
+    public static boolean withinBlendInterval(BigDecimal ratioPct) {
+        return withinWindow(ratioPct, QualityThresholds.BLEND_RATIO_MIN_PCT,
+                QualityThresholds.BLEND_RATIO_MAX_PCT);
+    }
+
+    /** 掺配偏离 = |实测-目标|，保留 3 位小数，单位 百分点。 */
+    public static BigDecimal blendDeviationPct(BigDecimal actualRatioPct, BigDecimal targetRatioPct) {
+        return actualRatioPct.subtract(targetRatioPct).abs().setScale(3, RoundingMode.HALF_UP);
+    }
+
+    /** 偏离恰 2% 合格；超过 2% 判超差。 */
+    public static boolean isBlendOutOfTolerance(BigDecimal deviationPct) {
+        return deviationPct.compareTo(QualityThresholds.BLEND_DEVIATION_TOLERANCE_PCT) > 0;
+    }
+
     /**
      * 合成正品门槛（恰达边界合格）：灰分 ≤18%，水分 ∈ [4%,8%]，
      * 抗张指数 ≥45 Nm/g，定量与标称克重偏差 ≤3%。

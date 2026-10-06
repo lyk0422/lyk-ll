@@ -32,7 +32,11 @@ CREATE TABLE IF NOT EXISTS transition_order (
     machine_speed_m_min    DECIMAL(8,2) NULL COMMENT '执行车速，单位 m/min，须落在新品种工艺窗口内（含边界）',
     stock_consistency_pct  DECIMAL(6,3) NULL COMMENT '执行上料浓度，单位 %，须落在新品种工艺窗口内（含边界）',
     transition_length_m    DECIMAL(12,3) NULL COMMENT '过渡料长度=车速*切换时间/60，单位 m',
-    status                 VARCHAR(24)  NOT NULL COMMENT '状态：APPLIED/DECIDED/EXECUTED/DISPOSED/COMPLETED/ARCHIVED',
+    current_blend_version  INT          NULL COMMENT '当前生效的回抄浆掺配比例版本号，NULL=未携带比例维度',
+    consecutive_out_of_tolerance INT    NOT NULL DEFAULT 0 COMMENT '连续超差（偏离>±2%）采样点数，复核恢复或比例调整后清零',
+    paused_at              TIMESTAMP    NULL COMMENT '掺配失控暂停转人工时间，NULL=未暂停',
+    resumed_at             TIMESTAMP    NULL COMMENT '最近一次复核确认恢复时间，NULL=从未恢复',
+    status                 VARCHAR(24)  NOT NULL COMMENT '状态：APPLIED/DECIDED/EXECUTED/PAUSED/DISPOSED/COMPLETED/ARCHIVED',
     applied_request_id     VARCHAR(64)  NULL COMMENT '申请幂等 requestId',
     applied_at             TIMESTAMP    NOT NULL COMMENT '申请时间',
     decided_at             TIMESTAMP    NULL COMMENT '方式判定时间，NULL=未判定',
@@ -109,10 +113,48 @@ CREATE TABLE IF NOT EXISTS roll_verdict_event (
     event_time  TIMESTAMP   NOT NULL COMMENT '事件时间'
 );
 
+-- 回抄浆掺配比例版本链：与改品种单号绑定留档，历史订单可按版本复算
+CREATE TABLE IF NOT EXISTS blend_ratio_version (
+    id               BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    order_no         VARCHAR(40)  NOT NULL COMMENT '改品种单号',
+    version_no       INT          NOT NULL COMMENT '比例版本号，单内自增从 1 开始',
+    target_ratio_pct DECIMAL(6,3) NOT NULL COMMENT '目标回抄浆掺配比例，单位 %，须在合成允许区间内（含边界）',
+    source           VARCHAR(8)   NOT NULL COMMENT '来源：APPLY=申请携带，ADJUST=执行中调整',
+    request_id       VARCHAR(64)  NOT NULL COMMENT '产生该版本的幂等 requestId',
+    created_at       TIMESTAMP    NOT NULL COMMENT '版本登记时间；同一订单同一来源同时刻只允许一次',
+    CONSTRAINT uk_blend_version_no UNIQUE (order_no, version_no),
+    CONSTRAINT uk_blend_source_time UNIQUE (order_no, source, created_at)
+);
+
+-- 实际掺配读数：按订单与采样时刻去重；偏离目标超过 ±2%（恰 2% 合格）记超差
+CREATE TABLE IF NOT EXISTS blend_reading (
+    id               BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    order_no         VARCHAR(40)  NOT NULL COMMENT '改品种单号',
+    version_no       INT          NOT NULL COMMENT '采样时生效的比例版本号',
+    sampled_at       TIMESTAMP    NOT NULL COMMENT '采样时刻，与订单号联合唯一去重',
+    actual_ratio_pct DECIMAL(6,3) NOT NULL COMMENT '实际掺配比例读数，单位 %',
+    deviation_pct    DECIMAL(7,3) NOT NULL COMMENT '偏离目标=|实测-目标|，单位 百分点',
+    out_of_tolerance TINYINT      NOT NULL COMMENT '是否超差：1=偏离超过 ±2%，0=合格（恰 2% 为 0）',
+    request_id       VARCHAR(64)  NOT NULL COMMENT '读数提交幂等 requestId',
+    created_at       TIMESTAMP    NOT NULL COMMENT '登记时间',
+    CONSTRAINT uk_blend_reading_time UNIQUE (order_no, sampled_at)
+);
+
+-- 掺配控制事件：失控暂停转人工与复核恢复全程留痕
+CREATE TABLE IF NOT EXISTS blend_control_event (
+    id          BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    order_no    VARCHAR(40)  NOT NULL COMMENT '改品种单号',
+    event_type  VARCHAR(24)  NOT NULL COMMENT '事件类型：OUT_OF_CONTROL_PAUSE=失控暂停转人工，MANUAL_RESUME=复核确认恢复',
+    request_id  VARCHAR(64)  NULL COMMENT '触发该事件的幂等 requestId，失控暂停由读数触发',
+    reviewer    VARCHAR(64)  NULL COMMENT '复核人，仅复核恢复事件有值',
+    detail      VARCHAR(255) NULL COMMENT '事件说明（合成数据）',
+    event_time  TIMESTAMP    NOT NULL COMMENT '事件时间'
+);
+
 -- 幂等请求记录：指纹覆盖 requestId 与全部业务字段
 CREATE TABLE IF NOT EXISTS idempotent_request (
     request_id   VARCHAR(64) NOT NULL PRIMARY KEY COMMENT '幂等键 requestId',
-    biz_type     VARCHAR(24) NOT NULL COMMENT '业务类型：APPLY_ORDER/SUBMIT_INSPECTION/SUBMIT_REEXAM',
+    biz_type     VARCHAR(24) NOT NULL COMMENT '业务类型：APPLY_ORDER/SUBMIT_INSPECTION/SUBMIT_REEXAM/ADJUST_BLEND_RATIO/SUBMIT_BLEND_READING/RESUME_EXECUTION',
     fingerprint  VARCHAR(64) NOT NULL COMMENT 'SHA-256 指纹，覆盖 requestId 与全部业务字段',
     result_ref   VARCHAR(40) NULL COMMENT '首次结果引用（单号/卷号）',
     result_json  TEXT        NULL COMMENT '首次响应 JSON 原文，重放原样返回',

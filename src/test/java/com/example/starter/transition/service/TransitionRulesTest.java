@@ -95,4 +95,36 @@ class TransitionRulesTest {
                 new BigDecimal("17.000"), new BigDecimal("5.000"),
                 new BigDecimal("45.000"), new BigDecimal("79.32"), nominal77));
     }
+
+    @Test
+    @DisplayName("掺配比例恰在合成允许区间边界（5%/25%）合法，越界拒绝")
+    void blendRatioIntervalBoundariesInclusive() {
+        assertTrue(TransitionRules.withinBlendInterval(new BigDecimal("5.000")), "恰下边界合法");
+        assertTrue(TransitionRules.withinBlendInterval(new BigDecimal("25.000")), "恰上边界合法");
+        assertTrue(TransitionRules.withinBlendInterval(new BigDecimal("15.000")));
+        assertFalse(TransitionRules.withinBlendInterval(new BigDecimal("4.999")));
+        assertFalse(TransitionRules.withinBlendInterval(new BigDecimal("25.001")));
+    }
+
+    @Test
+    @DisplayName("掺配偏离恰 2% 合格，超过 2% 判超差")
+    void blendDeviationBoundaryAtExactlyTwoPercent() {
+        BigDecimal exactTwo = TransitionRules.blendDeviationPct(
+                new BigDecimal("27.000"), new BigDecimal("25.000"));
+        assertEquals(0, new BigDecimal("2.000").compareTo(exactTwo));
+        assertFalse(TransitionRules.isBlendOutOfTolerance(exactTwo), "恰 2% 合格");
+
+        BigDecimal beyond = TransitionRules.blendDeviationPct(
+                new BigDecimal("27.001"), new BigDecimal("25.000"));
+        assertEquals(0, new BigDecimal("2.001").compareTo(beyond));
+        assertTrue(TransitionRules.isBlendOutOfTolerance(beyond), "超过 2% 判超差");
+
+        // 负向偏离按绝对值计算
+        BigDecimal negative = TransitionRules.blendDeviationPct(
+                new BigDecimal("22.900"), new BigDecimal("25.000"));
+        assertEquals(0, new BigDecimal("2.100").compareTo(negative));
+        assertTrue(TransitionRules.isBlendOutOfTolerance(negative));
+        assertFalse(TransitionRules.isBlendOutOfTolerance(
+                TransitionRules.blendDeviationPct(new BigDecimal("25.000"), new BigDecimal("25.000"))));
+    }
 }

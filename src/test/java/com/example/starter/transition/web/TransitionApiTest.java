@@ -140,4 +140,95 @@ class TransitionApiTest extends AbstractIntegrationTest {
         mockMvc.perform(get("/api/transitions/orders/TO-NOT-EXIST"))
                 .andExpect(status().isNotFound());
     }
+
+    @Test
+    @DisplayName("HTTP掺配链路：恰达边界比例申请201→读数恰2%合格→连续3超差暂停→复核恢复→复算")
+    void blendRatioHttpFlow() throws Exception {
+        // 申请携带恰达上边界 25.000% 的掺配比例：201，同事务完成方式判定
+        String applyBody = """
+                {"requestId":"api-blend-1","paperMachine":"PM-WB1","fromGrade":"G-A4-70","toGrade":"G-A4-77","targetBlendRatioPct":25.000}
+                """;
+        String response = mockMvc.perform(post("/api/transitions/orders")
+                        .contentType(MediaType.APPLICATION_JSON).content(applyBody))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.status").value("DECIDED"))
+                .andExpect(jsonPath("$.data.currentBlendVersion").value(1))
+                .andReturn().getResponse().getContentAsString();
+        String orderNo = com.jayway.jsonpath.JsonPath.read(response, "$.data.orderNo");
+
+        // 比例越界申请：400
+        mockMvc.perform(post("/api/transitions/orders")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"requestId":"api-blend-2","paperMachine":"PM-WB2","fromGrade":"G-A4-70","toGrade":"G-A4-77","targetBlendRatioPct":25.001}
+                                """))
+                .andExpect(status().isBadRequest());
+
+        mockMvc.perform(post("/api/transitions/orders/{no}/execute", orderNo)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"machineSpeedMMin":900.000,"stockConsistencyPct":1.000,"switchTimeSec":60}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("EXECUTED"));
+
+        // 恰 2% 偏离合格
+        mockMvc.perform(post("/api/transitions/blend-readings")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"requestId":"api-rd-1","orderNo":"%s","sampledAt":"2026-09-25T12:00:00","actualRatioPct":27.000}
+                                """.formatted(orderNo)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.outOfTolerance").value(false))
+                .andExpect(jsonPath("$.data.deviationPct").value(2.000));
+
+        // 同一订单同一采样时刻去重：409
+        mockMvc.perform(post("/api/transitions/blend-readings")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"requestId":"api-rd-2","orderNo":"%s","sampledAt":"2026-09-25T12:00:00","actualRatioPct":26.000}
+                                """.formatted(orderNo)))
+                .andExpect(status().isConflict());
+
+        // 连续 3 个超差点 → 失控暂停转人工
+        for (int i = 1; i <= 3; i++) {
+            mockMvc.perform(post("/api/transitions/blend-readings")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("""
+                                    {"requestId":"api-rd-x%d","orderNo":"%s","sampledAt":"2026-09-25T12:0%d:00","actualRatioPct":28.000}
+                                    """.formatted(i, orderNo, i)))
+                    .andExpect(status().isCreated());
+        }
+        mockMvc.perform(get("/api/transitions/orders/{no}", orderNo))
+                .andExpect(jsonPath("$.status").value("PAUSED"))
+                .andExpect(jsonPath("$.consecutiveOutOfTolerance").value(3));
+
+        // 未经复核确认恢复：400；复核确认恢复：200 回到 EXECUTED
+        mockMvc.perform(post("/api/transitions/orders/{no}/resume", orderNo)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"requestId":"api-rs-1","reviewedBy":"checker-1","reviewConfirmed":false}
+                                """))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(post("/api/transitions/orders/{no}/resume", orderNo)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"requestId":"api-rs-2","reviewedBy":"checker-1","reviewConfirmed":true}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("EXECUTED"))
+                .andExpect(jsonPath("$.data.consecutiveOutOfTolerance").value(0));
+
+        // 版本链与掺配轨迹复算
+        mockMvc.perform(get("/api/transitions/orders/{no}/blend-versions", orderNo))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0].targetRatioPct").value(25.000));
+        mockMvc.perform(get("/api/transitions/orders/{no}/blend-recompute", orderNo))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.versions", hasSize(1)))
+                .andExpect(jsonPath("$.readings", hasSize(4)))
+                .andExpect(jsonPath("$.readings[0].outOfTolerance").value(false))
+                .andExpect(jsonPath("$.readings[1].outOfTolerance").value(true));
+    }
 }

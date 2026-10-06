@@ -33,6 +33,14 @@ public class TransitionOrder {
     private BigDecimal stockConsistencyPct;
     /** 过渡料长度 = 车速(m/min) * 切换时间(秒) / 60，单位 m。 */
     private BigDecimal transitionLengthM;
+    /** 当前生效的回抄浆掺配比例版本号；未携带比例维度为 null。 */
+    private Integer currentBlendVersion;
+    /** 连续超差（偏离>±2%）采样点数，复核恢复或比例调整后清零。 */
+    private int consecutiveOutOfTolerance;
+    /** 失控暂停转人工时间；未暂停为 null。 */
+    private LocalDateTime pausedAt;
+    /** 最近一次复核确认恢复时间；从未恢复为 null。 */
+    private LocalDateTime resumedAt;
     private String status;
     private String appliedRequestId;
     private LocalDateTime appliedAt;
@@ -184,6 +192,38 @@ public class TransitionOrder {
 
     public void setStatus(String status) {
         this.status = status;
+    }
+
+    public Integer getCurrentBlendVersion() {
+        return currentBlendVersion;
+    }
+
+    public void setCurrentBlendVersion(Integer currentBlendVersion) {
+        this.currentBlendVersion = currentBlendVersion;
+    }
+
+    public int getConsecutiveOutOfTolerance() {
+        return consecutiveOutOfTolerance;
+    }
+
+    public void setConsecutiveOutOfTolerance(int consecutiveOutOfTolerance) {
+        this.consecutiveOutOfTolerance = consecutiveOutOfTolerance;
+    }
+
+    public LocalDateTime getPausedAt() {
+        return pausedAt;
+    }
+
+    public void setPausedAt(LocalDateTime pausedAt) {
+        this.pausedAt = pausedAt;
+    }
+
+    public LocalDateTime getResumedAt() {
+        return resumedAt;
+    }
+
+    public void setResumedAt(LocalDateTime resumedAt) {
+        this.resumedAt = resumedAt;
     }
 
     public String getAppliedRequestId() {
