@@ -155,4 +155,17 @@ public class WeighRecordRepository {
             return null;
         }
     }
+
+    /**
+     * 查询同车牌在时刻窗口 [from, to] 内的现场过磅记录（非现场接入窗口去重锚点）；
+     * 不存在返回 null。
+     */
+    public WeighRecordRow findByPlateWithinWindow(String plateNo, Instant from, Instant to) {
+        List<WeighRecordRow> rows = jdbc.query("""
+                SELECT * FROM weigh_record
+                WHERE plate_no = ? AND weigh_time BETWEEN ? AND ?
+                ORDER BY id LIMIT 1
+                """, MAPPER, plateNo, Timestamp.from(from), Timestamp.from(to));
+        return rows.isEmpty() ? null : rows.get(0);
+    }
 }

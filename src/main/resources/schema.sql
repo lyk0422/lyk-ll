@@ -123,6 +123,54 @@ CREATE TABLE IF NOT EXISTS fine_ledger (
     PRIMARY KEY (id)
 ) COMMENT '罚款台账';
 
+CREATE TABLE IF NOT EXISTS weigh_device (
+    device_code   VARCHAR(32)  NOT NULL COMMENT '称重设备编码',
+    lane_code     VARCHAR(32)  NOT NULL COMMENT '车道编码',
+    station_code  VARCHAR(32)  NOT NULL COMMENT '所属检测站编码',
+    status        VARCHAR(16)  NOT NULL COMMENT '设备状态：NORMAL 正常 / FAULT 故障',
+    calibration_valid_from  TIMESTAMP NOT NULL COMMENT '校准有效期起（UTC，含）',
+    calibration_valid_until TIMESTAMP NOT NULL COMMENT '校准有效期止（UTC，含）；有效期外数据不得进入证据链',
+    PRIMARY KEY (device_code)
+) COMMENT '非现场称重设备状态记录表（合成数据）；含校准有效期';
+
+CREATE TABLE IF NOT EXISTS offsite_weigh_record (
+    id             BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+    request_id     VARCHAR(64)  NOT NULL COMMENT '幂等请求标识',
+    fingerprint    VARCHAR(64)  NOT NULL COMMENT '幂等指纹：requestId 与全部业务字段的 SHA-256',
+    plate_no       VARCHAR(16)  NOT NULL COMMENT '车牌号',
+    lane_code      VARCHAR(32)  NOT NULL COMMENT '车道编码',
+    device_code    VARCHAR(32)  NOT NULL COMMENT '称重设备编码',
+    weigh_time     TIMESTAMP    NOT NULL COMMENT '过磅时刻（UTC）',
+    total_kg       DECIMAL(12,2) NOT NULL COMMENT '实测总重，单位千克',
+    axle_type      VARCHAR(32)  NOT NULL COMMENT '轴型编码',
+    limit_kg       DECIMAL(12,2) NOT NULL COMMENT '判定使用的限值，单位千克',
+    overload_rate  DECIMAL(8,2)  NOT NULL COMMENT '超限率（两位小数，如 0.30 表示 30%）',
+    tier           VARCHAR(16)  NOT NULL COMMENT '分档：NO_OVERLOAD/UNLOAD_RELEASE/FINE_POINTS',
+    image_ref      VARCHAR(64)  NULL COMMENT '合成影像标识；缺失为 NULL（证据链缺项）',
+    evidence_status VARCHAR(16) NOT NULL COMMENT '证据状态：COMPLETE 已入链 / MANUAL_PENDING 缺项转人工 / DUPLICATE 窗口去重 / LATE 结案后迟到',
+    missing_items  VARCHAR(128) NOT NULL COMMENT '证据链缺项（逗号分隔：IMAGE_REF/DEVICE_STATUS/CALIBRATION_EXPIRED）；无缺项为空串',
+    dedup_ref_type VARCHAR(8)   NULL COMMENT '窗口去重保留的首次记录类型：ONSITE 现场 / OFFSITE 非现场；非去重为 NULL',
+    dedup_ref_id   BIGINT       NULL COMMENT '窗口去重保留的首次记录主键；非去重为 NULL',
+    case_id        BIGINT       NULL COMMENT '关联案件主键；未立案为 NULL',
+    decision_id    BIGINT       NULL COMMENT '自动生成的处罚决定主键；未生成为 NULL',
+    created_at     TIMESTAMP    NOT NULL COMMENT '记录创建时间（UTC）',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_offsite_request (request_id)
+) COMMENT '非现场动态称重接入记录表；按车牌与时刻窗口（±5 分钟）与现场记录去重，只保留首次';
+
+CREATE TABLE IF NOT EXISTS offsite_late_event (
+    id             BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+    offsite_record_id BIGINT    NOT NULL COMMENT '非现场接入记录主键',
+    case_id        BIGINT       NOT NULL COMMENT '已结案件主键',
+    plate_no       VARCHAR(16)  NOT NULL COMMENT '车牌号',
+    lane_code      VARCHAR(32)  NOT NULL COMMENT '车道编码',
+    weigh_time     TIMESTAMP    NOT NULL COMMENT '过磅时刻（UTC）',
+    total_kg       DECIMAL(12,2) NOT NULL COMMENT '实测总重，单位千克',
+    note           VARCHAR(256) NOT NULL COMMENT '迟到事件说明',
+    created_at     TIMESTAMP    NOT NULL COMMENT '事件记录时间（UTC）',
+    PRIMARY KEY (id)
+) COMMENT '结案后迟到非现场数据事件表；只记迟到事件，不改已结案件';
+
 CREATE TABLE IF NOT EXISTS late_weigh_event (
     id             BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
     weigh_record_id BIGINT      NOT NULL COMMENT '迟到过磅记录主键',

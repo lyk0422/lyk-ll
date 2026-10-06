@@ -13,12 +13,15 @@ import com.example.starter.weight.api.dto.CaseResponse;
 import com.example.starter.weight.api.dto.CloseCaseRequest;
 import com.example.starter.weight.api.dto.DecisionRequest;
 import com.example.starter.weight.api.dto.DecisionResponse;
+import com.example.starter.weight.api.dto.OffsiteWeighRequest;
+import com.example.starter.weight.api.dto.OffsiteWeighResponse;
 import com.example.starter.weight.api.dto.ReviewApplyRequest;
 import com.example.starter.weight.api.dto.ReviewConcludeRequest;
 import com.example.starter.weight.api.dto.ReviewResponse;
 import com.example.starter.weight.api.dto.WeighRequest;
 import com.example.starter.weight.api.dto.WeighResponse;
 import com.example.starter.weight.service.EnforcementService;
+import com.example.starter.weight.service.OffsiteEnforcementService;
 
 import jakarta.validation.Valid;
 
@@ -30,9 +33,12 @@ import jakarta.validation.Valid;
 public class EnforcementController {
 
     private final EnforcementService enforcementService;
+    private final OffsiteEnforcementService offsiteEnforcementService;
 
-    public EnforcementController(EnforcementService enforcementService) {
+    public EnforcementController(EnforcementService enforcementService,
+                                 OffsiteEnforcementService offsiteEnforcementService) {
         this.enforcementService = enforcementService;
+        this.offsiteEnforcementService = offsiteEnforcementService;
     }
 
     /**
@@ -41,6 +47,15 @@ public class EnforcementController {
     @PostMapping("/weighs")
     public WeighResponse submitWeigh(@Valid @RequestBody WeighRequest request) {
         return enforcementService.submitWeigh(request);
+    }
+
+    /**
+     * 非现场动态称重接入：按车道与过磅时刻接入，窗口去重、证据链校验、
+     * 证据齐全时自动生成处罚决定，结案后迟到只记迟到事件。
+     */
+    @PostMapping("/offsite/weighs")
+    public OffsiteWeighResponse ingestOffsite(@Valid @RequestBody OffsiteWeighRequest request) {
+        return offsiteEnforcementService.ingest(request);
     }
 
     /**

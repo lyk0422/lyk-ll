@@ -66,6 +66,17 @@ public class DecisionRepository {
     }
 
     /**
+     * 按主键查询（不加锁）；不存在返回 null。
+     */
+    public DecisionRow findById(long id) {
+        try {
+            return jdbc.queryForObject("SELECT * FROM decision_doc WHERE id = ?", MAPPER, id);
+        } catch (EmptyResultDataAccessException e) {
+            return null;
+        }
+    }
+
+    /**
      * 查询案件下当前生效的处罚决定（ACTIVE）；不存在返回 null。
      */
     public DecisionRow findActiveByCaseId(long caseId) {

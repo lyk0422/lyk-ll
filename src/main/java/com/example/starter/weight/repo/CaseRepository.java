@@ -116,6 +116,18 @@ public class CaseRepository {
         return jdbc.query("SELECT * FROM enforcement_case ORDER BY id", MAPPER);
     }
 
+    /**
+     * 查询同车牌同检测站在时刻窗口 [from, to] 内的案件（非现场接入迟到判定用）。
+     */
+    public List<CaseRow> findByPlateStationWithinWindow(String plateNo, String stationCode,
+                                                        Instant from, Instant to) {
+        return jdbc.query("""
+                SELECT * FROM enforcement_case
+                WHERE plate_no = ? AND station_code = ? AND weigh_time BETWEEN ? AND ?
+                ORDER BY id
+                """, MAPPER, plateNo, stationCode, Timestamp.from(from), Timestamp.from(to));
+    }
+
     private static Instant toInstant(Timestamp ts) {
         return ts == null ? null : ts.toInstant();
     }

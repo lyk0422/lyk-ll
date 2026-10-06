@@ -235,13 +235,48 @@ public class EnforcementService {
             return toDecisionResponse(raced, true);
         }
 
+        appendPenaltyLedger(req.plateNo(), caseRow.id(), id, points, fineAmount, now);
+        return toDecisionResponse(decisionRepository.findByRequestId(req.requestId()), false);
+    }
+
+    /**
+     * 依据权威过磅记录生成处罚决定文书并登记罚款/记分台账（共用处罚语义）。
+     * 供现场处罚决定与非现场证据链齐全后的自动生成共用；调用方负责幂等与案件状态校验。
+     *
+     * @return 生成的文书主键
+     */
+    long createDecisionForCase(CaseRow caseRow, WeighRecordRow authoritative, String plateNo,
+                               String requestId, String fingerprint, Instant now) {
+        DecisionTier tier = DecisionTier.valueOf(authoritative.tier());
+        DocType docType = switch (tier) {
+            case FINE_POINTS -> DocType.PENALTY;
+            case UNLOAD_RELEASE -> DocType.UNLOAD_RELEASE;
+            case NO_OVERLOAD -> DocType.NO_ACTION;
+        };
+        BigDecimal fineAmount = BigDecimal.ZERO.setScale(2);
+        int points = 0;
+        if (tier == DecisionTier.FINE_POINTS) {
+            fineAmount = OverloadRules.FINE_AMOUNT;
+            points = OverloadRules.FINE_POINTS;
+        }
+        String docNo = sequenceRepository.nextDocNo();
+        DecisionRow row = new DecisionRow(
+                null, requestId, fingerprint, docNo, caseRow.id(), docType.name(), tier.name(),
+                authoritative.totalKg(), authoritative.limitKg(), authoritative.overloadRate(),
+                fineAmount, points, DecisionStatus.ACTIVE.name(), now, null, now);
+        long id = decisionRepository.insert(row);
+        appendPenaltyLedger(plateNo, caseRow.id(), id, points, fineAmount, now);
+        return id;
+    }
+
+    private void appendPenaltyLedger(String plateNo, long caseId, long decisionId,
+                                     int points, BigDecimal fineAmount, Instant now) {
         if (points > 0) {
-            ledgerRepository.appendPoints(req.plateNo(), caseRow.id(), id, points, REASON_PENALTY, now);
+            ledgerRepository.appendPoints(plateNo, caseId, decisionId, points, REASON_PENALTY, now);
         }
         if (fineAmount.signum() > 0) {
-            ledgerRepository.appendFine(req.plateNo(), caseRow.id(), id, fineAmount, REASON_PENALTY, now);
+            ledgerRepository.appendFine(plateNo, caseId, decisionId, fineAmount, REASON_PENALTY, now);
         }
-        return toDecisionResponse(decisionRepository.findByRequestId(req.requestId()), false);
     }
 
     /**
@@ -408,7 +443,7 @@ public class EnforcementService {
 
     // ---- 内部方法 ----
 
-    private CaseRow createCase(String plateNo, String stationCode, Instant weighTime, Instant now) {
+    CaseRow createCase(String plateNo, String stationCode, Instant weighTime, Instant now) {
         String caseNo = sequenceRepository.nextCaseNo();
         CaseRow row = new CaseRow(null, caseNo, plateNo, stationCode, weighTime,
                 CaseStatus.OPEN.name(), null, null, null, now);
@@ -427,7 +462,7 @@ public class EnforcementService {
     /**
      * 判定非迟到记录角色：静态复检优先；静态已在案时后到动态降级保留。
      */
-    private String resolveLiveRole(String plateNo, String stationCode, Instant weighTime, WeighMode mode) {
+    String resolveLiveRole(String plateNo, String stationCode, Instant weighTime, WeighMode mode) {
         if (mode == WeighMode.STATIC) {
             return RecordRole.AUTHORITATIVE.name();
         }
