@@ -82,6 +82,34 @@ CREATE TABLE IF NOT EXISTS red_flush_confirmation (
     PRIMARY KEY (id)
 );
 
+CREATE TABLE IF NOT EXISTS difference_order (
+    id              BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+    difference_no   VARCHAR(64)  NOT NULL COMMENT '差异单编号，全局唯一',
+    blue_invoice_id BIGINT       NOT NULL COMMENT '所属蓝票ID',
+    blue_invoice_no VARCHAR(64)  NOT NULL COMMENT '所属蓝票号码',
+    blue_line_id    BIGINT       NOT NULL COMMENT '争议蓝票行ID',
+    line_no         INT          NOT NULL COMMENT '争议蓝票行号',
+    claimed_amount  DECIMAL(19,2) NOT NULL COMMENT '购方主张金额（购方认为该行应为的金额），单位元',
+    evidence_ref    VARCHAR(128) NOT NULL COMMENT '合成凭据标识（收货记录等，仅合成数据）',
+    status          VARCHAR(24)  NOT NULL COMMENT '状态：PENDING待销方答复/CONFIRMED双方已确认/REJECTED已驳回（解除行暂停但保留记录）/ESCALATED已升级人工/CONFLICT_REJECTED与红冲竞态冲突拒绝',
+    red_request_no  VARCHAR(64)  NULL COMMENT '双方确认后按原红字信息表流程创建的申请编号；未创建为NULL',
+    submitted_at    TIMESTAMP    NOT NULL COMMENT '提交时间（UTC），用于72小时升级判定',
+    responded_at    TIMESTAMP    NULL COMMENT '销方答复时间（UTC）；未答复为NULL',
+    created_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最近更新时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_difference_no (difference_no)
+);
+
+CREATE TABLE IF NOT EXISTS difference_audit (
+    id            BIGINT      NOT NULL AUTO_INCREMENT COMMENT '主键',
+    difference_id BIGINT      NOT NULL COMMENT '所属差异单ID',
+    action        VARCHAR(24) NOT NULL COMMENT '动作：SUBMIT登记/CONFIRM销方确认/REJECT销方驳回/ESCALATE升级人工/CONFLICT_REJECT竞态冲突拒绝',
+    detail        VARCHAR(256) NULL COMMENT '动作说明；无补充为NULL',
+    created_at    TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录时间',
+    PRIMARY KEY (id)
+);
+
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id      VARCHAR(64)  NOT NULL COMMENT '幂等键，调用方提供',
     endpoint        VARCHAR(64)  NOT NULL COMMENT '业务端点标识',

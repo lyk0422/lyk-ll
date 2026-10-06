@@ -22,6 +22,8 @@ import org.springframework.transaction.support.TransactionTemplate;
  * 累计红冲金额不得超过可红冲余额，恰红至余额为零合法；已全额红冲蓝票为终态，
  * 进一步红冲返回幂等结果不产生新红票；红字信息表须经购销双方在同一事务内
  * 先后确认方可开具红票，单方确认不生效，意见不一致挂起；红票确认后额度同事务恢复。
+ * 购方差异单未结（PENDING/ESCALATED）时只暂停对应行的新增红冲，无争议行及
+ * 无差异蓝票的全额红冲沿用原规则，不新增一律挂起的门槛。
  */
 @Service
 public class RedFlushService {
@@ -80,9 +82,15 @@ public class RedFlushService {
         }
         BigDecimal pendingTotal = pendingAmount(blue.id());
         BigDecimal remainingForNew = remaining.subtract(pendingTotal);
+        // 未结差异（PENDING/ESCALATED）只暂停对应行的新增红冲；无争议行及无差异的全额红冲沿用原规则
+        java.util.Set<Integer> disputedLines = disputedLineNos(blue.id());
         BigDecimal amount;
         List<RedLineRequest> lines = List.of();
         if ("FULL".equals(request.flushType())) {
+            if (!disputedLines.isEmpty()) {
+                throw ApiException.conflict("LINE_DISPUTED",
+                        "蓝票存在未结差异（行 " + disputedLines + "），全额红冲挂起");
+            }
             if (remainingForNew.compareTo(BigDecimal.ZERO) <= 0) {
                 throw ApiException.conflict("NO_REMAINING_BALANCE", "可红冲余额已被在途申请占满");
             }
@@ -92,6 +100,10 @@ public class RedFlushService {
             Map<Integer, BigDecimal> linePending = pendingLineAmounts(blue.id());
             amount = BigDecimal.ZERO;
             for (RedLineRequest line : request.lines()) {
+                if (disputedLines.contains(line.lineNo())) {
+                    throw ApiException.conflict("LINE_DISPUTED",
+                            "行 " + line.lineNo() + " 存在未结差异，新增红冲挂起");
+                }
                 BigDecimal balance = lineBalances.get(line.lineNo());
                 if (balance == null) {
                     throw ApiException.badRequest("LINE_NOT_FOUND", "蓝票不存在行号: " + line.lineNo());
@@ -371,6 +383,20 @@ public class RedFlushService {
                 blueInvoiceId);
         return pending;
     }
+    /**
+     * 未结差异（PENDING/ESCALATED）涉及的蓝票行号集合。
+     */
+    private java.util.Set<Integer> disputedLineNos(long blueInvoiceId) {
+        java.util.Set<Integer> disputed = new java.util.HashSet<>();
+        jdbc.query(
+                "SELECT DISTINCT line_no FROM difference_order"
+                        + " WHERE blue_invoice_id = ? AND status IN ('PENDING', 'ESCALATED')",
+                (org.springframework.jdbc.core.RowCallbackHandler) rs ->
+                        disputed.add(rs.getInt("line_no")),
+                blueInvoiceId);
+        return disputed;
+    }
+
     private boolean hasBuyerAgree(long requestId) {
         Integer count = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM red_flush_confirmation"
