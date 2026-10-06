@@ -102,6 +102,47 @@ CREATE TABLE IF NOT EXISTS late_actual_event (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 轧辊寿命台账：status 取值 IN_SERVICE/BANNED（累计里程达周期上限即禁排）；
+-- total_km 为累计实绩里程（公里，不随换班上机重置）；cycle_limit_km 为周期上限（公里）；
+-- coils_since_mount 为本次上机后已轧卷数（前 5 卷为首用烫辊位）；
+-- mounted_at 为当前上机时刻（Asia/Shanghai）；frozen_at 非空表示日冻结时刻，
+-- 冻结后迟到实绩只记迟到事件，不改已冻结里程。
+CREATE TABLE IF NOT EXISTS roll_life (
+    roll_no VARCHAR(32) NOT NULL PRIMARY KEY,
+    status VARCHAR(16) NOT NULL,
+    total_km DECIMAL(10,3) NOT NULL DEFAULT 0,
+    cycle_limit_km DECIMAL(10,3) NOT NULL,
+    coils_since_mount INT NOT NULL DEFAULT 0,
+    mounted_at TIMESTAMP NOT NULL,
+    frozen_at TIMESTAMP NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 换辊实绩：按“轧辊号＋实绩时刻”唯一去重，乱序回传按 recorded_at 归位；
+-- first_use=1 表示新辊上机后前 5 卷的首用标记；rolling_km 为该卷实绩里程（公里）。
+CREATE TABLE IF NOT EXISTS roll_change_actual (
+    id BIGINT NOT NULL PRIMARY KEY,
+    roll_no VARCHAR(32) NOT NULL,
+    rolling_km DECIMAL(10,3) NOT NULL,
+    first_use TINYINT NOT NULL DEFAULT 0,
+    recorded_at TIMESTAMP NOT NULL,
+    request_id VARCHAR(64) NOT NULL,
+    fingerprint VARCHAR(64) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_roll_actual_roll_time ON roll_change_actual(roll_no, recorded_at);
+
+-- 轧辊迟到实绩事件：日冻结后回传的实绩只登记事件，不改已冻结里程与禁排结论。
+CREATE TABLE IF NOT EXISTS roll_late_event (
+    id BIGINT NOT NULL PRIMARY KEY,
+    roll_no VARCHAR(32) NOT NULL,
+    request_id VARCHAR(64) NOT NULL,
+    rolling_km DECIMAL(10,3) NOT NULL,
+    recorded_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- 幂等记录：fingerprint 覆盖 requestId 与全部业务字段；response_body 保存首次响应 JSON。
 CREATE TABLE IF NOT EXISTS idempotent_record (
     request_id VARCHAR(64) NOT NULL PRIMARY KEY,

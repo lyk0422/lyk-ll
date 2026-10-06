@@ -33,6 +33,9 @@ public abstract class AbstractRollingIntegrationTest {
 
     @BeforeEach
     void cleanTables() {
+        jdbc.update("DELETE FROM roll_late_event");
+        jdbc.update("DELETE FROM roll_change_actual");
+        jdbc.update("DELETE FROM roll_life");
         jdbc.update("DELETE FROM late_actual_event");
         jdbc.update("DELETE FROM actual_result");
         jdbc.update("DELETE FROM roll_change_window");
