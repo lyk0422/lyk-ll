@@ -2,6 +2,7 @@ package com.example.starter.rolling;
 
 import com.example.starter.rolling.api.dto.ActualResultRequest;
 import com.example.starter.rolling.api.dto.IssueRequest;
+import com.example.starter.rolling.api.dto.RollActualRequest;
 import com.example.starter.rolling.api.dto.RollWindowRequest;
 import com.example.starter.rolling.api.dto.ScheduleCreateRequest;
 import com.example.starter.rolling.api.dto.ScheduleItemRequest;
@@ -33,6 +34,9 @@ public abstract class AbstractRollingIntegrationTest {
 
     @BeforeEach
     void cleanTables() {
+        jdbc.update("DELETE FROM roll_late_event");
+        jdbc.update("DELETE FROM roll_change_actual");
+        jdbc.update("DELETE FROM roll_ledger");
         jdbc.update("DELETE FROM late_actual_event");
         jdbc.update("DELETE FROM actual_result");
         jdbc.update("DELETE FROM roll_change_window");
@@ -95,5 +99,26 @@ public abstract class AbstractRollingIntegrationTest {
 
     protected List<ScheduleItemRequest> items(ScheduleItemRequest... items) {
         return new ArrayList<>(List.of(items));
+    }
+
+    /**
+     * 造一条合成轧辊台账（周期上限公里 / 累计公里 / 已轧卷数 / 在机 / 禁排）。
+     */
+    protected void seedRoll(String rollNo, String limitKm, String totalKm, int coilsUsed,
+                            boolean onMachine, boolean banned) {
+        jdbc.update("""
+                INSERT INTO roll_ledger (roll_no, cycle_limit_km, total_km, coils_used, on_machine, banned)
+                VALUES (?,?,?,?,?,?)
+                """, rollNo, new BigDecimal(limitKm), new BigDecimal(totalKm), coilsUsed,
+                onMachine, banned);
+    }
+
+    protected RollActualRequest rollActual(String requestId, String rollNo, String km,
+                                           LocalDateTime recordedAt) {
+        return new RollActualRequest(requestId, rollNo, new BigDecimal(km), recordedAt);
+    }
+
+    protected RollActualRequest rollActual(String requestId, String rollNo, String km, int hourOffset) {
+        return rollActual(requestId, rollNo, km, T0.plusHours(hourOffset));
     }
 }
