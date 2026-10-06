@@ -4,13 +4,20 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    driver-class-name: org.h2.Driver
+    url: ${DB_URL:jdbc:h2:mem:local_demo;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+      data-locations: classpath:data.sql
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -31,3 +38,9 @@ management:
   endpoint:
     health:
       show-details: never
+
+app:
+  expiry:
+    # 是否启用资格到期自动巡检（停运、改派、通知在同一事务内生成）；测试环境关闭以避免干扰
+    scheduler-enabled: true
+    scheduler-fixed-delay-ms: 60000
