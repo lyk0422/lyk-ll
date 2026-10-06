@@ -13,26 +13,32 @@ import com.example.starter.weight.api.dto.CaseResponse;
 import com.example.starter.weight.api.dto.CloseCaseRequest;
 import com.example.starter.weight.api.dto.DecisionRequest;
 import com.example.starter.weight.api.dto.DecisionResponse;
+import com.example.starter.weight.api.dto.OffsiteWeighRequest;
+import com.example.starter.weight.api.dto.OffsiteWeighResponse;
 import com.example.starter.weight.api.dto.ReviewApplyRequest;
 import com.example.starter.weight.api.dto.ReviewConcludeRequest;
 import com.example.starter.weight.api.dto.ReviewResponse;
 import com.example.starter.weight.api.dto.WeighRequest;
 import com.example.starter.weight.api.dto.WeighResponse;
 import com.example.starter.weight.service.EnforcementService;
+import com.example.starter.weight.service.OffsiteEnforcementService;
 
 import jakarta.validation.Valid;
 
 /**
- * 治超执法 REST 接口：过磅、处罚决定、复检申诉与结论、结案、案件文书链查询。
+ * 治超执法 REST 接口：过磅、处罚决定、复检申诉与结论、结案、案件文书链查询、非现场取证接入。
  */
 @RestController
 @RequestMapping("/api/enforcement")
 public class EnforcementController {
 
     private final EnforcementService enforcementService;
+    private final OffsiteEnforcementService offsiteEnforcementService;
 
-    public EnforcementController(EnforcementService enforcementService) {
+    public EnforcementController(EnforcementService enforcementService,
+                                 OffsiteEnforcementService offsiteEnforcementService) {
         this.enforcementService = enforcementService;
+        this.offsiteEnforcementService = offsiteEnforcementService;
     }
 
     /**
@@ -82,5 +88,14 @@ public class EnforcementController {
     @GetMapping("/cases/{caseNo}")
     public CaseResponse getCase(@PathVariable String caseNo) {
         return enforcementService.getCase(caseNo);
+    }
+
+    /**
+     * 非现场动态称重数据接入（按车道与过磅时刻；幂等；
+     * 证据链完整自动生成处罚决定，缺项转人工待补，结案后迟到只记事件）。
+     */
+    @PostMapping("/offsite/weighs")
+    public OffsiteWeighResponse ingestOffsite(@Valid @RequestBody OffsiteWeighRequest request) {
+        return offsiteEnforcementService.ingest(request);
     }
 }

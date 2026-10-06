@@ -203,26 +203,10 @@ public class EnforcementService {
         }
 
         DecisionTier tier = DecisionTier.valueOf(authoritative.tier());
-        DocType docType = switch (tier) {
-            case FINE_POINTS -> DocType.PENALTY;
-            case UNLOAD_RELEASE -> DocType.UNLOAD_RELEASE;
-            case NO_OVERLOAD -> DocType.NO_ACTION;
-        };
-        BigDecimal fineAmount = BigDecimal.ZERO.setScale(2);
-        int points = 0;
-        if (tier == DecisionTier.FINE_POINTS) {
-            fineAmount = OverloadRules.FINE_AMOUNT;
-            points = OverloadRules.FINE_POINTS;
-        }
-
-        String docNo = sequenceRepository.nextDocNo();
-        DecisionRow row = new DecisionRow(
-                null, req.requestId(), fingerprint, docNo, caseRow.id(), docType.name(), tier.name(),
-                authoritative.totalKg(), authoritative.limitKg(), authoritative.overloadRate(),
-                fineAmount, points, DecisionStatus.ACTIVE.name(), now, null, now);
-        long id;
         try {
-            id = decisionRepository.insert(row);
+            createDecisionDoc(caseRow.id(), req.plateNo(), tier, authoritative.totalKg(),
+                    authoritative.limitKg(), authoritative.overloadRate(),
+                    req.requestId(), fingerprint, now);
         } catch (DuplicateKeyException e) {
             DecisionRow raced = decisionRepository.findByRequestId(req.requestId());
             if (raced == null) {
@@ -234,14 +218,41 @@ public class EnforcementService {
             }
             return toDecisionResponse(raced, true);
         }
+        return toDecisionResponse(decisionRepository.findByRequestId(req.requestId()), false);
+    }
 
+    /**
+     * 生成处罚/处理文书并按分档入记分与罚款台账（现场决定与非现场自动生成共用，语义一致）。
+     *
+     * @return 已持久化的文书行
+     */
+    DecisionRow createDecisionDoc(long caseId, String plateNo, DecisionTier tier,
+                                  BigDecimal totalKg, BigDecimal limitKg, BigDecimal overloadRate,
+                                  String requestId, String fingerprint, Instant now) {
+        DocType docType = switch (tier) {
+            case FINE_POINTS -> DocType.PENALTY;
+            case UNLOAD_RELEASE -> DocType.UNLOAD_RELEASE;
+            case NO_OVERLOAD -> DocType.NO_ACTION;
+        };
+        BigDecimal fineAmount = BigDecimal.ZERO.setScale(2);
+        int points = 0;
+        if (tier == DecisionTier.FINE_POINTS) {
+            fineAmount = OverloadRules.FINE_AMOUNT;
+            points = OverloadRules.FINE_POINTS;
+        }
+        String docNo = sequenceRepository.nextDocNo();
+        DecisionRow row = new DecisionRow(
+                null, requestId, fingerprint, docNo, caseId, docType.name(), tier.name(),
+                totalKg, limitKg, overloadRate, fineAmount, points,
+                DecisionStatus.ACTIVE.name(), now, null, now);
+        long id = decisionRepository.insert(row);
         if (points > 0) {
-            ledgerRepository.appendPoints(req.plateNo(), caseRow.id(), id, points, REASON_PENALTY, now);
+            ledgerRepository.appendPoints(plateNo, caseId, id, points, REASON_PENALTY, now);
         }
         if (fineAmount.signum() > 0) {
-            ledgerRepository.appendFine(req.plateNo(), caseRow.id(), id, fineAmount, REASON_PENALTY, now);
+            ledgerRepository.appendFine(plateNo, caseId, id, fineAmount, REASON_PENALTY, now);
         }
-        return toDecisionResponse(decisionRepository.findByRequestId(req.requestId()), false);
+        return decisionRepository.findById(id);
     }
 
     /**
@@ -408,7 +419,7 @@ public class EnforcementService {
 
     // ---- 内部方法 ----
 
-    private CaseRow createCase(String plateNo, String stationCode, Instant weighTime, Instant now) {
+    CaseRow createCase(String plateNo, String stationCode, Instant weighTime, Instant now) {
         String caseNo = sequenceRepository.nextCaseNo();
         CaseRow row = new CaseRow(null, caseNo, plateNo, stationCode, weighTime,
                 CaseStatus.OPEN.name(), null, null, null, now);

@@ -155,4 +155,20 @@ public class WeighRecordRepository {
             return null;
         }
     }
+
+    /**
+     * 查询同车牌在时刻窗口 [from, to] 内最早的现场过磅记录（非现场接入去重用）；不存在返回 null。
+     */
+    public WeighRecordRow findFirstByPlateWindow(String plateNo, Instant from, Instant to) {
+        try {
+            return jdbc.queryForObject("""
+                    SELECT * FROM weigh_record
+                    WHERE plate_no = ? AND weigh_time BETWEEN ? AND ?
+                    ORDER BY weigh_time, id
+                    LIMIT 1
+                    """, MAPPER, plateNo, Timestamp.from(from), Timestamp.from(to));
+        } catch (EmptyResultDataAccessException e) {
+            return null;
+        }
+    }
 }

@@ -119,4 +119,53 @@ class EnforcementWebIntegrationTest extends BaseIntegrationTest {
                 .andExpect(jsonPath("$.status").value("CLOSED"))
                 .andExpect(jsonPath("$.decisions[0].docType").value("PENALTY"));
     }
+
+    @Test
+    @DisplayName("非现场接入主流程：证据齐全自动生成 PENALTY，同键异参 409")
+    void offsiteIngestMainFlowAndConflict() throws Exception {
+        String body = """
+                {"requestId":"%s","plateNo":"沪A10001","laneNo":"L01",
+                 "weighTime":"2026-09-01T02:00:00Z","totalKg":40300.00,
+                 "imageRef":"IMG-SYN-0001","deviceId":"DEV-L01"}
+                """;
+        mockMvc.perform(post("/api/enforcement/offsite/weighs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body.formatted("OS-WEB-1")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("AUTO_DECIDED"))
+                .andExpect(jsonPath("$.decision.docType").value("PENALTY"))
+                .andExpect(jsonPath("$.decision.fineAmount").value(2000.00))
+                .andExpect(jsonPath("$.decision.points").value(3))
+                .andExpect(jsonPath("$.caseNo").isString());
+
+        // 同键同参重放返回首次结果
+        mockMvc.perform(post("/api/enforcement/offsite/weighs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body.formatted("OS-WEB-1")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.replayed").value(true));
+
+        // 同键异参返回 409
+        mockMvc.perform(post("/api/enforcement/offsite/weighs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body.formatted("OS-WEB-1").replace("40300.00", "50000.00")))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("IDEMPOTENT_PARAM_CONFLICT"));
+    }
+
+    @Test
+    @DisplayName("非现场接入缺合成影像标识：转人工待补，不生成处罚决定")
+    void offsiteMissingImageGoesManualPending() throws Exception {
+        String body = """
+                {"requestId":"OS-WEB-2","plateNo":"沪A10001","laneNo":"L01",
+                 "weighTime":"2026-09-01T02:00:00Z","totalKg":40300.00,"deviceId":"DEV-L01"}
+                """;
+        mockMvc.perform(post("/api/enforcement/offsite/weighs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("MANUAL_PENDING"))
+                .andExpect(jsonPath("$.pendingReason").value("MISSING_IMAGE"))
+                .andExpect(jsonPath("$.decision").doesNotExist());
+    }
 }

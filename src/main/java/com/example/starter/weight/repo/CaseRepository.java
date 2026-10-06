@@ -116,6 +116,22 @@ public class CaseRepository {
         return jdbc.query("SELECT * FROM enforcement_case ORDER BY id", MAPPER);
     }
 
+    /**
+     * 查询同车牌在时刻窗口 [from, to] 内的已结案件（非现场迟到数据判定用）；不存在返回 null。
+     */
+    public CaseRow findClosedByPlateWindow(String plateNo, Instant from, Instant to) {
+        try {
+            return jdbc.queryForObject("""
+                    SELECT * FROM enforcement_case
+                    WHERE plate_no = ? AND status = 'CLOSED' AND weigh_time BETWEEN ? AND ?
+                    ORDER BY id
+                    LIMIT 1
+                    """, MAPPER, plateNo, Timestamp.from(from), Timestamp.from(to));
+        } catch (EmptyResultDataAccessException e) {
+            return null;
+        }
+    }
+
     private static Instant toInstant(Timestamp ts) {
         return ts == null ? null : ts.toInstant();
     }

@@ -127,6 +127,17 @@ public class DecisionRepository {
                 Timestamp.from(revokedAt), id);
     }
 
+    /**
+     * 按主键查询（不加锁）；不存在返回 null。
+     */
+    public DecisionRow findById(long id) {
+        try {
+            return jdbc.queryForObject("SELECT * FROM decision_doc WHERE id = ?", MAPPER, id);
+        } catch (EmptyResultDataAccessException e) {
+            return null;
+        }
+    }
+
     private static Instant toInstant(Timestamp ts) {
         return ts == null ? null : ts.toInstant();
     }

@@ -14,3 +14,9 @@ MERGE INTO vehicle (plate_no, axle_type) KEY(plate_no) VALUES
     ('沪A10001', 'AXLE_4'),
     ('沪B20002', 'AXLE_6'),
     ('苏C30003', 'AXLE_2');
+
+-- 非现场称重设备状态记录（合成数据）：DEV-L02 校准已过期，用于验证有效期外数据转人工待补。
+MERGE INTO offsite_device (device_id, lane_no, status, calibrated_from, calibrated_until, recorded_at) KEY(device_id) VALUES
+    ('DEV-L01', 'L01', 'NORMAL', '2026-01-01 00:00:00', '2027-01-01 00:00:00', '2026-01-01 00:00:00'),
+    ('DEV-L02', 'L02', 'NORMAL', '2025-01-01 00:00:00', '2026-01-01 00:00:00', '2025-01-01 00:00:00'),
+    ('DEV-L03', 'L03', 'NORMAL', '2026-01-01 00:00:00', '2027-01-01 00:00:00', '2026-01-01 00:00:00');

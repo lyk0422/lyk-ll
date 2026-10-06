@@ -59,4 +59,14 @@ public class ReferenceRepository {
         AxleLimitRow row = findAxleLimit(axleType);
         return row == null ? null : row.limitKg();
     }
+
+    /**
+     * 按车牌查询车辆档案并加行锁（须在事务内调用），
+     * 用于串行化同车牌的非现场接入，保证时刻窗口去重的并发正确性；不存在返回 null。
+     */
+    public VehicleRow findVehicleForUpdate(String plateNo) {
+        return jdbc.query("SELECT plate_no, axle_type FROM vehicle WHERE plate_no = ? FOR UPDATE",
+                rs -> rs.next() ? new VehicleRow(rs.getString("plate_no"), rs.getString("axle_type")) : null,
+                plateNo);
+    }
 }

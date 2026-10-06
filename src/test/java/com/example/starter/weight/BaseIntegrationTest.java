@@ -29,6 +29,9 @@ public abstract class BaseIntegrationTest {
 
     @BeforeEach
     void resetState() {
+        jdbc.update("DELETE FROM late_offsite_event");
+        jdbc.update("DELETE FROM manual_pending");
+        jdbc.update("DELETE FROM offsite_weigh");
         jdbc.update("DELETE FROM late_weigh_event");
         jdbc.update("DELETE FROM review_request");
         jdbc.update("DELETE FROM points_ledger");

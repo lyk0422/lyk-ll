@@ -123,6 +123,59 @@ CREATE TABLE IF NOT EXISTS fine_ledger (
     PRIMARY KEY (id)
 ) COMMENT '罚款台账';
 
+CREATE TABLE IF NOT EXISTS offsite_device (
+    device_id        VARCHAR(32)  NOT NULL COMMENT '非现场称重设备编号',
+    lane_no          VARCHAR(16)  NOT NULL COMMENT '车道号',
+    status           VARCHAR(16)  NOT NULL COMMENT '设备状态：NORMAL/FAULT',
+    calibrated_from  TIMESTAMP    NOT NULL COMMENT '校准有效期起（UTC，含边界）',
+    calibrated_until TIMESTAMP    NOT NULL COMMENT '校准有效期止（UTC，含边界）',
+    recorded_at      TIMESTAMP    NOT NULL COMMENT '设备状态记录时间（UTC）',
+    PRIMARY KEY (device_id)
+) COMMENT '非现场称重设备状态记录表；校准有效期外数据不得进入证据链';
+
+CREATE TABLE IF NOT EXISTS offsite_weigh (
+    id             BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+    request_id     VARCHAR(64)  NOT NULL COMMENT '幂等请求标识',
+    fingerprint    VARCHAR(64)  NOT NULL COMMENT '幂等指纹：requestId 与全部业务字段的 SHA-256',
+    plate_no       VARCHAR(16)  NOT NULL COMMENT '车牌号',
+    lane_no        VARCHAR(16)  NOT NULL COMMENT '车道号',
+    weigh_time     TIMESTAMP    NOT NULL COMMENT '过磅时刻（UTC）',
+    total_kg       DECIMAL(12,2) NOT NULL COMMENT '实测总重，单位千克',
+    image_ref      VARCHAR(128) NULL COMMENT '合成影像标识；缺失为 NULL（证据链缺项）',
+    device_id      VARCHAR(32)  NOT NULL COMMENT '称重设备编号，关联 offsite_device',
+    status         VARCHAR(16)  NOT NULL COMMENT '接入状态：AUTO_DECIDED 已自动决定 / MANUAL_PENDING 人工待补 / LATE_EVENT 迟到事件',
+    case_id        BIGINT       NULL COMMENT '关联案件主键；人工待补未立案为 NULL',
+    decision_id    BIGINT       NULL COMMENT '自动生成的处罚决定主键；未生成为 NULL',
+    created_at     TIMESTAMP    NOT NULL COMMENT '接入时间（UTC）',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_offsite_request (request_id)
+) COMMENT '非现场动态称重接入表；按车牌+时刻窗口与现场记录去重，窗口内只保留首次';
+
+CREATE TABLE IF NOT EXISTS manual_pending (
+    id               BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+    offsite_weigh_id BIGINT       NOT NULL COMMENT '非现场称重记录主键',
+    plate_no         VARCHAR(16)  NOT NULL COMMENT '车牌号',
+    lane_no          VARCHAR(16)  NOT NULL COMMENT '车道号',
+    weigh_time       TIMESTAMP    NOT NULL COMMENT '过磅时刻（UTC）',
+    reason           VARCHAR(32)  NOT NULL COMMENT '待补原因：MISSING_IMAGE 缺影像 / DEVICE_STATUS_MISSING 缺设备状态 / DEVICE_CAL_EXPIRED 校准有效期外',
+    status           VARCHAR(16)  NOT NULL COMMENT '处理状态：PENDING 待补',
+    created_at       TIMESTAMP    NOT NULL COMMENT '转人工时间（UTC）',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_pending_offsite (offsite_weigh_id)
+) COMMENT '证据链缺项人工待补表；缺项数据不得自动生成处罚决定';
+
+CREATE TABLE IF NOT EXISTS late_offsite_event (
+    id               BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+    offsite_weigh_id BIGINT       NOT NULL COMMENT '非现场称重记录主键',
+    case_id          BIGINT       NOT NULL COMMENT '已结案件主键',
+    plate_no         VARCHAR(16)  NOT NULL COMMENT '车牌号',
+    lane_no          VARCHAR(16)  NOT NULL COMMENT '车道号',
+    weigh_time       TIMESTAMP    NOT NULL COMMENT '过磅时刻（UTC）',
+    note             VARCHAR(256) NOT NULL COMMENT '迟到事件说明',
+    created_at       TIMESTAMP    NOT NULL COMMENT '事件记录时间（UTC）',
+    PRIMARY KEY (id)
+) COMMENT '结案后迟到非现场数据事件表；只记迟到事件，不改已结案件';
+
 CREATE TABLE IF NOT EXISTS late_weigh_event (
     id             BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
     weigh_record_id BIGINT      NOT NULL COMMENT '迟到过磅记录主键',
