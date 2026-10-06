@@ -2,11 +2,13 @@ package com.example.starter;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 
 /**
- * 业务题目工程入口；当前仅提供 Web 服务及数据库健康检查，不包含题目业务实现。
+ * 隧道照明调光工程入口：内嵌 H2（MySQL 兼容模式）自动建表并加载合成数据。
  */
 @SpringBootApplication
+@ConfigurationPropertiesScan
 public class StarterApplication {
 
     /**

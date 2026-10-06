@@ -4,13 +4,18 @@ spring:
   config:
     import: "optional:configtree:/run/secrets/"
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER}
+    url: ${DB_URL:jdbc:h2:mem:tunnel_dimming;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1}
+    username: ${DB_USER:sa}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
     hikari:
       maximum-pool-size: 5
       minimum-idle: 1
       connection-timeout: 10000
       validation-timeout: 3000
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
   jackson:
     time-zone: Asia/Shanghai
   lifecycle:
@@ -31,3 +36,15 @@ management:
   endpoint:
     health:
       show-details: never
+
+# 隧道照明调光业务参数（合成数据）
+dimming:
+  min-level: 0          # 关闭
+  max-level: 5          # 全亮
+  floor-level: 1        # 保底亮度档位
+  accident-level: 5     # 事故模式锁定档位
+  brightness-threshold-lux: 500.0   # 洞外亮度合成阈值，低于立即提升一档，恰等不触发
+  stability-minutes: 10             # 单次调整后稳定时限，恰满允许再调
+  transition-minutes: 2             # 亮度触发提升后的过渡曲线时长，过渡期间禁止下调
+  traffic-window-minutes: 5         # 车流量滚动统计窗口
+  power-per-level-kw: 0.1           # 每档位功率，用于日结能耗复算
