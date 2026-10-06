@@ -14,14 +14,20 @@ import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Repository;
 
+import com.example.starter.hazmat.domain.EscortRole;
+import com.example.starter.hazmat.domain.RelaySegmentStatus;
 import com.example.starter.hazmat.domain.RouteApprovalStatus;
 import com.example.starter.hazmat.domain.ShipmentStatus;
 import com.example.starter.hazmat.domain.WaypointState;
 import com.example.starter.hazmat.po.ApprovalWaypoint;
 import com.example.starter.hazmat.po.Checkin;
 import com.example.starter.hazmat.po.ControlPeriod;
+import com.example.starter.hazmat.po.DisposalRecord;
 import com.example.starter.hazmat.po.GoodsCategory;
 import com.example.starter.hazmat.po.IdempotentRecord;
+import com.example.starter.hazmat.po.NightCurfew;
+import com.example.starter.hazmat.po.RelayCheckin;
+import com.example.starter.hazmat.po.RelaySegment;
 import com.example.starter.hazmat.po.RouteApproval;
 import com.example.starter.hazmat.po.RouteInfo;
 import com.example.starter.hazmat.po.RouteWaypointDef;
@@ -335,5 +341,145 @@ public class HazmatRepository {
     public List<ShipmentEvent> findEvents(long shipmentId) {
         return jdbc.query("SELECT id, shipment_id, event_type, detail, event_time FROM shipment_event WHERE shipment_id = ? ORDER BY id",
                 EVENT_MAPPER, shipmentId);
+    }
+
+    // ---------- 夜间禁行规则 ----------
+
+    private static final RowMapper<NightCurfew> CURFEW_MAPPER = (rs, n) -> new NightCurfew(
+            rs.getLong("id"), rs.getString("route_code"),
+            rs.getTimestamp("curfew_start").toLocalDateTime(),
+            rs.getTimestamp("curfew_end").toLocalDateTime());
+
+    public List<NightCurfew> findNightCurfews(String routeCode) {
+        return jdbc.query("SELECT id, route_code, curfew_start, curfew_end FROM night_curfew WHERE route_code = ? ORDER BY curfew_start",
+                CURFEW_MAPPER, routeCode);
+    }
+
+    // ---------- 运单行锁 ----------
+
+    /** 锁定运单行（FOR UPDATE）：串行化换班完成与禁行冻结的并发终态竞争。 */
+    public void lockShipment(long shipmentId) {
+        jdbc.query("SELECT id FROM shipment WHERE id = ? FOR UPDATE",
+                (rs, n) -> rs.getLong("id"), shipmentId);
+    }
+
+    // ---------- 接力段 ----------
+
+    private static final RowMapper<RelaySegment> SEGMENT_MAPPER = (rs, n) -> new RelaySegment(
+            rs.getLong("id"), rs.getLong("shipment_id"), rs.getLong("approval_id"),
+            rs.getInt("relay_seq"), RelaySegmentStatus.valueOf(rs.getString("status")),
+            rs.getString("out_escort_id"),
+            rs.getTimestamp("out_time") == null ? null : rs.getTimestamp("out_time").toLocalDateTime(),
+            rs.getString("in_escort_id"),
+            rs.getTimestamp("in_time") == null ? null : rs.getTimestamp("in_time").toLocalDateTime(),
+            rs.getTimestamp("created_at").toLocalDateTime(),
+            rs.getTimestamp("completed_at") == null ? null : rs.getTimestamp("completed_at").toLocalDateTime());
+
+    private static final String SEGMENT_COLUMNS =
+            "id, shipment_id, approval_id, relay_seq, status, out_escort_id, out_time, in_escort_id, in_time, created_at, completed_at";
+
+    public long insertRelaySegment(long shipmentId, long approvalId, int relaySeq, LocalDateTime now) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO relay_segment (shipment_id, approval_id, relay_seq, status, out_escort_id, out_time, in_escort_id, in_time, created_at, completed_at) "
+                            + "VALUES (?, ?, ?, 'IN_PROGRESS', NULL, NULL, NULL, NULL, ?, NULL)",
+                    Statement.RETURN_GENERATED_KEYS);
+            ps.setLong(1, shipmentId);
+            ps.setLong(2, approvalId);
+            ps.setInt(3, relaySeq);
+            ps.setTimestamp(4, Timestamp.valueOf(now));
+            return ps;
+        }, keyHolder);
+        return keyHolder.getKey().longValue();
+    }
+
+    public Optional<RelaySegment> findSegment(long shipmentId, long approvalId, int relaySeq) {
+        return jdbc.query("SELECT " + SEGMENT_COLUMNS + " FROM relay_segment WHERE shipment_id = ? AND approval_id = ? AND relay_seq = ?",
+                SEGMENT_MAPPER, shipmentId, approvalId, relaySeq).stream().findFirst();
+    }
+
+    public List<RelaySegment> findSegments(long shipmentId) {
+        return jdbc.query("SELECT " + SEGMENT_COLUMNS + " FROM relay_segment WHERE shipment_id = ? ORDER BY id",
+                SEGMENT_MAPPER, shipmentId);
+    }
+
+    /** 当前进行中接力段（经占用表定位，同一运单同时刻至多一个）。 */
+    public Optional<RelaySegment> findActiveSegment(long shipmentId) {
+        return jdbc.query("SELECT s." + SEGMENT_COLUMNS.replace(", ", ", s.") + " FROM relay_segment s "
+                        + "JOIN shipment_active_relay a ON a.segment_id = s.id WHERE a.shipment_id = ?",
+                SEGMENT_MAPPER, shipmentId).stream().findFirst();
+    }
+
+    /** 换班完成条件更新：仅进行中接力段可完成，返回受影响行数（并发败者为 0）。 */
+    public int completeSegment(long segmentId, String outEscortId, LocalDateTime outTime,
+                               String inEscortId, LocalDateTime inTime, LocalDateTime completedAt) {
+        return jdbc.update("UPDATE relay_segment SET status = 'COMPLETED', out_escort_id = ?, out_time = ?, "
+                        + "in_escort_id = ?, in_time = ?, completed_at = ? WHERE id = ? AND status = 'IN_PROGRESS'",
+                outEscortId, Timestamp.valueOf(outTime), inEscortId, Timestamp.valueOf(inTime),
+                Timestamp.valueOf(completedAt), segmentId);
+    }
+
+    /** 禁行冻结：将该运单进行中接力段置为 FROZEN，返回受影响行数。 */
+    public int freezeActiveSegments(long shipmentId) {
+        return jdbc.update("UPDATE relay_segment SET status = 'FROZEN' WHERE shipment_id = ? AND status = 'IN_PROGRESS'",
+                shipmentId);
+    }
+
+    /** 占用进行中接力段：并发下同运单主键冲突抛 {@link DuplicateKeyException}。 */
+    public void occupyRelay(long shipmentId, long segmentId) {
+        jdbc.update("INSERT INTO shipment_active_relay (shipment_id, segment_id) VALUES (?, ?)",
+                shipmentId, segmentId);
+    }
+
+    /** 释放进行中接力段占用（换班完成或禁行冻结时）。 */
+    public void releaseRelay(long shipmentId) {
+        jdbc.update("DELETE FROM shipment_active_relay WHERE shipment_id = ?", shipmentId);
+    }
+
+    // ---------- 接力双人打卡 ----------
+
+    private static final RowMapper<RelayCheckin> RELAY_CHECKIN_MAPPER = (rs, n) -> new RelayCheckin(
+            rs.getLong("id"), rs.getLong("segment_id"), rs.getLong("shipment_id"),
+            rs.getString("escort_id"), EscortRole.valueOf(rs.getString("role")),
+            rs.getTimestamp("check_time").toLocalDateTime(),
+            rs.getString("request_id"), rs.getTimestamp("created_at").toLocalDateTime());
+
+    private static final String RELAY_CHECKIN_COLUMNS =
+            "id, segment_id, shipment_id, escort_id, role, check_time, request_id, created_at";
+
+    public Optional<RelayCheckin> findRelayCheckin(long segmentId, EscortRole role) {
+        return jdbc.query("SELECT " + RELAY_CHECKIN_COLUMNS + " FROM relay_checkin WHERE segment_id = ? AND role = ?",
+                RELAY_CHECKIN_MAPPER, segmentId, role.name()).stream().findFirst();
+    }
+
+    public List<RelayCheckin> findRelayCheckins(long segmentId) {
+        return jdbc.query("SELECT " + RELAY_CHECKIN_COLUMNS + " FROM relay_checkin WHERE segment_id = ? ORDER BY check_time, id",
+                RELAY_CHECKIN_MAPPER, segmentId);
+    }
+
+    public void insertRelayCheckin(long segmentId, long shipmentId, String escortId, EscortRole role,
+                                   LocalDateTime checkTime, String requestId, LocalDateTime now) {
+        jdbc.update("INSERT INTO relay_checkin (segment_id, shipment_id, escort_id, role, check_time, request_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                segmentId, shipmentId, escortId, role.name(), Timestamp.valueOf(checkTime),
+                requestId, Timestamp.valueOf(now));
+    }
+
+    // ---------- 处置登记 ----------
+
+    public void insertDisposal(long shipmentId, Long segmentId, String reason,
+                               LocalDateTime curfewStart, LocalDateTime now) {
+        jdbc.update("INSERT INTO disposal_record (shipment_id, segment_id, reason, curfew_start, created_at) VALUES (?, ?, ?, ?, ?)",
+                shipmentId, segmentId, reason, Timestamp.valueOf(curfewStart), Timestamp.valueOf(now));
+    }
+
+    private static final RowMapper<DisposalRecord> DISPOSAL_MAPPER = (rs, n) -> new DisposalRecord(
+            rs.getLong("id"), rs.getLong("shipment_id"), (Long) rs.getObject("segment_id"),
+            rs.getString("reason"), rs.getTimestamp("curfew_start").toLocalDateTime(),
+            rs.getTimestamp("created_at").toLocalDateTime());
+
+    public List<DisposalRecord> findDisposals(long shipmentId) {
+        return jdbc.query("SELECT id, shipment_id, segment_id, reason, curfew_start, created_at FROM disposal_record WHERE shipment_id = ? ORDER BY id",
+                DISPOSAL_MAPPER, shipmentId);
     }
 }

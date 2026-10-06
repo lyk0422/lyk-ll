@@ -12,6 +12,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import com.example.starter.hazmat.clock.MutableClock;
 import com.example.starter.hazmat.dto.ApplyRequest;
 import com.example.starter.hazmat.dto.CheckinRequest;
+import com.example.starter.hazmat.dto.RelayCheckinRequest;
+import com.example.starter.hazmat.dto.RelayPointRequest;
 import com.example.starter.hazmat.dto.RerouteRequest;
 import com.example.starter.hazmat.repo.HazmatRepository;
 import com.example.starter.hazmat.service.HazmatService;
@@ -39,6 +41,10 @@ abstract class HazmatIntegrationTestBase {
     @BeforeEach
     void cleanUp() {
         jdbc.execute("DELETE FROM idempotent_record");
+        jdbc.execute("DELETE FROM relay_checkin");
+        jdbc.execute("DELETE FROM shipment_active_relay");
+        jdbc.execute("DELETE FROM relay_segment");
+        jdbc.execute("DELETE FROM disposal_record");
         jdbc.execute("DELETE FROM checkin_record");
         jdbc.execute("DELETE FROM approval_waypoint");
         jdbc.execute("DELETE FROM route_approval");
@@ -82,6 +88,15 @@ abstract class HazmatIntegrationTestBase {
         return service.scanTimeouts(at);
     }
 
+    protected ServiceResult setRelayPoint(String shipmentNo, String requestId, int waypointSeq) {
+        return service.setRelayPoint(shipmentNo, new RelayPointRequest(requestId, waypointSeq));
+    }
+
+    protected ServiceResult relayCheckin(String shipmentNo, String requestId, String escortId,
+                                         String role, LocalDateTime checkTime) {
+        return service.relayCheckin(shipmentNo, new RelayCheckinRequest(requestId, escortId, role, checkTime));
+    }
+
     @SuppressWarnings("unchecked")
     protected Map<String, Object> view(String shipmentNo) {
         return service.getShipment(shipmentNo).body();
@@ -108,6 +123,16 @@ abstract class HazmatIntegrationTestBase {
     @SuppressWarnings("unchecked")
     protected List<Map<String, Object>> events(Map<String, Object> view) {
         return (List<Map<String, Object>>) view.get("events");
+    }
+
+    @SuppressWarnings("unchecked")
+    protected List<Map<String, Object>> relaySegments(Map<String, Object> view) {
+        return (List<Map<String, Object>>) view.get("relaySegments");
+    }
+
+    @SuppressWarnings("unchecked")
+    protected List<Map<String, Object>> disposals(Map<String, Object> view) {
+        return (List<Map<String, Object>>) view.get("disposals");
     }
 
     protected Map<String, Object> currentApprovalView(String shipmentNo) {

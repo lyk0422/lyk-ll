@@ -16,6 +16,8 @@ import org.springframework.web.bind.annotation.RestController;
 import com.example.starter.hazmat.dto.ApplyRequest;
 import com.example.starter.hazmat.dto.CheckinRequest;
 import com.example.starter.hazmat.dto.IdempotentRequest;
+import com.example.starter.hazmat.dto.RelayCheckinRequest;
+import com.example.starter.hazmat.dto.RelayPointRequest;
 import com.example.starter.hazmat.dto.RerouteRequest;
 import com.example.starter.hazmat.service.HazmatService;
 import com.example.starter.hazmat.service.ServiceResult;
@@ -28,6 +30,8 @@ import com.example.starter.hazmat.service.ServiceResult;
  *   <li>POST /api/shipments/{no}/approvals/decide?approved=true|false 路线核准</li>
  *   <li>POST /api/shipments/{no}/dispatch 发运</li>
  *   <li>POST /api/shipments/{no}/checkins 押运打卡（运单+途经点序号去重）</li>
+ *   <li>POST /api/shipments/{no}/relay-points 设置安全接力点（创建接力段）</li>
+ *   <li>POST /api/shipments/{no}/relay-checkins 接力双人打卡（交班/接班）</li>
  *   <li>POST /api/shipments/{no}/reroute 紧急改线申请</li>
  *   <li>POST /api/shipments/{no}/approvals/{id}/approve 改线核准（原子切换）</li>
  *   <li>POST /api/shipments/{no}/complete 到达核销（结案终态）</li>
@@ -65,6 +69,18 @@ public class HazmatController {
     public ResponseEntity<Map<String, Object>> checkin(@PathVariable String shipmentNo,
                                                        @Valid @RequestBody CheckinRequest request) {
         return toEntity(service.checkin(shipmentNo, request));
+    }
+
+    @PostMapping("/api/shipments/{shipmentNo}/relay-points")
+    public ResponseEntity<Map<String, Object>> setRelayPoint(@PathVariable String shipmentNo,
+                                                             @Valid @RequestBody RelayPointRequest request) {
+        return toEntity(service.setRelayPoint(shipmentNo, request));
+    }
+
+    @PostMapping("/api/shipments/{shipmentNo}/relay-checkins")
+    public ResponseEntity<Map<String, Object>> relayCheckin(@PathVariable String shipmentNo,
+                                                            @Valid @RequestBody RelayCheckinRequest request) {
+        return toEntity(service.relayCheckin(shipmentNo, request));
     }
 
     @PostMapping("/api/shipments/{shipmentNo}/reroute")

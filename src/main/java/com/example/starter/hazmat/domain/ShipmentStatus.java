@@ -22,7 +22,9 @@ public enum ShipmentStatus {
     /** 到达核销结案（唯一正常终态）。 */
     COMPLETED(true),
     /** 失联（唯一异常终态，车辆冻结）。 */
-    LOST_CONTACT(true);
+    LOST_CONTACT(true),
+    /** 夜间禁行冻结（未在禁行起点前完成押运换班，转处置，终态）。 */
+    CURFEW_FROZEN(true);
 
     private final boolean terminal;
 

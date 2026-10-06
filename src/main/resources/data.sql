@@ -33,6 +33,11 @@ MERGE INTO route_waypoint_def (route_code, seq, name, offset_minutes) KEY (route
 MERGE INTO control_period (id, route_code, start_time, end_time) KEY (id) VALUES
  (1, 'R-G2', TIMESTAMP '2026-10-01 08:00:00', TIMESTAMP '2026-10-01 10:00:00');
 
+-- 夜间禁行时段（半开区间）：R-G3 在 2026-10-03 00:00~05:00 禁行，
+-- 计划运输窗口跨越 2026-10-03 00:00 的运单须在此前完成押运换班
+MERGE INTO night_curfew (id, route_code, curfew_start, curfew_end) KEY (id) VALUES
+ (1, 'R-G3', TIMESTAMP '2026-10-03 00:00:00', TIMESTAMP '2026-10-03 05:00:00');
+
 -- 合成车辆
 MERGE INTO vehicle (plate, frozen, frozen_shipment_id, frozen_at) KEY (plate) VALUES
  ('沪A-1001', 0, NULL, NULL),
