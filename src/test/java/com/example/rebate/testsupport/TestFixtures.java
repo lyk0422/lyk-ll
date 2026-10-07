@@ -101,4 +101,24 @@ public final class TestFixtures {
                  "receivedCents":%d,"receivedAt":"%s"}
                 """.formatted(requestId, expectedVersion, serial, receivedCents, receivedAt);
     }
+
+    /**
+     * 汇总到账分配请求：母流水、总额、到账时刻与分配行 JSON 数组。
+     */
+    public static String batchReceipt(String requestId, String bankSerial, long totalCents,
+                                      String receivedAt, String allocationsJson) {
+        return """
+                {"requestId":"%s","bankSerial":"%s","totalCents":%d,"receivedAt":"%s",
+                 "allocations":%s}
+                """.formatted(requestId, bankSerial, totalCents, receivedAt, allocationsJson);
+    }
+
+    /**
+     * 汇总分配行：目标更正编号、分摊金额与目标追缴明细期望版本。
+     */
+    public static String allocation(String correctionNo, long amountCents, int expectedVersion) {
+        return """
+                {"correctionNo":"%s","amountCents":%d,"expectedVersion":%d}
+                """.formatted(correctionNo, amountCents, expectedVersion);
+    }
 }

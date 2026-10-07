@@ -10,6 +10,7 @@ import com.example.rebate.domain.ClawbackReceipt;
 import com.example.rebate.domain.ClawbackStatus;
 import com.example.rebate.repo.BatchRepository;
 import com.example.rebate.domain.DeclarationBatch;
+import com.example.rebate.repo.BankSerialRegistryRepository;
 import com.example.rebate.repo.ChargebackBalanceRepository;
 import com.example.rebate.repo.ChargebackOrderRepository;
 import com.example.rebate.repo.CheckDetailRepository;
@@ -51,6 +52,7 @@ public class ChargebackService {
     private final ChargebackOrderRepository orderRepo;
     private final ClawbackDetailRepository clawbackRepo;
     private final ClawbackReceiptRepository receiptRepo;
+    private final BankSerialRegistryRepository registryRepo;
     private final TimeService timeService;
 
     public ChargebackService(BatchRepository batchRepo,
@@ -59,6 +61,7 @@ public class ChargebackService {
                              ChargebackOrderRepository orderRepo,
                              ClawbackDetailRepository clawbackRepo,
                              ClawbackReceiptRepository receiptRepo,
+                             BankSerialRegistryRepository registryRepo,
                              TimeService timeService) {
         this.batchRepo = batchRepo;
         this.detailRepo = detailRepo;
@@ -66,6 +69,7 @@ public class ChargebackService {
         this.orderRepo = orderRepo;
         this.clawbackRepo = clawbackRepo;
         this.receiptRepo = receiptRepo;
+        this.registryRepo = registryRepo;
         this.timeService = timeService;
     }
 
@@ -179,6 +183,19 @@ public class ChargebackService {
                         req.receiptSerial(), prior.receivedCents(), req.receivedCents()));
             }
             return view(batch, order);
+        }
+
+        // 全局互斥：同一真实流水只能用于一种入口，旧单笔入口不得借用已分配母流水。
+        registryRepo.findSource(req.receiptSerial()).ifPresent(source -> {
+            throw new ConflictException(
+                    "银行流水 " + req.receiptSerial() + " 已被汇总分配入口占用，单笔回执不得借用");
+        });
+
+        // 先占全局流水登记（统一锁顺序：流水登记 → 追缴明细，与汇总入口一致避免死锁）；
+        // 后续任一校验失败整事务回滚，流水登记随之释放（失败不占流水）。
+        if (!registryRepo.tryRegister(req.receiptSerial(), "SINGLE", timeService.now())) {
+            throw new ConflictException(
+                    "银行流水 " + req.receiptSerial() + " 已被其他入口并发占用");
         }
 
         if (detail.status() == ClawbackStatus.COMPLETED) {
