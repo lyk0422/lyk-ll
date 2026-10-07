@@ -117,6 +117,62 @@ CREATE TABLE IF NOT EXISTS age_band_rule (
     PRIMARY KEY (rule_version, band_code)
 );
 
+-- 包装标签印次台账：领用绑定到已生效备案的具体修订；备案换版/注销后旧印次剩余标签禁用
+CREATE TABLE IF NOT EXISTS label_print_run (
+    id                BIGINT AUTO_INCREMENT NOT NULL PRIMARY KEY,
+    print_run_no      VARCHAR(40)  NOT NULL COMMENT '印次号，全局唯一',
+    product_code      VARCHAR(64)  NOT NULL COMMENT '所属产品编码',
+    filing_no         VARCHAR(40)  NOT NULL COMMENT '绑定的生效备案编号',
+    filing_version_no INT          NOT NULL COMMENT '绑定的备案修订号',
+    label_digest      VARCHAR(128) NOT NULL COMMENT '标签文本摘要(SHA-256)；儿童印次为逐档摘要集合的结构化摘要',
+    band_digests_json CLOB         NULL COMMENT '儿童印次冻结的逐档标识摘要JSON(分龄档编码->该档摘要)；成人印次为NULL',
+    printed_count     INT          NOT NULL COMMENT '印刷总张数(正整数)',
+    drawn_count       INT          NOT NULL DEFAULT 0 COMMENT '已领用张数',
+    destroyed_count   INT          NOT NULL DEFAULT 0 COMMENT '已销毁张数',
+    status            VARCHAR(20)  NOT NULL COMMENT '状态：ACTIVE=可领用，DISABLED=已禁用(剩余不可领且不可复活)',
+    version           INT          NOT NULL DEFAULT 1 COMMENT '印次台账版本，1起，每次修改(领用/销毁/禁用)成功+1',
+    request_id        VARCHAR(64)  NOT NULL COMMENT '登记幂等键',
+    disabled_reason   VARCHAR(200) NULL COMMENT '禁用原因(备案换版/注销等)；未禁用为NULL',
+    disabled_at_utc   TIMESTAMP    NULL COMMENT '禁用时刻(UTC)；未禁用为NULL',
+    created_at_utc    TIMESTAMP    NOT NULL COMMENT '登记时刻(UTC)',
+    updated_at_utc    TIMESTAMP    NOT NULL COMMENT '最近修改时刻(UTC)',
+    CONSTRAINT uk_label_print_run_no UNIQUE (print_run_no)
+);
+CREATE INDEX IF NOT EXISTS idx_print_run_filing ON label_print_run (filing_no, filing_version_no);
+
+-- 包装批号登记：首次领用时登记所属产品，登记后跨产品借用拒绝
+CREATE TABLE IF NOT EXISTS packaging_batch (
+    batch_no       VARCHAR(64) NOT NULL PRIMARY KEY COMMENT '包装批号(合成)',
+    product_code   VARCHAR(64) NOT NULL COMMENT '所属产品编码，登记后不可变更',
+    created_at_utc TIMESTAMP   NOT NULL COMMENT '登记时刻(UTC)'
+);
+
+-- 标签领用凭据：每包装批可多次领用，逐笔可追溯；已领部分只追加风险关联，不抹历史
+CREATE TABLE IF NOT EXISTS label_draw (
+    id           BIGINT AUTO_INCREMENT NOT NULL PRIMARY KEY,
+    print_run_no VARCHAR(40)  NOT NULL COMMENT '领用来源印次号',
+    batch_no     VARCHAR(64)  NOT NULL COMMENT '领入的包装批号',
+    product_code VARCHAR(64)  NOT NULL COMMENT '产品编码(冗余，便于追溯)',
+    quantity     INT          NOT NULL COMMENT '本次领用张数(正整数)',
+    request_id   VARCHAR(64)  NOT NULL COMMENT '领用幂等键',
+    drawn_at_utc TIMESTAMP    NOT NULL COMMENT '领用时刻(UTC)',
+    risk_flag    TINYINT      NOT NULL DEFAULT 0 COMMENT '是否已追加风险关联：1=所属备案修订已失效(换版/注销)',
+    risk_note    VARCHAR(500) NULL COMMENT '风险关联说明；无风险为NULL',
+    risk_at_utc  TIMESTAMP    NULL COMMENT '风险关联时刻(UTC)；无风险为NULL'
+);
+CREATE INDEX IF NOT EXISTS idx_label_draw_run ON label_draw (print_run_no);
+CREATE INDEX IF NOT EXISTS idx_label_draw_batch ON label_draw (batch_no);
+
+-- 未领标签销毁登记(留证)：只减少未领余额，已领部分不能销毁退回余额
+CREATE TABLE IF NOT EXISTS label_destroy (
+    id               BIGINT AUTO_INCREMENT NOT NULL PRIMARY KEY,
+    print_run_no     VARCHAR(40) NOT NULL COMMENT '销毁来源印次号',
+    quantity         INT         NOT NULL COMMENT '本次销毁张数(正整数)',
+    request_id       VARCHAR(64) NOT NULL COMMENT '销毁幂等键',
+    destroyed_at_utc TIMESTAMP   NOT NULL COMMENT '销毁登记时刻(UTC)'
+);
+CREATE INDEX IF NOT EXISTS idx_label_destroy_run ON label_destroy (print_run_no);
+
 -- 儿童安全报告（合成登记）：独立于成人功效评价试验报告，成人报告不能替代
 CREATE TABLE IF NOT EXISTS child_safety_report (
     report_no            VARCHAR(64)  NOT NULL PRIMARY KEY COMMENT '儿童安全报告编号',

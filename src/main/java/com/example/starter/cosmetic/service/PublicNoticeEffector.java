@@ -25,9 +25,11 @@ import java.util.Optional;
 public class PublicNoticeEffector {
 
     private final FilingPort filingPort;
+    private final LabelPrintService labelPrintService;
 
-    public PublicNoticeEffector(FilingPort filingPort) {
+    public PublicNoticeEffector(FilingPort filingPort, LabelPrintService labelPrintService) {
         this.filingPort = filingPort;
+        this.labelPrintService = labelPrintService;
     }
 
     /**
@@ -57,6 +59,10 @@ public class PublicNoticeEffector {
             }
             filingPort.replaceSlot(publicRecord.productCode(), publicRecord.filingNo(),
                     publicRecord.versionNo(), now);
+            // 同事务：实质变更生效后禁用旧修订印次的剩余标签，已领凭据追加风险关联
+            labelPrintService.disableForFilingRevision(previous.filingNo(), previous.versionNo(),
+                    "实质变更新备案 " + publicRecord.filingNo() + "#" + publicRecord.versionNo()
+                            + " 生效，旧修订印次禁用", now);
         } else {
             // 首次备案生效：占用唯一有效槽（主键冲突时整个事务回滚）
             filingPort.occupySlot(publicRecord.productCode(), publicRecord.filingNo(),

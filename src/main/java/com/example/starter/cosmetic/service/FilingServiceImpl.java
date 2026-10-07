@@ -70,6 +70,7 @@ public class FilingServiceImpl implements FilingService {
     private final ReportPort reportPort;
     private final IdempotencyPort idempotencyPort;
     private final PublicNoticeEffector publicNoticeEffector;
+    private final LabelPrintService labelPrintService;
     private final Clock clock;
     private final FormReviewEvaluator formReviewEvaluator;
     private final ChildFormReviewEvaluator childFormReviewEvaluator;
@@ -79,12 +80,14 @@ public class FilingServiceImpl implements FilingService {
                              ReportPort reportPort,
                              IdempotencyPort idempotencyPort,
                              PublicNoticeEffector publicNoticeEffector,
+                             LabelPrintService labelPrintService,
                              Clock clock) {
         this.filingPort = filingPort;
         this.catalogPort = catalogPort;
         this.reportPort = reportPort;
         this.idempotencyPort = idempotencyPort;
         this.publicNoticeEffector = publicNoticeEffector;
+        this.labelPrintService = labelPrintService;
         this.clock = clock;
         this.formReviewEvaluator = new FormReviewEvaluator(catalogPort);
         this.childFormReviewEvaluator = new ChildFormReviewEvaluator(catalogPort, reportPort);
@@ -538,6 +541,10 @@ public class FilingServiceImpl implements FilingService {
                     "当前有效版本已被其他变更替代，本次简易变更失败（唯一有效备案）");
         }
         filingPort.replaceSlot(productCode, current.filingNo(), versionNo, now);
+        // 同事务：包装文字简易变更生效后，旧修订印次的剩余标签禁用，已领凭据追加风险关联
+        labelPrintService.disableForFilingRevision(current.filingNo(), current.versionNo(),
+                "备案包装文字简易变更新修订 " + current.filingNo() + "#" + versionNo
+                        + " 生效，旧修订印次禁用", now);
 
         List<ReviewDetail> details = List.of(new ReviewDetail(null, current.filingNo(), versionNo,
                 FormReviewEvaluator.STAGE_FORM, "SIMPLE_CHANGE_NO_REVIEW", true,
@@ -651,6 +658,9 @@ public class FilingServiceImpl implements FilingService {
 
         filingPort.markWithdrawn(record.id(), now, reason);
         filingPort.releaseSlot(record.productCode());
+        // 同事务：注销后禁用该修订印次的剩余标签，已领凭据追加风险关联
+        labelPrintService.disableForFilingRevision(filingNo, record.versionNo(),
+                "备案注销终态，印次禁用", now);
         ReviewDetail detail = new ReviewDetail(null, filingNo, record.versionNo(), "FORM",
                 "WITHDRAWN_TERMINAL", true,
                 "备案注销终态，注销时刻(UTC)=" + now + "，原因=" + reason
