@@ -17,16 +17,20 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.example.starter.ride.Idempotency.ApiResult;
 import com.example.starter.ride.dto.RideDtos.ArchiveRequest;
+import com.example.starter.ride.dto.RideDtos.CreateMaintenanceOrderRequest;
 import com.example.starter.ride.dto.RideDtos.CreateRideRequest;
 import com.example.starter.ride.dto.RideDtos.DailyCheckRequest;
+import com.example.starter.ride.dto.RideDtos.FinishMaintenanceRequest;
 import com.example.starter.ride.dto.RideDtos.IssueCertificateRequest;
 import com.example.starter.ride.dto.RideDtos.OpenRequest;
 import com.example.starter.ride.dto.RideDtos.OverhaulRequest;
 import com.example.starter.ride.dto.RideDtos.ReadingRequest;
 import com.example.starter.ride.dto.RideDtos.RecheckRequest;
+import com.example.starter.ride.dto.RideDtos.RemoveLockRequest;
 import com.example.starter.ride.dto.RideDtos.ReopenRequest;
 import com.example.starter.ride.dto.RideDtos.RevokeCertificateRequest;
 import com.example.starter.ride.dto.RideDtos.SafetyFaultRequest;
+import com.example.starter.ride.dto.RideDtos.StartMaintenanceRequest;
 import com.example.starter.ride.dto.RideDtos.SupervisionConfirmRequest;
 import com.example.starter.ride.dto.RideDtos.TrialRunRequest;
 
@@ -174,6 +178,19 @@ public class RideController {
     @GetMapping("/{rideId}/eligibility")
     public Map<String, Object> eligibility(@PathVariable long rideId) {
         return service.getEligibility(rideId);
+    }
+
+    /** 建立检修单：绑定设备与1至20名不同挂牌人员，初始 PREPARED。 */
+    @PostMapping("/{rideId}/maintenance-orders")
+    public ResponseEntity<String> createMaintenanceOrder(@PathVariable long rideId,
+            @Valid @RequestBody CreateMaintenanceOrderRequest request) {
+        return render(service.createMaintenanceOrder(rideId, request));
+    }
+
+    /** 设备全部检修单（含冻结清单与锁状态），可复算。 */
+    @GetMapping("/{rideId}/maintenance-orders")
+    public List<Map<String, Object>> maintenanceOrders(@PathVariable long rideId) {
+        return service.listMaintenanceOrders(rideId);
     }
 
     private ResponseEntity<String> render(ApiResult result) {

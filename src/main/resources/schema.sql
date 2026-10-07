@@ -3,7 +3,7 @@
 CREATE TABLE IF NOT EXISTS ride (
     id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '设备主键',
     name VARCHAR(128) NOT NULL COMMENT '设备名称（合成数据）',
-    status VARCHAR(32) NOT NULL COMMENT '设备状态：PENDING_CHECK待日检/CHECKED日检合格/READY试运行合格可开放/OPEN开放载客/SUSPENDED超阈值缓停/STOPPED故障停运/RECHECKED复检合格/ARCHIVED闭园归档终态',
+    status VARCHAR(32) NOT NULL COMMENT '设备状态：PENDING_CHECK待日检/CHECKED日检合格/READY试运行合格可开放/OPEN开放载客/SUSPENDED超阈值缓停/STOPPED故障停运/RECHECKED复检合格/MAINTENANCE检修挂牌整机停运/ARCHIVED闭园归档终态',
     max_load INT NOT NULL COMMENT '载荷阈值（人），恰等阈值合格，超过触发缓停',
     max_speed INT NOT NULL COMMENT '速度阈值（rpm），恰等阈值合格，超过触发缓停',
     trial_count INT NOT NULL DEFAULT 0 COMMENT '当日已连续合格试运行次数，恰3次方可载客',
@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS runtime_reading (
 CREATE TABLE IF NOT EXISTS ride_event (
     id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '事件主键',
     ride_id BIGINT NOT NULL COMMENT '设备ID，关联ride.id',
-    event_type VARCHAR(32) NOT NULL COMMENT '事件类型：DAILY_CHECK/TRIAL_RUN/OPEN/READING/SLOW_STOP/FAULT_STOP/RECHECK/REOPEN/ARCHIVE/LATE_READING/CERT_ISSUE/CERT_REVOKE/OVERHAUL/SUPERVISION/CERT_EXPIRED_ALARM',
+    event_type VARCHAR(32) NOT NULL COMMENT '事件类型：DAILY_CHECK/TRIAL_RUN/OPEN/READING/SLOW_STOP/FAULT_STOP/RECHECK/REOPEN/ARCHIVE/LATE_READING/CERT_ISSUE/CERT_REVOKE/OVERHAUL/SUPERVISION/CERT_EXPIRED_ALARM/MAINT_CREATE/MAINT_START/LOCK_REMOVE/MAINT_FINISH',
     detail VARCHAR(512) NULL COMMENT '事件详情（合成描述），NULL表示无补充说明',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '事件时间（Asia/Shanghai）'
 ) COMMENT='设备启停链事件表，可复算';
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS ride_event (
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id VARCHAR(64) PRIMARY KEY COMMENT '幂等请求ID，全局唯一',
     ride_id BIGINT NOT NULL COMMENT '设备ID，关联ride.id',
-    operation VARCHAR(32) NOT NULL COMMENT '操作类型：DAILY_CHECK/TRIAL_RUN/OPEN/SAFETY_FAULT/RECHECK/REOPEN/ARCHIVE/CERT_ISSUE/CERT_REVOKE/OVERHAUL/SUPERVISION',
+    operation VARCHAR(32) NOT NULL COMMENT '操作类型：DAILY_CHECK/TRIAL_RUN/OPEN/SAFETY_FAULT/RECHECK/REOPEN/ARCHIVE/CERT_ISSUE/CERT_REVOKE/OVERHAUL/SUPERVISION/MAINTENANCE_CREATE/MAINTENANCE_START/LOCK_REMOVE/MAINTENANCE_FINISH',
     fingerprint VARCHAR(64) NOT NULL COMMENT '请求指纹，覆盖requestId与全部业务字段的SHA-256',
     response_status INT NOT NULL COMMENT '首次执行的HTTP状态码',
     response_body CLOB NOT NULL COMMENT '首次执行的响应体JSON快照',
@@ -114,3 +114,39 @@ CREATE TABLE IF NOT EXISTS supervision_inspection_item (
     item_name VARCHAR(64) NOT NULL COMMENT '检验项名称（合成数据）',
     passed BOOLEAN NOT NULL COMMENT '该项是否合格'
 ) COMMENT='监督检验清单明细表，可复算';
+
+CREATE TABLE IF NOT EXISTS maintenance_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '检修单主键',
+    ride_id BIGINT NOT NULL COMMENT '绑定设备ID，关联ride.id',
+    request_id VARCHAR(64) NOT NULL COMMENT '建单幂等请求ID',
+    status VARCHAR(32) NOT NULL COMMENT '检修单状态：PREPARED已建单待启动/IN_PROGRESS进行中（整机停运、挂牌上锁）/FINISHED已结束（仅清除挂牌阻断，不自动开放）',
+    prior_status VARCHAR(32) NULL COMMENT '启动前设备状态：结束时原故障停运STOPPED保持，其余转为SUSPENDED，NULL表示尚未启动',
+    version BIGINT NOT NULL DEFAULT 1 COMMENT '单据版本号，从1开始；启动、结束等修改成功加1，修改须携带expectedVersion，旧版本409',
+    started_at TIMESTAMP NULL COMMENT '启动时刻（UTC），NULL表示尚未启动',
+    start_request_id VARCHAR(64) NULL COMMENT '启动幂等请求ID，NULL表示尚未启动',
+    finished_at TIMESTAMP NULL COMMENT '结束时刻（UTC），NULL表示尚未结束',
+    finish_request_id VARCHAR(64) NULL COMMENT '结束幂等请求ID，NULL表示尚未结束',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '建单时间（Asia/Shanghai）'
+) COMMENT='检修单表：同设备同时刻只允许一张进行中检修单，历史清单不可覆盖';
+
+CREATE TABLE IF NOT EXISTS maintenance_person (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '挂牌人员主键',
+    order_id BIGINT NOT NULL COMMENT '检修单ID，关联maintenance_order.id',
+    person_name VARCHAR(64) NOT NULL COMMENT '挂牌人员姓名（合成检修人员），同一检修单内唯一，启动后冻结',
+    seq INT NOT NULL COMMENT '清单序号（建单登记顺序），用于历史清单复算',
+    UNIQUE (order_id, person_name)
+) COMMENT='检修挂牌人员清单表：1至20名不同人员，启动后冻结，历史清单不可覆盖';
+
+CREATE TABLE IF NOT EXISTS maintenance_lock (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '挂牌锁主键',
+    order_id BIGINT NOT NULL COMMENT '检修单ID，关联maintenance_order.id',
+    ride_id BIGINT NOT NULL COMMENT '设备ID，关联ride.id',
+    person_name VARCHAR(64) NOT NULL COMMENT '挂牌人员姓名，一把锁对应一人，同一检修单内唯一',
+    removed BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否已撤除：FALSE为未撤锁，阻断开放/复开；TRUE为本人与监护员双人签认后撤除',
+    removed_at TIMESTAMP NULL COMMENT '撤锁时刻（UTC），NULL表示未撤除',
+    lock_holder VARCHAR(64) NULL COMMENT '本人签认人，撤锁须等于挂牌人员本人；NULL表示未撤除',
+    guardian VARCHAR(64) NULL COMMENT '监护员签认人，须为与本人不同的另一人；NULL表示未撤除',
+    remove_request_id VARCHAR(64) NULL COMMENT '撤锁幂等请求ID，NULL表示未撤除',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '上锁时间（Asia/Shanghai）',
+    UNIQUE (order_id, person_name)
+) COMMENT='挂牌锁表：每人唯一一把，双人签认一次性撤除，历史签认不可覆盖';

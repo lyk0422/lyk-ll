@@ -15,16 +15,20 @@ import org.springframework.transaction.annotation.Transactional;
 import com.example.starter.ride.Idempotency.ApiResult;
 import com.example.starter.ride.dto.RideDtos.ArchiveRequest;
 import com.example.starter.ride.dto.RideDtos.CheckItem;
+import com.example.starter.ride.dto.RideDtos.CreateMaintenanceOrderRequest;
 import com.example.starter.ride.dto.RideDtos.CreateRideRequest;
 import com.example.starter.ride.dto.RideDtos.DailyCheckRequest;
+import com.example.starter.ride.dto.RideDtos.FinishMaintenanceRequest;
 import com.example.starter.ride.dto.RideDtos.IssueCertificateRequest;
 import com.example.starter.ride.dto.RideDtos.OpenRequest;
 import com.example.starter.ride.dto.RideDtos.OverhaulRequest;
 import com.example.starter.ride.dto.RideDtos.ReadingRequest;
 import com.example.starter.ride.dto.RideDtos.RecheckRequest;
+import com.example.starter.ride.dto.RideDtos.RemoveLockRequest;
 import com.example.starter.ride.dto.RideDtos.ReopenRequest;
 import com.example.starter.ride.dto.RideDtos.RevokeCertificateRequest;
 import com.example.starter.ride.dto.RideDtos.SafetyFaultRequest;
+import com.example.starter.ride.dto.RideDtos.StartMaintenanceRequest;
 import com.example.starter.ride.dto.RideDtos.SupervisionConfirmRequest;
 import com.example.starter.ride.dto.RideDtos.TrialRunRequest;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -42,17 +46,20 @@ public class RideService {
     private final RideRecordRepository records;
     private final CertificateRepository certificates;
     private final SupervisionRepository supervisions;
+    private final MaintenanceRepository maintenance;
     private final Idempotency.Executor idempotency;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
     public RideService(RideRepository rides, RideRecordRepository records,
             CertificateRepository certificates, SupervisionRepository supervisions,
+            MaintenanceRepository maintenance,
             Idempotency.Executor idempotency, ObjectMapper objectMapper, Clock clock) {
         this.rides = rides;
         this.records = records;
         this.certificates = certificates;
         this.supervisions = supervisions;
+        this.maintenance = maintenance;
         this.idempotency = idempotency;
         this.objectMapper = objectMapper;
         this.clock = clock;
@@ -139,6 +146,7 @@ public class RideService {
     public ApiResult open(long rideId, OpenRequest request) {
         return idempotency.execute(request.requestId(), "OPEN", rideId, request, () -> {
             Ride ride = lock(rideId);
+            requireNoMaintenanceBlock(rideId);
             if (ride.checkDate() == null || !ride.checkDate().equals(LocalDate.now(clock))) {
                 throw ApiException.conflict("未日检设备无法开放");
             }
@@ -208,6 +216,7 @@ public class RideService {
     public ApiResult reopen(long rideId, ReopenRequest request) {
         return idempotency.execute(request.requestId(), "REOPEN", rideId, request, () -> {
             Ride ride = lock(rideId);
+            requireNoMaintenanceBlock(rideId);
             requireStatus(ride, "仅复检合格设备可复开", RideStatus.RECHECKED);
             LocalDate today = LocalDate.now(clock);
             int used = today.equals(ride.reopenDate()) ? ride.reopenCount() : 0;
@@ -232,6 +241,9 @@ public class RideService {
                 Map<String, Object> body = rideView(rideId);
                 body.put("message", "设备已归档，重复归档幂等成功");
                 return ok(body);
+            }
+            if (maintenance.existsActiveByRide(rideId)) {
+                throw ApiException.conflict("设备存在未结束检修单，禁止归档");
             }
             update(ride, RideStatus.ARCHIVED, ride.trialCount(), ride.reopenCount(),
                     ride.checkDate(), ride.reopenDate());
@@ -522,6 +534,238 @@ public class RideService {
         }
     }
 
+    /** 建立检修单：绑定设备与1至20名不同人员，初始 PREPARED；清单启动时冻结。 */
+    public ApiResult createMaintenanceOrder(long rideId, CreateMaintenanceOrderRequest request) {
+        return idempotency.execute(request.requestId(), "MAINTENANCE_CREATE", rideId, request,
+                () -> {
+                    Ride ride = lock(rideId);
+                    List<String> persons = normalizePersons(request.persons());
+                    long orderId = maintenance.insertOrder(rideId, request.requestId());
+                    for (int i = 0; i < persons.size(); i++) {
+                        maintenance.insertPerson(orderId, persons.get(i), i + 1);
+                    }
+                    records.insertEvent(rideId, "MAINT_CREATE",
+                            "建立检修单#" + orderId + "，挂牌人员" + persons.size()
+                                    + "名：" + String.join("、", persons));
+                    return ok(maintenanceOrderView(
+                            maintenance.findOrderById(orderId).orElseThrow()));
+                });
+    }
+
+    /**
+     * 启动检修：单事务整机停运并为每人建立唯一未撤锁；
+     * 同设备只允许一张进行中检修单，已载客（OPEN）或已归档/被占用时拒绝启动。
+     */
+    public ApiResult startMaintenance(long orderId, StartMaintenanceRequest request) {
+        MaintenanceOrder order = maintenance.findOrderById(orderId)
+                .orElseThrow(() -> ApiException.notFound("检修单不存在：" + orderId));
+        return idempotency.execute(request.requestId(), "MAINTENANCE_START", order.rideId(),
+                new OrderScopedRequest(orderId, request), () -> {
+                    Ride ride = lock(order.rideId());
+                    MaintenanceOrder current = maintenance.findOrderById(orderId).orElseThrow();
+                    if (current.version() != request.expectedVersion()) {
+                        throw ApiException.conflict("检修单版本冲突：expectedVersion="
+                                + request.expectedVersion() + "，当前版本=" + current.version());
+                    }
+                    if (current.status() != MaintenanceStatus.PREPARED) {
+                        throw ApiException.conflict("检修单已启动或已结束，不能重复启动（当前状态："
+                                + current.status() + "）");
+                    }
+                    if (ride.status() == RideStatus.OPEN) {
+                        throw ApiException.conflict("设备已载客，禁止启动检修");
+                    }
+                    if (ride.status() == RideStatus.ARCHIVED) {
+                        throw ApiException.unprocessable("设备已归档，禁止启动检修");
+                    }
+                    if (maintenance.existsActiveByRide(ride.id())) {
+                        throw ApiException.conflict("同设备已有进行中检修单，禁止重复启动");
+                    }
+                    Instant now = Instant.now(clock);
+                    if (!maintenance.markStarted(orderId, request.expectedVersion(),
+                            ride.status(), now, request.requestId())) {
+                        throw ApiException.conflict("检修单并发变更，请重试");
+                    }
+                    List<String> persons = maintenance.listPersonsByOrder(orderId);
+                    for (String person : persons) {
+                        maintenance.insertLock(orderId, ride.id(), person);
+                    }
+                    update(ride, RideStatus.MAINTENANCE, ride.trialCount(), ride.reopenCount(),
+                            ride.checkDate(), ride.reopenDate());
+                    records.insertEvent(ride.id(), "MAINT_START",
+                            "启动检修单#" + orderId + "，整机停运，挂牌人员" + persons.size()
+                                    + "名各建立唯一未撤锁：" + String.join("、", persons));
+                    return ok(maintenanceOrderView(
+                            maintenance.findOrderById(orderId).orElseThrow()));
+                });
+    }
+
+    /**
+     * 撤锁：只能由挂牌人员本人与一名不同监护员共同确认撤除；
+     * 单人或重复身份不生效，不能替清单外或未归还人员代签；已撤锁不可覆盖。
+     */
+    public ApiResult removeLock(long orderId, RemoveLockRequest request) {
+        MaintenanceOrder order = maintenance.findOrderById(orderId)
+                .orElseThrow(() -> ApiException.notFound("检修单不存在：" + orderId));
+        return idempotency.execute(request.requestId(), "LOCK_REMOVE", order.rideId(),
+                new OrderScopedRequest(orderId, request), () -> {
+                    Ride ride = lock(order.rideId());
+                    MaintenanceOrder current = maintenance.findOrderById(orderId).orElseThrow();
+                    if (current.status() != MaintenanceStatus.IN_PROGRESS) {
+                        throw ApiException.conflict("检修单未处于进行中，不能撤锁（当前状态："
+                                + current.status() + "）");
+                    }
+                    MaintenanceLock lock = maintenance.findLock(orderId, request.person())
+                            .orElseThrow(() -> ApiException.unprocessable(
+                                    "挂牌清单中无此人，不能代签：" + request.person()));
+                    if (!lock.personName().equals(request.lockHolder())) {
+                        throw ApiException.unprocessable(
+                                "挂牌锁只能由挂牌人员本人签认撤除：挂牌人=" + lock.personName()
+                                        + "，签认人=" + request.lockHolder());
+                    }
+                    if (request.lockHolder().equals(request.guardian())) {
+                        throw ApiException.unprocessable("本人与监护员必须为两名不同人员，单人签认不生效");
+                    }
+                    if (lock.removed()) {
+                        throw ApiException.conflict("该挂牌锁已撤除，历史双人签认不可覆盖："
+                                + lock.personName());
+                    }
+                    Instant now = Instant.now(clock);
+                    if (!maintenance.removeLock(lock.id(), now, request.lockHolder(),
+                            request.guardian(), request.requestId())) {
+                        throw ApiException.conflict("挂牌锁并发撤除，请重试");
+                    }
+                    int remaining = maintenance.listLocksByOrder(orderId).stream()
+                            .filter(l -> !l.removed()).toList().size();
+                    records.insertEvent(ride.id(), "LOCK_REMOVE",
+                            "检修单#" + orderId + " 撤锁：" + lock.personName()
+                                    + " 本人与监护员" + request.guardian()
+                                    + " 双人签认，剩余未撤锁" + remaining + "把");
+                    return ok(maintenanceOrderView(
+                            maintenance.findOrderById(orderId).orElseThrow()));
+                });
+    }
+
+    /**
+     * 结束检修：全部锁撤除后方可结束；仅清除挂牌阻断：不自动开放，
+     * 不重置日检、年度证书、监督检验与当日复开次数；原故障停运仍为 STOPPED，
+     * 须继续原复检流程，其余状态转为缓停 SUSPENDED。
+     */
+    public ApiResult finishMaintenance(long orderId, FinishMaintenanceRequest request) {
+        MaintenanceOrder order = maintenance.findOrderById(orderId)
+                .orElseThrow(() -> ApiException.notFound("检修单不存在：" + orderId));
+        return idempotency.execute(request.requestId(), "MAINTENANCE_FINISH", order.rideId(),
+                new OrderScopedRequest(orderId, request), () -> {
+                    Ride ride = lock(order.rideId());
+                    MaintenanceOrder current = maintenance.findOrderById(orderId).orElseThrow();
+                    if (current.version() != request.expectedVersion()) {
+                        throw ApiException.conflict("检修单版本冲突：expectedVersion="
+                                + request.expectedVersion() + "，当前版本=" + current.version());
+                    }
+                    if (current.status() != MaintenanceStatus.IN_PROGRESS) {
+                        throw ApiException.conflict("检修单未处于进行中，不能结束（当前状态："
+                                + current.status() + "）");
+                    }
+                    List<MaintenanceLock> locks = maintenance.listLocksByOrder(orderId);
+                    List<String> unremoved = locks.stream()
+                            .filter(l -> !l.removed()).map(MaintenanceLock::personName).toList();
+                    if (!unremoved.isEmpty()) {
+                        throw ApiException.unprocessable("仍有未撤锁，禁止结束检修："
+                                + String.join("、", unremoved));
+                    }
+                    Instant now = Instant.now(clock);
+                    if (!maintenance.markFinished(orderId, request.expectedVersion(), now,
+                            request.requestId())) {
+                        throw ApiException.conflict("检修单并发变更，请重试");
+                    }
+                    // 原故障停运不解除故障；其余一律回缓停态，不自动开放，计数与日期保持不变
+                    RideStatus restored = current.priorStatus() == RideStatus.STOPPED
+                            ? RideStatus.STOPPED : RideStatus.SUSPENDED;
+                    update(ride, restored, ride.trialCount(), ride.reopenCount(),
+                            ride.checkDate(), ride.reopenDate());
+                    records.insertEvent(ride.id(), "MAINT_FINISH",
+                            "结束检修单#" + orderId + "，全部挂牌锁已撤除，仅清除挂牌阻断不自动开放"
+                                    + (restored == RideStatus.STOPPED
+                                            ? "，设备仍为故障停运，须继续复检流程" : ""));
+                    return ok(maintenanceOrderView(
+                            maintenance.findOrderById(orderId).orElseThrow()));
+                });
+    }
+
+    /** 查询检修单详情：含冻结清单、锁状态及每个未撤锁人。 */
+    @Transactional(readOnly = true)
+    public Map<String, Object> getMaintenanceOrder(long orderId) {
+        return maintenanceOrderView(maintenance.findOrderById(orderId)
+                .orElseThrow(() -> ApiException.notFound("检修单不存在：" + orderId)));
+    }
+
+    /** 设备全部检修单（含冻结清单与锁状态），可复算。 */
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> listMaintenanceOrders(long rideId) {
+        ensureExists(rideId);
+        return maintenance.listOrdersByRide(rideId).stream()
+                .map(this::maintenanceOrderView).toList();
+    }
+
+    /** 开放/复开前置门禁：存在未结束检修单或未撤锁时一律拒绝，不能绕行。 */
+    private void requireNoMaintenanceBlock(long rideId) {
+        if (maintenance.findActiveByRide(rideId).isPresent()) {
+            int openLocks = maintenance.countOpenLocksByRide(rideId);
+            throw ApiException.conflict("存在未结束检修单"
+                    + (openLocks > 0 ? "及" + openLocks + "把未撤锁" : "")
+                    + "，禁止开放或复开");
+        }
+        if (maintenance.countOpenLocksByRide(rideId) > 0) {
+            throw ApiException.conflict("存在未撤挂牌锁，禁止开放或复开");
+        }
+    }
+
+    /** 规范化挂牌人员：去空白、去重，人数限制1至20名。 */
+    private List<String> normalizePersons(List<String> raw) {
+        List<String> persons = raw.stream().map(String::trim).toList();
+        if (persons.size() < 1 || persons.size() > 20) {
+            throw ApiException.unprocessable("挂牌人员必须为1至20名");
+        }
+        if (persons.stream().distinct().count() != persons.size()) {
+            throw ApiException.unprocessable("挂牌人员必须互不相同，不得重复挂牌");
+        }
+        return persons;
+    }
+
+    private Map<String, Object> maintenanceOrderView(MaintenanceOrder order) {
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("orderId", order.id());
+        view.put("rideId", order.rideId());
+        view.put("requestId", order.requestId());
+        view.put("status", order.status().name());
+        view.put("priorStatus", order.priorStatus() == null ? null : order.priorStatus().name());
+        view.put("version", order.version());
+        view.put("startedAt", order.startedAt() == null ? null : order.startedAt().toString());
+        view.put("startRequestId", order.startRequestId());
+        view.put("finishedAt", order.finishedAt() == null ? null : order.finishedAt().toString());
+        view.put("finishRequestId", order.finishRequestId());
+        List<String> persons = maintenance.listPersonsByOrder(order.id());
+        view.put("persons", persons);
+        List<Map<String, Object>> locks = maintenance.listLocksByOrder(order.id()).stream()
+                .map(this::lockView).toList();
+        view.put("locks", locks);
+        view.put("unremovedPersons", locks.stream()
+                .filter(l -> Boolean.FALSE.equals(l.get("removed")))
+                .map(l -> l.get("personName")).toList());
+        return view;
+    }
+
+    private Map<String, Object> lockView(MaintenanceLock lock) {
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("lockId", lock.id());
+        view.put("personName", lock.personName());
+        view.put("removed", lock.removed());
+        view.put("removedAt", lock.removedAt() == null ? null : lock.removedAt().toString());
+        view.put("lockHolder", lock.lockHolder());
+        view.put("guardian", lock.guardian());
+        view.put("removeRequestId", lock.removeRequestId());
+        return view;
+    }
+
     private Ride lock(long rideId) {
         return rides.findByIdForUpdate(rideId)
                 .orElseThrow(() -> ApiException.notFound("设备不存在：" + rideId));
@@ -612,5 +856,12 @@ public class RideService {
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             throw new IllegalStateException("响应序列化失败", e);
         }
+    }
+
+    /**
+     * 单据维度写操作的结构化指纹信封：将 orderId 与完整请求字段（含挂牌清单/人员）
+     * 一并纳入指纹，同一 requestId 跨检修单或异参重放一律 409。
+     */
+    private record OrderScopedRequest(long orderId, Object request) {
     }
 }
