@@ -59,15 +59,18 @@ public class GeneratorDispatchService {
     private final WorkOrderStore store;
     private final GeneratorTruckService trucks;
     private final GenIdempotency idem;
+    private final TruckReplacementService replacements;
     private final TransactionTemplate tx;
 
     public GeneratorDispatchService(JdbcTemplate jdbc, AppClock clock, WorkOrderStore store,
-            GeneratorTruckService trucks, GenIdempotency idem, PlatformTransactionManager txManager) {
+            GeneratorTruckService trucks, GenIdempotency idem, TruckReplacementService replacements,
+            PlatformTransactionManager txManager) {
         this.jdbc = jdbc;
         this.clock = clock;
         this.store = store;
         this.trucks = trucks;
         this.idem = idem;
+        this.replacements = replacements;
         this.tx = new TransactionTemplate(txManager);
     }
 
@@ -127,6 +130,9 @@ public class GeneratorDispatchService {
             }
             if (count("active_occupation", "truck_id = ?", truckId) > 0) {
                 throw new BusinessException("发电车存在未结束占用: " + truckId);
+            }
+            if (count("replacement_reservation", "truck_id = ?", truckId) > 0) {
+                throw new BusinessException("发电车存在热备预占: " + truckId);
             }
             totalCapacity += truck.capacityKw();
         }
@@ -291,6 +297,9 @@ public class GeneratorDispatchService {
             if (count("active_occupation", "truck_id = ?", truckId) > 0) {
                 throw new BusinessException("发电车存在未结束占用: " + truckId);
             }
+            if (count("replacement_reservation", "truck_id = ?", truckId) > 0) {
+                throw new BusinessException("发电车存在热备预占, 超时改派不可移走: " + truckId);
+            }
             capacity += truck.capacityKw();
         }
         if (capacity < row.totalLoadKw()) {
@@ -360,7 +369,8 @@ public class GeneratorDispatchService {
     }
 
     /**
-     * 工单合并或正式复电后：原子撤销未结束调度并释放车辆，供电证据保留。返回撤销的调度单数。
+     * 工单合并或正式复电后：原子撤销未结束调度并释放车辆，供电证据保留；
+     * 同事务关闭未结束热备接替并释放其预占车。返回撤销的调度单数。
      */
     @Transactional(propagation = Propagation.REQUIRED)
     public int cancelForWorkOrder(long workOrderId, String reason) {
@@ -375,6 +385,7 @@ public class GeneratorDispatchService {
             store.addEvent(workOrderId, "GENERATOR_DISPATCH_CANCELLED",
                     "调度单" + row.id() + "因" + reason + "撤销, 车辆已释放, 供电证据保留");
         }
+        replacements.closeForWorkOrder(workOrderId, reason);
         return open.size();
     }
 

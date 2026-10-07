@@ -18,10 +18,12 @@ import com.example.starter.service.FaultReportService;
 import com.example.starter.service.GeneratorDispatchService;
 import com.example.starter.service.GeneratorTruckService;
 import com.example.starter.service.RestoreService;
+import com.example.starter.service.TruckReplacementService;
 import com.example.starter.service.WorkOrderService;
 import com.example.starter.web.dto.ArrivalRequest;
 import com.example.starter.web.dto.ArrivalResponse;
 import com.example.starter.web.dto.CreateGeneratorDispatchRequest;
+import com.example.starter.web.dto.CreateReplacementRequest;
 import com.example.starter.web.dto.DispatchRequest;
 import com.example.starter.web.dto.DispatchResponse;
 import com.example.starter.web.dto.FaultReportRequest;
@@ -33,13 +35,20 @@ import com.example.starter.web.dto.QueueEntry;
 import com.example.starter.web.dto.ReassignRequest;
 import com.example.starter.web.dto.ReassignResponse;
 import com.example.starter.web.dto.RegisterTruckRequest;
+import com.example.starter.web.dto.ReplacementArrivalRequest;
+import com.example.starter.web.dto.ReplacementArrivalResponse;
+import com.example.starter.web.dto.ReplacementView;
 import com.example.starter.web.dto.RestoreChainView;
 import com.example.starter.web.dto.RestoreConfirmRequest;
 import com.example.starter.web.dto.RestoreConfirmResponse;
 import com.example.starter.web.dto.SealResponse;
+import com.example.starter.web.dto.SwitchConfirmRequest;
+import com.example.starter.web.dto.SwitchConfirmResponse;
 import com.example.starter.web.dto.TruckLedgerEntry;
 import com.example.starter.web.dto.TruckView;
 import com.example.starter.web.dto.UpdateTruckAvailabilityRequest;
+import com.example.starter.web.dto.WithdrawReplacementRequest;
+import com.example.starter.web.dto.WithdrawReplacementResponse;
 import com.example.starter.web.dto.WorkOrderView;
 
 /**
@@ -56,10 +65,12 @@ public class RepairController {
     private final EscalationService escalation;
     private final GeneratorTruckService generatorTrucks;
     private final GeneratorDispatchService generatorDispatches;
+    private final TruckReplacementService truckReplacements;
 
     public RepairController(FaultReportService faultReports, DispatchService dispatch,
             RestoreService restore, WorkOrderService workOrders, EscalationService escalation,
-            GeneratorTruckService generatorTrucks, GeneratorDispatchService generatorDispatches) {
+            GeneratorTruckService generatorTrucks, GeneratorDispatchService generatorDispatches,
+            TruckReplacementService truckReplacements) {
         this.faultReports = faultReports;
         this.dispatch = dispatch;
         this.restore = restore;
@@ -67,6 +78,7 @@ public class RepairController {
         this.escalation = escalation;
         this.generatorTrucks = generatorTrucks;
         this.generatorDispatches = generatorDispatches;
+        this.truckReplacements = truckReplacements;
     }
 
     /** 故障接报（含自动研判建单/归并），requestId 幂等。 */
@@ -177,5 +189,44 @@ public class RepairController {
     @GetMapping("/work-orders/{id}/generator-dispatches")
     public List<GeneratorDispatchView> generatorDispatchesOf(@PathVariable long id) {
         return generatorDispatches.listByWorkOrder(id);
+    }
+
+    /** 热备接替申请：仅SUPPLYING调度单，全量预占新车，旧车继续供电，requestId 幂等。 */
+    @PostMapping("/truck-replacements")
+    public ReplacementView createReplacement(@Validated @RequestBody CreateReplacementRequest req) {
+        return truckReplacements.create(req);
+    }
+
+    /** 接替单详情（含热备新车到场、切换确认人与前后容量证据）。 */
+    @GetMapping("/truck-replacements/{id}")
+    public ReplacementView replacementView(@PathVariable long id) {
+        return truckReplacements.view(id);
+    }
+
+    /** 热备新车到场登记，逐车唯一，requestId 幂等。 */
+    @PostMapping("/truck-replacements/{id}/arrivals")
+    public ReplacementArrivalResponse replacementArrive(@PathVariable long id,
+            @Validated @RequestBody ReplacementArrivalRequest req) {
+        return truckReplacements.arrive(id, req);
+    }
+
+    /** 切换确认：新车到齐后两个不同合成操作员确认才原子切换，requestId 幂等。 */
+    @PostMapping("/truck-replacements/{id}/switch-confirmations")
+    public SwitchConfirmResponse confirmSwitch(@PathVariable long id,
+            @Validated @RequestBody SwitchConfirmRequest req) {
+        return truckReplacements.confirmSwitch(id, req);
+    }
+
+    /** 撤回未切换的接替单：释放全部新车预占，保留旧车供电，requestId 幂等。 */
+    @PostMapping("/truck-replacements/{id}/withdraw")
+    public WithdrawReplacementResponse withdrawReplacement(@PathVariable long id,
+            @Validated @RequestBody WithdrawReplacementRequest req) {
+        return truckReplacements.withdraw(id, req);
+    }
+
+    /** 工单视角的热备接替单列表。 */
+    @GetMapping("/work-orders/{id}/truck-replacements")
+    public List<ReplacementView> replacementsOf(@PathVariable long id) {
+        return truckReplacements.listByWorkOrder(id);
     }
 }

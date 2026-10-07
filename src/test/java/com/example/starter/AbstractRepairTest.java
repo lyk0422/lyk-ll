@@ -27,6 +27,11 @@ public abstract class AbstractRepairTest {
     @BeforeEach
     void cleanBusinessData() {
         jdbc.update("DELETE FROM gen_idempotency");
+        jdbc.update("DELETE FROM replacement_confirmation");
+        jdbc.update("DELETE FROM replacement_reservation");
+        jdbc.update("DELETE FROM active_replacement");
+        jdbc.update("DELETE FROM replacement_truck");
+        jdbc.update("DELETE FROM truck_replacement");
         jdbc.update("DELETE FROM supply_evidence");
         jdbc.update("DELETE FROM active_occupation");
         jdbc.update("DELETE FROM dispatch_truck");

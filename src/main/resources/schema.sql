@@ -157,8 +157,55 @@ CREATE TABLE IF NOT EXISTS supply_evidence (
 CREATE TABLE IF NOT EXISTS gen_idempotency (
     request_id VARCHAR(64) PRIMARY KEY COMMENT '幂等请求号',
     fingerprint VARCHAR(128) NOT NULL COMMENT '结构化幂等指纹：长度前缀编码的SHA-256',
-    op VARCHAR(32) NOT NULL COMMENT '操作类型：TRUCK_REGISTER/TRUCK_AVAILABILITY/DISPATCH_CREATE/DISPATCH_ARRIVAL/DISPATCH_REASSIGN',
-    entity_id BIGINT NOT NULL COMMENT '主实体ID（车辆或调度单）',
+    op VARCHAR(32) NOT NULL COMMENT '操作类型：TRUCK_REGISTER/TRUCK_AVAILABILITY/DISPATCH_CREATE/DISPATCH_ARRIVAL/DISPATCH_REASSIGN/REPLACEMENT_CREATE/REPLACEMENT_ARRIVAL/REPLACEMENT_SWITCH_CONFIRM/REPLACEMENT_WITHDRAW',
+    entity_id BIGINT NOT NULL COMMENT '主实体ID（车辆、调度单或接替单）',
     outcome CLOB NOT NULL COMMENT '首次冻结结果JSON，同键同参重放',
     created_at TIMESTAMP NOT NULL COMMENT '首次成功时间'
+);
+
+-- 热备接替：SUPPLYING调度单内一辆供电旧车由1至3辆同馈线热备新车替换。
+-- 时间字段均为 Asia/Shanghai 本地时间（请求以UTC精确时刻传入后转换存储）。
+
+CREATE TABLE IF NOT EXISTS truck_replacement (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    dispatch_id BIGINT NOT NULL COMMENT '原SUPPLYING调度单ID',
+    work_order_id BIGINT NOT NULL COMMENT '工单ID',
+    old_truck_id BIGINT NOT NULL COMMENT '被接替的供电旧车ID',
+    order_version INT NOT NULL COMMENT '申请时冻结的工单版本号',
+    dispatch_version INT NOT NULL COMMENT '申请时冻结的原调度单版本号',
+    total_load_kw INT NOT NULL COMMENT '冻结的合计负荷，单位kW，切换前后均须被覆盖',
+    old_capacity_kw INT NOT NULL COMMENT '切换前旧车容量证据，单位kW',
+    new_capacity_kw INT NULL COMMENT '切换后新车容量合计证据，单位kW，空表示未切换',
+    status VARCHAR(16) NOT NULL COMMENT 'STANDBY热备预占中/SWITCHED已切换/WITHDRAWN已撤回/CLOSED复电或合并关闭',
+    version INT NOT NULL COMMENT '接替单版本号，从1开始，成功变更加1',
+    created_at TIMESTAMP NOT NULL COMMENT '接替单创建时间（请求UTC时刻转本地）',
+    switched_at TIMESTAMP NULL COMMENT '切换完成时刻，空表示未切换'
+);
+
+CREATE TABLE IF NOT EXISTS replacement_truck (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    replacement_id BIGINT NOT NULL COMMENT '接替单ID',
+    truck_id BIGINT NOT NULL COMMENT '热备新车ID',
+    arrived_at TIMESTAMP NULL COMMENT '到场时刻，空表示未到场；逐车唯一记录',
+    CONSTRAINT uk_replacement_truck UNIQUE (replacement_id, truck_id)
+);
+
+CREATE TABLE IF NOT EXISTS replacement_reservation (
+    truck_id BIGINT PRIMARY KEY COMMENT '热备预占的新车ID，主键保证一车仅一个未结束预占',
+    replacement_id BIGINT NOT NULL COMMENT '预占该车的接替单ID',
+    reserved_at TIMESTAMP NOT NULL COMMENT '预占开始时间'
+);
+
+CREATE TABLE IF NOT EXISTS active_replacement (
+    old_truck_id BIGINT PRIMARY KEY COMMENT '被接替的旧车ID，主键保证一车仅一个未结束接替',
+    replacement_id BIGINT NOT NULL COMMENT '未结束接替单ID',
+    created_at TIMESTAMP NOT NULL COMMENT '接替创建时间'
+);
+
+CREATE TABLE IF NOT EXISTS replacement_confirmation (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    replacement_id BIGINT NOT NULL COMMENT '接替单ID',
+    operator VARCHAR(64) NOT NULL COMMENT '切换确认合成操作员，两人不同名才切换',
+    confirmed_at TIMESTAMP NOT NULL COMMENT '确认时刻（请求UTC时刻转本地）',
+    CONSTRAINT uk_replacement_operator UNIQUE (replacement_id, operator)
 );
