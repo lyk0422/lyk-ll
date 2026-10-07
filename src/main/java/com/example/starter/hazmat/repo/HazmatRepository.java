@@ -23,6 +23,8 @@ import com.example.starter.hazmat.po.ApprovalWaypoint;
 import com.example.starter.hazmat.po.Checkin;
 import com.example.starter.hazmat.po.ControlPeriod;
 import com.example.starter.hazmat.po.DisposalRecord;
+import com.example.starter.hazmat.po.EscortQualification;
+import com.example.starter.hazmat.po.EscortReservation;
 import com.example.starter.hazmat.po.GoodsCategory;
 import com.example.starter.hazmat.po.IdempotentRecord;
 import com.example.starter.hazmat.po.NightCurfew;
@@ -156,6 +158,11 @@ public class HazmatRepository {
     public void completeIdempotent(String requestId, int httpStatus, String responseBody) {
         jdbc.update("UPDATE idempotent_record SET status = 'COMPLETED', http_status = ?, response_body = ? WHERE request_id = ?",
                 httpStatus, responseBody, requestId);
+    }
+
+    /** 删除幂等占位（失败不占键语义：业务失败时释放本请求占用的键，允许改参或原参重试）。 */
+    public void deleteIdempotent(String requestId) {
+        jdbc.update("DELETE FROM idempotent_record WHERE request_id = ?", requestId);
     }
 
     // ---------- 运单 ----------
@@ -373,22 +380,25 @@ public class HazmatRepository {
             rs.getString("in_escort_id"),
             rs.getTimestamp("in_time") == null ? null : rs.getTimestamp("in_time").toLocalDateTime(),
             rs.getTimestamp("created_at").toLocalDateTime(),
-            rs.getTimestamp("completed_at") == null ? null : rs.getTimestamp("completed_at").toLocalDateTime());
+            rs.getTimestamp("completed_at") == null ? null : rs.getTimestamp("completed_at").toLocalDateTime(),
+            rs.getInt("escort_control") == 1);
 
     private static final String SEGMENT_COLUMNS =
-            "id, shipment_id, approval_id, relay_seq, status, out_escort_id, out_time, in_escort_id, in_time, created_at, completed_at";
+            "id, shipment_id, approval_id, relay_seq, status, out_escort_id, out_time, in_escort_id, in_time, created_at, completed_at, escort_control";
 
-    public long insertRelaySegment(long shipmentId, long approvalId, int relaySeq, LocalDateTime now) {
+    public long insertRelaySegment(long shipmentId, long approvalId, int relaySeq,
+                                   boolean escortControl, LocalDateTime now) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(connection -> {
             PreparedStatement ps = connection.prepareStatement(
-                    "INSERT INTO relay_segment (shipment_id, approval_id, relay_seq, status, out_escort_id, out_time, in_escort_id, in_time, created_at, completed_at) "
-                            + "VALUES (?, ?, ?, 'IN_PROGRESS', NULL, NULL, NULL, NULL, ?, NULL)",
+                    "INSERT INTO relay_segment (shipment_id, approval_id, relay_seq, status, out_escort_id, out_time, in_escort_id, in_time, created_at, completed_at, escort_control) "
+                            + "VALUES (?, ?, ?, 'IN_PROGRESS', NULL, NULL, NULL, NULL, ?, NULL, ?)",
                     Statement.RETURN_GENERATED_KEYS);
             ps.setLong(1, shipmentId);
             ps.setLong(2, approvalId);
             ps.setInt(3, relaySeq);
             ps.setTimestamp(4, Timestamp.valueOf(now));
+            ps.setInt(5, escortControl ? 1 : 0);
             return ps;
         }, keyHolder);
         return keyHolder.getKey().longValue();
@@ -397,6 +407,11 @@ public class HazmatRepository {
     public Optional<RelaySegment> findSegment(long shipmentId, long approvalId, int relaySeq) {
         return jdbc.query("SELECT " + SEGMENT_COLUMNS + " FROM relay_segment WHERE shipment_id = ? AND approval_id = ? AND relay_seq = ?",
                 SEGMENT_MAPPER, shipmentId, approvalId, relaySeq).stream().findFirst();
+    }
+
+    public Optional<RelaySegment> findSegmentById(long segmentId) {
+        return jdbc.query("SELECT " + SEGMENT_COLUMNS + " FROM relay_segment WHERE id = ?",
+                SEGMENT_MAPPER, segmentId).stream().findFirst();
     }
 
     public List<RelaySegment> findSegments(long shipmentId) {
@@ -481,5 +496,166 @@ public class HazmatRepository {
     public List<DisposalRecord> findDisposals(long shipmentId) {
         return jdbc.query("SELECT id, shipment_id, segment_id, reason, curfew_start, created_at FROM disposal_record WHERE shipment_id = ? ORDER BY id",
                 DISPOSAL_MAPPER, shipmentId);
+    }
+
+    // ---------- 接班员合成资格 ----------
+
+    private static final RowMapper<EscortQualification> QUALIFICATION_MAPPER = (rs, n) ->
+            new EscortQualification(rs.getLong("id"), rs.getString("escort_id"),
+                    rs.getString("goods_category"),
+                    rs.getTimestamp("valid_from").toLocalDateTime(),
+                    rs.getTimestamp("valid_to").toLocalDateTime(),
+                    rs.getInt("revoked") == 1, rs.getInt("version_no"),
+                    rs.getTimestamp("created_at").toLocalDateTime(),
+                    rs.getTimestamp("revoked_at") == null ? null : rs.getTimestamp("revoked_at").toLocalDateTime());
+
+    private static final String QUALIFICATION_COLUMNS =
+            "id, escort_id, goods_category, valid_from, valid_to, revoked, version_no, created_at, revoked_at";
+
+    public long insertQualification(String escortId, String goodsCategory, LocalDateTime validFrom,
+                                    LocalDateTime validTo, LocalDateTime now) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO escort_qualification (escort_id, goods_category, valid_from, valid_to, revoked, version_no, created_at, revoked_at) "
+                            + "VALUES (?, ?, ?, ?, 0, 1, ?, NULL)",
+                    Statement.RETURN_GENERATED_KEYS);
+            ps.setString(1, escortId);
+            ps.setString(2, goodsCategory);
+            ps.setTimestamp(3, Timestamp.valueOf(validFrom));
+            ps.setTimestamp(4, Timestamp.valueOf(validTo));
+            ps.setTimestamp(5, Timestamp.valueOf(now));
+            return ps;
+        }, keyHolder);
+        return keyHolder.getKey().longValue();
+    }
+
+    public Optional<EscortQualification> findQualification(long id) {
+        return jdbc.query("SELECT " + QUALIFICATION_COLUMNS + " FROM escort_qualification WHERE id = ?",
+                QUALIFICATION_MAPPER, id).stream().findFirst();
+    }
+
+    /** 该接班员指定货类的未撤销资格（取最新创建的一条）；无则 empty。 */
+    public Optional<EscortQualification> findActiveQualification(String escortId, String goodsCategory) {
+        return jdbc.query("SELECT " + QUALIFICATION_COLUMNS + " FROM escort_qualification "
+                        + "WHERE escort_id = ? AND goods_category = ? AND revoked = 0 ORDER BY id DESC",
+                QUALIFICATION_MAPPER, escortId, goodsCategory).stream().findFirst();
+    }
+
+    /** 该接班员全部资格（含已撤销），用于区分货类不符与资格已撤销。 */
+    public List<EscortQualification> findQualificationsByEscort(String escortId) {
+        return jdbc.query("SELECT " + QUALIFICATION_COLUMNS + " FROM escort_qualification "
+                        + "WHERE escort_id = ? ORDER BY id",
+                QUALIFICATION_MAPPER, escortId);
+    }
+
+    /**
+     * 撤销资格（乐观版本 CAS）：仅当版本匹配且未撤销时成功，版本号加 1，返回受影响行数。
+     * 过期版本或已撤销返回 0（409）。
+     */
+    public int revokeQualification(long id, int expectedVersion, LocalDateTime now) {
+        return jdbc.update("UPDATE escort_qualification SET revoked = 1, revoked_at = ?, version_no = version_no + 1 "
+                        + "WHERE id = ? AND version_no = ? AND revoked = 0",
+                Timestamp.valueOf(now), id, expectedVersion);
+    }
+
+    /** 该接班员作为 IN 方已完成换班的运单 ID 列表（撤销资格时留风险证据用）。 */
+    public List<Long> findCompletedHandoverShipmentIds(String escortId) {
+        return jdbc.query("SELECT DISTINCT shipment_id FROM relay_segment WHERE in_escort_id = ? AND status = 'COMPLETED'",
+                (rs, n) -> rs.getLong("shipment_id"), escortId);
+    }
+
+    // ---------- 人员预约行锁 ----------
+
+    /** 锁定接班员行（FOR UPDATE）：预约、资格撤销、受控段 IN 确认据此串行化，形成一致次序。 */
+    public void lockEscort(String escortId) {
+        jdbc.update("MERGE INTO escort_booking_lock (escort_id) KEY (escort_id) VALUES (?)", escortId);
+        jdbc.query("SELECT escort_id FROM escort_booking_lock WHERE escort_id = ? FOR UPDATE",
+                (rs, n) -> rs.getString("escort_id"), escortId);
+    }
+
+    // ---------- 人员资格预约 ----------
+
+    private static final RowMapper<EscortReservation> RESERVATION_MAPPER = (rs, n) ->
+            new EscortReservation(rs.getLong("id"), rs.getLong("shipment_id"), rs.getLong("segment_id"),
+                    rs.getString("escort_id"), rs.getLong("qualification_id"),
+                    rs.getTimestamp("shift_start").toLocalDateTime(),
+                    rs.getTimestamp("shift_end").toLocalDateTime(),
+                    rs.getString("status"), rs.getInt("version_no"),
+                    rs.getTimestamp("created_at").toLocalDateTime(),
+                    rs.getTimestamp("released_at") == null ? null : rs.getTimestamp("released_at").toLocalDateTime());
+
+    private static final String RESERVATION_COLUMNS =
+            "id, shipment_id, segment_id, escort_id, qualification_id, shift_start, shift_end, status, version_no, created_at, released_at";
+
+    public long insertReservation(long shipmentId, long segmentId, String escortId, long qualificationId,
+                                  LocalDateTime shiftStart, LocalDateTime shiftEnd, LocalDateTime now) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO escort_reservation (shipment_id, segment_id, escort_id, qualification_id, shift_start, shift_end, status, version_no, created_at, released_at) "
+                            + "VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', 1, ?, NULL)",
+                    Statement.RETURN_GENERATED_KEYS);
+            ps.setLong(1, shipmentId);
+            ps.setLong(2, segmentId);
+            ps.setString(3, escortId);
+            ps.setLong(4, qualificationId);
+            ps.setTimestamp(5, Timestamp.valueOf(shiftStart));
+            ps.setTimestamp(6, Timestamp.valueOf(shiftEnd));
+            ps.setTimestamp(7, Timestamp.valueOf(now));
+            return ps;
+        }, keyHolder);
+        return keyHolder.getKey().longValue();
+    }
+
+    public Optional<EscortReservation> findReservation(long id) {
+        return jdbc.query("SELECT " + RESERVATION_COLUMNS + " FROM escort_reservation WHERE id = ?",
+                RESERVATION_MAPPER, id).stream().findFirst();
+    }
+
+    /** 该接力段的生效中预约（受控段 IN 确认依据）。 */
+    public Optional<EscortReservation> findActiveReservationBySegment(long segmentId) {
+        return jdbc.query("SELECT " + RESERVATION_COLUMNS + " FROM escort_reservation "
+                        + "WHERE segment_id = ? AND status = 'ACTIVE' ORDER BY id DESC",
+                RESERVATION_MAPPER, segmentId).stream().findFirst();
+    }
+
+    /** 该接班员全部生效中预约（班段重叠判断；须在持有人员行锁后调用）。 */
+    public List<EscortReservation> findActiveReservationsByEscort(String escortId) {
+        return jdbc.query("SELECT " + RESERVATION_COLUMNS + " FROM escort_reservation "
+                        + "WHERE escort_id = ? AND status = 'ACTIVE' ORDER BY shift_start",
+                RESERVATION_MAPPER, escortId);
+    }
+
+    public List<EscortReservation> findReservationsByShipment(long shipmentId) {
+        return jdbc.query("SELECT " + RESERVATION_COLUMNS + " FROM escort_reservation "
+                        + "WHERE shipment_id = ? ORDER BY id",
+                RESERVATION_MAPPER, shipmentId);
+    }
+
+    /**
+     * 撤销预约（乐观版本 CAS）：仅当版本匹配且生效中时成功，版本号加 1，返回受影响行数。
+     * 过期版本或已释放返回 0（409）。
+     */
+    public int releaseReservation(long id, int expectedVersion, LocalDateTime now) {
+        return jdbc.update("UPDATE escort_reservation SET status = 'RELEASED', released_at = ?, version_no = version_no + 1 "
+                        + "WHERE id = ? AND version_no = ? AND status = 'ACTIVE'",
+                Timestamp.valueOf(now), id, expectedVersion);
+    }
+
+    /** 运单终结释放未结束预约：该运单生效中且对应接力段未完成换班的预约置为 RELEASED。 */
+    public int releaseUnfinishedReservations(long shipmentId, LocalDateTime now) {
+        return jdbc.update("UPDATE escort_reservation SET status = 'RELEASED', released_at = ?, version_no = version_no + 1 "
+                        + "WHERE shipment_id = ? AND status = 'ACTIVE' "
+                        + "AND segment_id IN (SELECT id FROM relay_segment WHERE shipment_id = ? AND status <> 'COMPLETED')",
+                Timestamp.valueOf(now), shipmentId, shipmentId);
+    }
+
+    /** 资格撤销连带释放：该资格下生效中且对应接力段尚未任何打卡的预约置为 RELEASED。 */
+    public int releaseReleasableByQualification(long qualificationId, LocalDateTime now) {
+        return jdbc.update("UPDATE escort_reservation SET status = 'RELEASED', released_at = ?, version_no = version_no + 1 "
+                        + "WHERE qualification_id = ? AND status = 'ACTIVE' "
+                        + "AND NOT EXISTS (SELECT 1 FROM relay_checkin c WHERE c.segment_id = escort_reservation.segment_id)",
+                Timestamp.valueOf(now), qualificationId);
     }
 }

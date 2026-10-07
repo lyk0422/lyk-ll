@@ -18,6 +18,7 @@ import com.example.starter.hazmat.domain.RelaySegmentStatus;
  * @param inTime       接班打卡时刻；未完成为 null
  * @param createdAt    创建时刻
  * @param completedAt  换班完成时刻（=接班打卡时刻）；未完成为 null
+ * @param escortControl 是否启用人员管控：true 时 IN 确认须来自已预约接班员且时刻落在班段内
  */
 public record RelaySegment(
         long id,
@@ -30,5 +31,6 @@ public record RelaySegment(
         String inEscortId,
         LocalDateTime inTime,
         LocalDateTime createdAt,
-        LocalDateTime completedAt) {
+        LocalDateTime completedAt,
+        boolean escortControl) {
 }

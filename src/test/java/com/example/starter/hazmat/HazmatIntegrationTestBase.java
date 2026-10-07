@@ -12,9 +12,13 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import com.example.starter.hazmat.clock.MutableClock;
 import com.example.starter.hazmat.dto.ApplyRequest;
 import com.example.starter.hazmat.dto.CheckinRequest;
+import com.example.starter.hazmat.dto.QualificationRequest;
 import com.example.starter.hazmat.dto.RelayCheckinRequest;
 import com.example.starter.hazmat.dto.RelayPointRequest;
+import com.example.starter.hazmat.dto.ReleaseReservationRequest;
 import com.example.starter.hazmat.dto.RerouteRequest;
+import com.example.starter.hazmat.dto.ReservationRequest;
+import com.example.starter.hazmat.dto.RevokeQualificationRequest;
 import com.example.starter.hazmat.repo.HazmatRepository;
 import com.example.starter.hazmat.service.HazmatService;
 import com.example.starter.hazmat.service.ServiceResult;
@@ -41,6 +45,10 @@ abstract class HazmatIntegrationTestBase {
     @BeforeEach
     void cleanUp() {
         jdbc.execute("DELETE FROM idempotent_record");
+        jdbc.execute("DELETE FROM escort_reservation");
+        jdbc.execute("DELETE FROM escort_booking_lock");
+        jdbc.execute("DELETE FROM escort_qualification WHERE id > 4");
+        jdbc.execute("UPDATE escort_qualification SET revoked = 0, revoked_at = NULL, version_no = 1 WHERE id <= 4");
         jdbc.execute("DELETE FROM relay_checkin");
         jdbc.execute("DELETE FROM shipment_active_relay");
         jdbc.execute("DELETE FROM relay_segment");
@@ -90,6 +98,41 @@ abstract class HazmatIntegrationTestBase {
 
     protected ServiceResult setRelayPoint(String shipmentNo, String requestId, int waypointSeq) {
         return service.setRelayPoint(shipmentNo, new RelayPointRequest(requestId, waypointSeq));
+    }
+
+    protected ServiceResult setControlledRelayPoint(String shipmentNo, String requestId, int waypointSeq) {
+        return service.setRelayPoint(shipmentNo, new RelayPointRequest(requestId, waypointSeq, true));
+    }
+
+    protected ServiceResult createQualification(String requestId, String escortId, String goodsCategory,
+                                                LocalDateTime validFrom, LocalDateTime validTo) {
+        return service.createQualification(
+                new QualificationRequest(requestId, escortId, goodsCategory, validFrom, validTo));
+    }
+
+    protected ServiceResult revokeQualification(long qualificationId, String requestId, int expectedVersion) {
+        return service.revokeQualification(qualificationId,
+                new RevokeQualificationRequest(requestId, expectedVersion));
+    }
+
+    protected ServiceResult getQualification(long qualificationId) {
+        return service.getQualification(qualificationId);
+    }
+
+    protected ServiceResult reserve(String shipmentNo, String requestId, int relaySeq, String escortId,
+                                    LocalDateTime shiftStart, LocalDateTime shiftEnd) {
+        return service.reserve(shipmentNo,
+                new ReservationRequest(requestId, relaySeq, escortId, shiftStart, shiftEnd));
+    }
+
+    protected ServiceResult releaseReservation(String shipmentNo, long reservationId,
+                                               String requestId, int expectedVersion) {
+        return service.releaseReservation(shipmentNo, reservationId,
+                new ReleaseReservationRequest(requestId, expectedVersion));
+    }
+
+    protected ServiceResult listReservations(String shipmentNo) {
+        return service.listReservations(shipmentNo);
     }
 
     protected ServiceResult relayCheckin(String shipmentNo, String requestId, String escortId,

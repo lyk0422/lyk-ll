@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -24,12 +25,18 @@ import com.example.starter.hazmat.domain.ShipmentStatus;
 import com.example.starter.hazmat.domain.WaypointState;
 import com.example.starter.hazmat.dto.ApplyRequest;
 import com.example.starter.hazmat.dto.CheckinRequest;
+import com.example.starter.hazmat.dto.QualificationRequest;
 import com.example.starter.hazmat.dto.RelayCheckinRequest;
 import com.example.starter.hazmat.dto.RelayPointRequest;
+import com.example.starter.hazmat.dto.ReleaseReservationRequest;
 import com.example.starter.hazmat.dto.RerouteRequest;
+import com.example.starter.hazmat.dto.ReservationRequest;
+import com.example.starter.hazmat.dto.RevokeQualificationRequest;
 import com.example.starter.hazmat.po.ApprovalWaypoint;
 import com.example.starter.hazmat.po.Checkin;
 import com.example.starter.hazmat.po.DisposalRecord;
+import com.example.starter.hazmat.po.EscortQualification;
+import com.example.starter.hazmat.po.EscortReservation;
 import com.example.starter.hazmat.po.GoodsCategory;
 import com.example.starter.hazmat.po.IdempotentRecord;
 import com.example.starter.hazmat.po.NightCurfew;
@@ -65,6 +72,9 @@ public class HazmatService {
     public static final String EVT_RELAY_HANDOVER = "RELAY_HANDOVER";
     public static final String EVT_RELAY_CHECKIN_REVERSED = "RELAY_CHECKIN_REVERSED";
     public static final String EVT_CURFEW_FROZEN = "CURFEW_FROZEN";
+    public static final String EVT_RESERVATION_CREATED = "RESERVATION_CREATED";
+    public static final String EVT_RESERVATION_RELEASED = "RESERVATION_RELEASED";
+    public static final String EVT_QUALIFICATION_RISK = "QUALIFICATION_RISK";
 
     /** 连续超时途经点数达到该值即升级失联（恰 2 个触发）。 */
     static final int LOST_CONTACT_CONSECUTIVE_TIMEOUTS = 2;
@@ -346,7 +356,7 @@ public class HazmatService {
      */
     public ServiceResult setRelayPoint(String shipmentNo, RelayPointRequest request) {
         String fingerprint = fingerprint("RELAY_POINT", request.requestId(), shipmentNo,
-                String.valueOf(request.waypointSeq()));
+                String.valueOf(request.waypointSeq()), String.valueOf(request.controlEnabled()));
         return withIdempotency(request.requestId(), fingerprint,
                 () -> tx.execute(status -> doSetRelayPoint(shipmentNo, request)));
     }
@@ -381,7 +391,8 @@ public class HazmatService {
         LocalDateTime now = now();
         long segmentId;
         try {
-            segmentId = repository.insertRelaySegment(shipment.id(), approval.id(), target.seq(), now);
+            segmentId = repository.insertRelaySegment(shipment.id(), approval.id(), target.seq(),
+                    request.controlEnabled(), now);
         } catch (DuplicateKeyException e) {
             throw ApiException.conflict("RELAY_POINT_DUPLICATE",
                     "途经点 " + target.seq() + " 已设置接力段（运单+途经点序号去重）");
@@ -466,6 +477,10 @@ public class HazmatService {
             rejectRelayReverse(shipment, segment, request,
                     "交班后已有接班时刻 " + inCk.get().checkTime() + " 不晚于本次交班时刻", now);
         }
+        // 人员管控门禁：受控段 IN 确认须来自预约人员且时刻落在班段内；不阻止原人员 OUT 离岗。
+        if (role == EscortRole.IN && segment.escortControl()) {
+            enforceReservationGate(segment, request);
+        }
         repository.insertRelayCheckin(segment.id(), shipment.id(), request.escortId(), role,
                 request.checkTime(), request.requestId(), now);
 
@@ -501,6 +516,311 @@ public class HazmatService {
                 + request.checkTime() + " " + detail + "，逆序拒绝";
         eventRecorder.recordNewTransaction(shipment.id(), EVT_RELAY_CHECKIN_REVERSED, message, now);
         throw ApiException.badRequest("RELAY_CHECKIN_REVERSED", message);
+    }
+
+    // ============================ 接班员合成资格 ============================
+
+    /**
+     * 新增接班员合成资格（合成数据，不接真实资格机构）。
+     * 有效区间为 UTC 闭区间；版本从 1 起。requestId 幂等：同参重放原响应，改参 409，失败不占键。
+     */
+    public ServiceResult createQualification(QualificationRequest request) {
+        String fingerprint = fingerprint("QUAL_CREATE", request.requestId(), request.escortId(),
+                request.goodsCategory(), request.validFrom().toString(), request.validTo().toString());
+        return withIdempotencyFailRelease(request.requestId(), fingerprint,
+                () -> tx.execute(status -> doCreateQualification(request)));
+    }
+
+    private ServiceResult doCreateQualification(QualificationRequest request) {
+        if (!request.validTo().isAfter(request.validFrom())) {
+            throw ApiException.badRequest("QUALIFICATION_WINDOW_INVALID",
+                    "资格有效区间终点 " + request.validTo() + " 须严格晚于起点 " + request.validFrom());
+        }
+        repository.findCategory(request.goodsCategory())
+                .orElseThrow(() -> ApiException.badRequest("CATEGORY_NOT_FOUND",
+                        "危化品类别不存在: " + request.goodsCategory()));
+        long id = repository.insertQualification(request.escortId(), request.goodsCategory(),
+                request.validFrom(), request.validTo(), now());
+        Map<String, Object> body = qualificationView(repository.findQualification(id).orElseThrow());
+        body.put("message", "接班员资格已登记（合成数据）");
+        return ServiceResult.ok(body);
+    }
+
+    /**
+     * 撤销资格（expectedVersion 乐观版本：成功加 1，过期 409）。
+     * 与受控段 IN 确认共用人员行锁形成一致次序：IN 先完成则换班不回滚、留风险证据；
+     * 撤销先提交则后续 IN 重查资格拒绝。撤销后该人后续预约被拒绝。
+     */
+    public ServiceResult revokeQualification(long qualificationId, RevokeQualificationRequest request) {
+        String fingerprint = fingerprint("QUAL_REVOKE", request.requestId(),
+                String.valueOf(qualificationId), String.valueOf(request.expectedVersion()));
+        return withIdempotencyFailRelease(request.requestId(), fingerprint,
+                () -> tx.execute(status -> doRevokeQualification(qualificationId, request)));
+    }
+
+    private ServiceResult doRevokeQualification(long qualificationId, RevokeQualificationRequest request) {
+        EscortQualification qualification = repository.findQualification(qualificationId)
+                .orElseThrow(() -> ApiException.notFound("QUALIFICATION_NOT_FOUND",
+                        "资格不存在: " + qualificationId));
+        // 人员行锁：与受控段 IN 确认串行化，撤销与 IN 形成一致次序。
+        repository.lockEscort(qualification.escortId());
+        qualification = repository.findQualification(qualificationId).orElseThrow();
+        if (qualification.revoked()) {
+            throw ApiException.conflict("QUALIFICATION_ALREADY_REVOKED", "资格 " + qualificationId + " 已撤销");
+        }
+        LocalDateTime now = now();
+        int rows = repository.revokeQualification(qualificationId, request.expectedVersion(), now);
+        if (rows == 0) {
+            throw ApiException.conflict("VERSION_CONFLICT",
+                    "资格版本过期：期望 " + request.expectedVersion() + "，当前 " + qualification.versionNo());
+        }
+        // 连带释放该资格下尚未开始打卡的生效预约（已开始打卡的预约不得撤销，IN 时重查资格拒绝）。
+        int released = repository.releaseReleasableByQualification(qualificationId, now);
+        // 风险证据：该员已完成换班不回滚，逐运单留事件，并拒绝该人后续预约（资格已撤销）。
+        List<Long> handoverShipments = repository.findCompletedHandoverShipmentIds(qualification.escortId());
+        for (Long sid : handoverShipments) {
+            repository.insertEvent(sid, EVT_QUALIFICATION_RISK,
+                    "接班员 " + qualification.escortId() + " 的资格 " + qualificationId
+                            + " 在换班完成后被撤销：已成功换班不回滚，该人后续预约将被拒绝", now);
+        }
+        Map<String, Object> body = qualificationView(repository.findQualification(qualificationId).orElseThrow());
+        body.put("releasedReservations", released);
+        body.put("completedHandoversKept", handoverShipments.size());
+        return ServiceResult.ok(body);
+    }
+
+    /** 资格证据查询（含版本与撤销状态）。 */
+    public ServiceResult getQualification(long qualificationId) {
+        EscortQualification qualification = repository.findQualification(qualificationId)
+                .orElseThrow(() -> ApiException.notFound("QUALIFICATION_NOT_FOUND",
+                        "资格不存在: " + qualificationId));
+        return ServiceResult.ok(qualificationView(qualification));
+    }
+
+    // ============================ 人员资格预约 ============================
+
+    /**
+     * 预约人员资格：启用人员管控的接力段须先预约（运单+接力点+接班员+班段）。
+     * 班段 [start,end)（UTC）起止有序且被资格区间覆盖；同一接班员班段端点相接可预约、
+     * 内部重叠拒绝；货类不符、跨运单接力点、已撤销资格拒绝。校验与人员占用同一事务提交。
+     */
+    public ServiceResult reserve(String shipmentNo, ReservationRequest request) {
+        String fingerprint = fingerprint("RESERVATION", request.requestId(), shipmentNo,
+                String.valueOf(request.relaySeq()), request.escortId(),
+                request.shiftStart().toString(), request.shiftEnd().toString());
+        return withIdempotencyFailRelease(request.requestId(), fingerprint,
+                () -> tx.execute(status -> doReserve(shipmentNo, request)));
+    }
+
+    private ServiceResult doReserve(String shipmentNo, ReservationRequest request) {
+        if (!request.shiftEnd().isAfter(request.shiftStart())) {
+            throw ApiException.badRequest("RESERVATION_SHIFT_INVALID",
+                    "班段终点 " + request.shiftEnd() + " 须严格晚于起点 " + request.shiftStart()
+                            + "（半开区间[start,end)）");
+        }
+        Shipment shipment = loadShipment(shipmentNo);
+        // 运单行锁：与运单终态释放预约串行（终态后不得新增人员占用）。
+        repository.lockShipment(shipment.id());
+        shipment = repository.findShipmentById(shipment.id()).orElseThrow();
+        if (shipment.status().isTerminal()) {
+            throw ApiException.conflict("SHIPMENT_TERMINAL",
+                    "运单终态 " + shipment.status() + "，不可预约人员");
+        }
+        // 接力点须属于本运单当前生效路线版本：跨运单接力点拒绝。
+        RouteApproval approval = currentApproval(shipment);
+        RelaySegment segment = repository.findSegment(shipment.id(), approval.id(), request.relaySeq())
+                .orElseThrow(() -> ApiException.badRequest("RESERVATION_SEGMENT_MISMATCH",
+                        "运单 " + shipmentNo + " 无途经点 " + request.relaySeq()
+                                + " 的接力段，跨运单接力点拒绝"));
+        if (segment.status() != RelaySegmentStatus.IN_PROGRESS) {
+            throw ApiException.conflict("RELAY_SEGMENT_NOT_ACTIVE",
+                    "接力段状态 " + segment.status() + "，不可预约");
+        }
+        if (!segment.escortControl()) {
+            throw ApiException.badRequest("RELAY_SEGMENT_UNCONTROLLED",
+                    "接力点 " + request.relaySeq() + " 的接力段未启用人员管控，无需预约");
+        }
+        // 人员行锁：同一接班员的预约串行化，重叠校验与人员占用同一事务提交。
+        repository.lockEscort(request.escortId());
+        final String goodsCategory = shipment.goodsCategory();
+        EscortQualification qualification = repository
+                .findActiveQualification(request.escortId(), goodsCategory)
+                .orElse(null);
+        if (qualification == null) {
+            boolean hadSameCategory = repository.findQualificationsByEscort(request.escortId()).stream()
+                    .anyMatch(q -> q.goodsCategory().equals(goodsCategory));
+            if (hadSameCategory) {
+                throw ApiException.conflict("QUALIFICATION_REVOKED",
+                        "接班员 " + request.escortId() + " 的 " + goodsCategory
+                                + " 资格已撤销，禁止预约");
+            }
+            throw ApiException.conflict("QUALIFICATION_CATEGORY_MISMATCH",
+                    "接班员 " + request.escortId() + " 无可押运货类 " + goodsCategory + " 的资格");
+        }
+        // 整个班段须被资格有效区间覆盖（UTC 闭区间覆盖半开班段）。
+        if (qualification.validFrom().isAfter(request.shiftStart())
+                || qualification.validTo().isBefore(request.shiftEnd())) {
+            throw ApiException.conflict("RESERVATION_SHIFT_NOT_COVERED",
+                    "班段 [" + request.shiftStart() + ", " + request.shiftEnd() + ") 未被资格有效区间 ["
+                            + qualification.validFrom() + ", " + qualification.validTo() + "] 覆盖");
+        }
+        // 同一接力段同时刻至多一个生效预约。
+        if (repository.findActiveReservationBySegment(segment.id()).isPresent()) {
+            throw ApiException.conflict("RESERVATION_SEGMENT_OCCUPIED",
+                    "接力点 " + request.relaySeq() + " 的接力段已存在生效中预约");
+        }
+        // 同一接班员班段重叠拒绝（端点相接允许）：[s1,e1) 与 [s2,e2) 重叠 ⟺ s1<e2 且 s2<e1。
+        for (EscortReservation existing : repository.findActiveReservationsByEscort(request.escortId())) {
+            if (request.shiftStart().isBefore(existing.shiftEnd())
+                    && existing.shiftStart().isBefore(request.shiftEnd())) {
+                throw ApiException.conflict("RESERVATION_OVERLAP",
+                        "接班员 " + request.escortId() + " 已有重叠班段预约 " + existing.id()
+                                + " [" + existing.shiftStart() + ", " + existing.shiftEnd()
+                                + ")（运单 " + existing.shipmentId() + "），同一人不能同时接下两张单");
+            }
+        }
+        LocalDateTime now = now();
+        long reservationId = repository.insertReservation(shipment.id(), segment.id(), request.escortId(),
+                qualification.id(), request.shiftStart(), request.shiftEnd(), now);
+        repository.insertEvent(shipment.id(), EVT_RESERVATION_CREATED,
+                "预约接班员 " + request.escortId() + "：接力点 " + request.relaySeq() + "，班段 ["
+                        + request.shiftStart() + ", " + request.shiftEnd() + ") UTC，资格 "
+                        + qualification.id() + "(v" + qualification.versionNo() + ")", now);
+        Map<String, Object> body = shipmentView(shipmentNo);
+        body.put("reservation", reservationView(repository.findReservation(reservationId).orElseThrow()));
+        return ServiceResult.ok(body);
+    }
+
+    /**
+     * 撤销预约并释放人员占用（expectedVersion 乐观版本：成功加 1，过期 409）。
+     * 仅首次换班打卡前可撤销；接力段已开始打卡则不得撤销。
+     */
+    public ServiceResult releaseReservation(String shipmentNo, long reservationId,
+                                            ReleaseReservationRequest request) {
+        String fingerprint = fingerprint("RESERVATION_RELEASE", request.requestId(), shipmentNo,
+                String.valueOf(reservationId), String.valueOf(request.expectedVersion()));
+        return withIdempotencyFailRelease(request.requestId(), fingerprint,
+                () -> tx.execute(status -> doReleaseReservation(shipmentNo, reservationId, request)));
+    }
+
+    private ServiceResult doReleaseReservation(String shipmentNo, long reservationId,
+                                               ReleaseReservationRequest request) {
+        Shipment shipment = loadShipment(shipmentNo);
+        // 运单行锁：与接力打卡串行，"首次换班打卡前"判定与打卡插入形成一致次序。
+        repository.lockShipment(shipment.id());
+        EscortReservation reservation = repository.findReservation(reservationId)
+                .orElseThrow(() -> ApiException.notFound("RESERVATION_NOT_FOUND",
+                        "预约不存在: " + reservationId));
+        if (reservation.shipmentId() != shipment.id()) {
+            throw ApiException.badRequest("RESERVATION_MISMATCH",
+                    "预约 " + reservationId + " 不属于运单 " + shipmentNo);
+        }
+        if (!EscortReservation.STATUS_ACTIVE.equals(reservation.status())) {
+            throw ApiException.conflict("RESERVATION_ALREADY_RELEASED", "预约 " + reservationId + " 已释放");
+        }
+        if (reservation.versionNo() != request.expectedVersion()) {
+            throw ApiException.conflict("VERSION_CONFLICT",
+                    "预约版本过期：期望 " + request.expectedVersion() + "，当前 " + reservation.versionNo());
+        }
+        if (!repository.findRelayCheckins(reservation.segmentId()).isEmpty()) {
+            throw ApiException.conflict("RESERVATION_CHECKIN_STARTED",
+                    "接力段已开始换班打卡，预约不得撤销");
+        }
+        LocalDateTime now = now();
+        int rows = repository.releaseReservation(reservationId, request.expectedVersion(), now);
+        if (rows == 0) {
+            throw ApiException.conflict("VERSION_CONFLICT",
+                    "预约版本过期：期望 " + request.expectedVersion() + "，当前 " + reservation.versionNo());
+        }
+        repository.insertEvent(shipment.id(), EVT_RESERVATION_RELEASED,
+                "撤销预约 " + reservationId + "：释放接班员 " + reservation.escortId() + " 班段 ["
+                        + reservation.shiftStart() + ", " + reservation.shiftEnd() + ") UTC", now);
+        Map<String, Object> body = shipmentView(shipmentNo);
+        body.put("reservation", reservationView(repository.findReservation(reservationId).orElseThrow()));
+        return ServiceResult.ok(body);
+    }
+
+    /** 班段及资格版本证据查询：该运单全部预约（含班段、资格版本、预约版本、状态）。 */
+    public ServiceResult listReservations(String shipmentNo) {
+        Shipment shipment = loadShipment(shipmentNo);
+        List<Map<String, Object>> views = new ArrayList<>();
+        for (EscortReservation reservation : repository.findReservationsByShipment(shipment.id())) {
+            views.add(reservationView(reservation));
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("shipmentNo", shipmentNo);
+        body.put("reservations", views);
+        return ServiceResult.ok(body);
+    }
+
+    /**
+     * 受控接力段 IN 确认门禁（须在事务内、已持有运单行锁后调用）：
+     * 须存在生效预约且来自预约人员；实际接班时刻（换算 UTC）落在班段 [start,end) 内，
+     * 恰到 end 拒绝；重查资格未撤销。新门禁不阻止原人员 OUT 离岗。
+     */
+    private void enforceReservationGate(RelaySegment segment, RelayCheckinRequest request) {
+        // 人员行锁：与资格撤销串行化，撤销与 IN 形成一致次序。
+        repository.lockEscort(request.escortId());
+        EscortReservation reservation = repository.findActiveReservationBySegment(segment.id())
+                .orElseThrow(() -> ApiException.conflict("RELAY_RESERVATION_REQUIRED",
+                        "受控接力段须先完成人员资格预约，方可接班确认"));
+        if (!reservation.escortId().equals(request.escortId())) {
+            throw ApiException.conflict("RELAY_RESERVATION_ESCORT_MISMATCH",
+                    "受控段接班确认须来自预约人员 " + reservation.escortId()
+                            + "，实际打卡人 " + request.escortId());
+        }
+        LocalDateTime checkTimeUtc = toUtc(request.checkTime());
+        if (checkTimeUtc.isBefore(reservation.shiftStart())
+                || !checkTimeUtc.isBefore(reservation.shiftEnd())) {
+            throw ApiException.badRequest("RELAY_SHIFT_OUT_OF_RANGE",
+                    "实际接班时刻 " + request.checkTime() + "（UTC " + checkTimeUtc + "）未落在预约班段 ["
+                            + reservation.shiftStart() + ", " + reservation.shiftEnd() + ") 内（恰到终点拒绝）");
+        }
+        // 重查资格未撤销：与撤销并发时由人员行锁保证一致次序。
+        EscortQualification qualification = repository.findQualification(reservation.qualificationId())
+                .orElseThrow(() -> ApiException.conflict("QUALIFICATION_NOT_FOUND",
+                        "预约资格 " + reservation.qualificationId() + " 不存在"));
+        if (qualification.revoked()) {
+            throw ApiException.conflict("QUALIFICATION_REVOKED",
+                    "接班员 " + request.escortId() + " 的资格已撤销，禁止接班确认");
+        }
+    }
+
+    /** 业务时刻（Asia/Shanghai）换算为 UTC 时刻，用于班段与资格区间（UTC）比较。 */
+    private static LocalDateTime toUtc(LocalDateTime businessTime) {
+        return businessTime.atZone(MutableClock.ZONE).withZoneSameInstant(ZoneOffset.UTC).toLocalDateTime();
+    }
+
+    private Map<String, Object> qualificationView(EscortQualification qualification) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("qualificationId", qualification.id());
+        body.put("escortId", qualification.escortId());
+        body.put("goodsCategory", qualification.goodsCategory());
+        body.put("validFrom", qualification.validFrom().toString());
+        body.put("validTo", qualification.validTo().toString());
+        body.put("revoked", qualification.revoked());
+        body.put("versionNo", qualification.versionNo());
+        body.put("createdAt", qualification.createdAt().toString());
+        body.put("revokedAt", qualification.revokedAt() == null ? null : qualification.revokedAt().toString());
+        return body;
+    }
+
+    private Map<String, Object> reservationView(EscortReservation reservation) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("reservationId", reservation.id());
+        body.put("shipmentId", reservation.shipmentId());
+        body.put("segmentId", reservation.segmentId());
+        body.put("escortId", reservation.escortId());
+        body.put("qualificationId", reservation.qualificationId());
+        body.put("qualificationVersion", repository.findQualification(reservation.qualificationId())
+                .map(EscortQualification::versionNo).orElse(null));
+        body.put("shiftStart", reservation.shiftStart().toString());
+        body.put("shiftEnd", reservation.shiftEnd().toString());
+        body.put("status", reservation.status());
+        body.put("versionNo", reservation.versionNo());
+        body.put("createdAt", reservation.createdAt().toString());
+        body.put("releasedAt", reservation.releasedAt() == null ? null : reservation.releasedAt().toString());
+        return body;
     }
 
     // ============================ 夜间禁行判定与冻结 ============================
@@ -562,6 +882,8 @@ public class HazmatService {
                 .map(RelaySegment::id).findFirst().orElse(null);
         repository.releaseRelay(shipment.id());
         repository.releaseVehicle(shipment.vehiclePlate());
+        // 运单终结释放未结束预约（换班已完成的预约保留为已履行占用证据）。
+        repository.releaseUnfinishedReservations(shipment.id(), now);
         String reason = "未在夜间禁行起点 " + curfew.curfewStart() + " 前完成押运换班，运单冻结并转处置";
         repository.insertDisposal(shipment.id(), segmentId, reason, curfew.curfewStart(), now);
         repository.insertEvent(shipment.id(), EVT_CURFEW_FROZEN, reason, now);
@@ -689,6 +1011,8 @@ public class HazmatService {
             throw ApiException.conflict("ALREADY_LOST_CONTACT", "运单已失联冻结，不可核销");
         }
         repository.releaseVehicle(shipment.vehiclePlate());
+        // 运单终结释放未结束预约。
+        repository.releaseUnfinishedReservations(shipment.id(), now());
         return ServiceResult.ok(shipmentView(shipmentNo));
     }
 
@@ -754,6 +1078,8 @@ public class HazmatService {
                     upgraded = true;
                     repository.freezeVehicle(shipment.vehiclePlate(), shipmentId, now);
                     repository.releaseVehicle(shipment.vehiclePlate());
+                    // 运单终结释放未结束预约。
+                    repository.releaseUnfinishedReservations(shipmentId, now);
                     repository.insertEvent(shipmentId, EVT_LOST_CONTACT,
                             "连续 2 个途经点超时未打卡，升级失联并冻结车辆 " + shipment.vehiclePlate(), now);
                 }
@@ -975,6 +1301,47 @@ public class HazmatService {
                 throw e;
             } catch (RuntimeException e) {
                 // 系统异常：保留 PROCESSING 之外，直接抛出（占位不删除，便于排查）。
+                throw e;
+            }
+        }
+        throw ApiException.conflict("IDEMPOTENT_RACE", "幂等记录并发竞争，请稍后重试");
+    }
+
+    /**
+     * 失败不占键的幂等执行（人员资格与预约接口）：
+     * <ul>
+     *   <li>同键同参且首次成功：重放首次响应；</li>
+     *   <li>同键异参：指纹不符返回 409；</li>
+     *   <li>首次失败：删除占位、不保存失败结果，允许改参或原参重试。</li>
+     * </ul>
+     */
+    private ServiceResult withIdempotencyFailRelease(String requestId, String fingerprint,
+                                                     java.util.function.Supplier<ServiceResult> action) {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            Optional<IdempotentRecord> existing = repository.findIdempotent(requestId);
+            if (existing.isPresent()) {
+                IdempotentRecord record = existing.get();
+                if (!record.fingerprint().equals(fingerprint)) {
+                    throw ApiException.conflict("IDEMPOTENT_FINGERPRINT_MISMATCH",
+                            "requestId=" + requestId + " 已用于不同业务参数");
+                }
+                if ("COMPLETED".equals(record.status())) {
+                    return new ServiceResult(record.httpStatus(), parseJson(record.responseBody()));
+                }
+                throw ApiException.conflict("IDEMPOTENT_PROCESSING",
+                        "相同 requestId 请求正在处理中");
+            }
+            boolean inserted = repository.insertProcessingIdempotent(requestId, fingerprint, now());
+            if (!inserted) {
+                continue; // 并发插入竞争：重读记录走重放分支
+            }
+            try {
+                ServiceResult result = action.get();
+                repository.completeIdempotent(requestId, result.httpStatus(), toJson(result.body()));
+                return result;
+            } catch (RuntimeException e) {
+                // 失败不占键：删除本请求占位，允许改参或原参重试。
+                repository.deleteIdempotent(requestId);
                 throw e;
             }
         }

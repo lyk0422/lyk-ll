@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS shipment_event (
     detail      VARCHAR(1024),
     event_time  TIMESTAMP   NOT NULL
 );
-COMMENT ON COLUMN shipment_event.event_type IS '事件：ROUTE_REJECTED/CHECKIN_REVERSED/DEVIATION_WARNING/LOST_CONTACT/LATE_CHECKIN_AFTER_CLOSE/REROUTE_SWITCH/RELAY_POINT_SET/RELAY_HANDOVER/RELAY_CHECKIN_REVERSED/CURFEW_FROZEN';
+COMMENT ON COLUMN shipment_event.event_type IS '事件：ROUTE_REJECTED/CHECKIN_REVERSED/DEVIATION_WARNING/LOST_CONTACT/LATE_CHECKIN_AFTER_CLOSE/REROUTE_SWITCH/RELAY_POINT_SET/RELAY_HANDOVER/RELAY_CHECKIN_REVERSED/CURFEW_FROZEN/RESERVATION_CREATED/RESERVATION_RELEASED/QUALIFICATION_RISK';
 
 -- 夜间禁行时段规则：计划运输窗口跨越禁行起点的运单须设置安全接力点并在起点前完成换班
 CREATE TABLE IF NOT EXISTS night_curfew (
@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS relay_segment (
     in_time       TIMESTAMP,
     created_at    TIMESTAMP   NOT NULL,
     completed_at  TIMESTAMP,
+    escort_control TINYINT    NOT NULL DEFAULT 0,
     CONSTRAINT uk_relay_segment UNIQUE (shipment_id, approval_id, relay_seq)
 );
 COMMENT ON COLUMN relay_segment.relay_seq IS '安全接力点途经点序号；按运单+路线版本+途经点序号去重';
@@ -150,6 +151,7 @@ COMMENT ON COLUMN relay_segment.out_time IS '交班打卡时刻（Asia/Shanghai�
 COMMENT ON COLUMN relay_segment.in_escort_id IS '接班押运员编号；换班未完成为NULL';
 COMMENT ON COLUMN relay_segment.in_time IS '接班打卡时刻（Asia/Shanghai），须严格晚于交班时刻；未完成为NULL';
 COMMENT ON COLUMN relay_segment.completed_at IS '换班完成时刻=接班打卡时刻，须严格早于夜间禁行起点；未完成为NULL';
+COMMENT ON COLUMN relay_segment.escort_control IS '是否启用人员管控：1 受控（IN确认须来自已预约接班员且时刻落在班段内），0 旧行为';
 
 -- 进行中接力段占用：同一运单同时刻只允许一个进行中接力段（主键冲突即并发拒绝）
 CREATE TABLE IF NOT EXISTS shipment_active_relay (
@@ -157,6 +159,55 @@ CREATE TABLE IF NOT EXISTS shipment_active_relay (
     segment_id  BIGINT NOT NULL
 );
 COMMENT ON TABLE shipment_active_relay IS '进行中接力段占用：创建接力段时插入，换班完成或禁行冻结时删除';
+
+-- 接班员合成资格：人员编号+可押运货类+UTC有效区间+撤销状态（不接真实资格机构）
+CREATE TABLE IF NOT EXISTS escort_qualification (
+    id             BIGINT AUTO_INCREMENT NOT NULL PRIMARY KEY,
+    escort_id      VARCHAR(32) NOT NULL,
+    goods_category VARCHAR(32) NOT NULL,
+    valid_from     TIMESTAMP   NOT NULL,
+    valid_to       TIMESTAMP   NOT NULL,
+    revoked        TINYINT     NOT NULL DEFAULT 0,
+    version_no     INT         NOT NULL,
+    created_at     TIMESTAMP   NOT NULL,
+    revoked_at     TIMESTAMP
+);
+COMMENT ON TABLE escort_qualification IS '接班员合成资格（合成数据，不接真实资格机构）；版本从1起，修改用expectedVersion、成功加1、过期409';
+COMMENT ON COLUMN escort_qualification.escort_id IS '接班员编号（合成数据）';
+COMMENT ON COLUMN escort_qualification.goods_category IS '可押运货类，须与运单货类一致';
+COMMENT ON COLUMN escort_qualification.valid_from IS '资格有效区间起点（UTC，闭区间），班段起点须不早于此';
+COMMENT ON COLUMN escort_qualification.valid_to IS '资格有效区间终点（UTC，闭区间），班段终点须不晚于此';
+COMMENT ON COLUMN escort_qualification.revoked IS '是否已撤销：1 已撤销，撤销后拒绝新预约与受控段接班确认';
+COMMENT ON COLUMN escort_qualification.version_no IS '资格版本号：从1起，每次修改（含撤销）加1';
+
+-- 人员预约行锁：同一接班员的预约/资格撤销/受控段IN确认据此串行化，形成一致次序
+CREATE TABLE IF NOT EXISTS escort_booking_lock (
+    escort_id VARCHAR(32) NOT NULL PRIMARY KEY
+);
+COMMENT ON TABLE escort_booking_lock IS '接班员预约串行化锁：预约、资格撤销、受控段IN确认前 SELECT FOR UPDATE';
+
+-- 人员资格预约：启用人员管控的接力段须先预约（运单+接力点+接班员+班段）
+CREATE TABLE IF NOT EXISTS escort_reservation (
+    id               BIGINT AUTO_INCREMENT NOT NULL PRIMARY KEY,
+    shipment_id      BIGINT      NOT NULL,
+    segment_id       BIGINT      NOT NULL,
+    escort_id        VARCHAR(32) NOT NULL,
+    qualification_id BIGINT      NOT NULL,
+    shift_start      TIMESTAMP   NOT NULL,
+    shift_end        TIMESTAMP   NOT NULL,
+    status           VARCHAR(16) NOT NULL,
+    version_no       INT         NOT NULL,
+    created_at       TIMESTAMP   NOT NULL,
+    released_at      TIMESTAMP
+);
+COMMENT ON TABLE escort_reservation IS '人员资格预约：班段[start,end)（UTC），同一接班员班段端点相接可预约、内部重叠拒绝；版本从1起';
+COMMENT ON COLUMN escort_reservation.segment_id IS '接力段ID，须属于本运单（跨运单接力点拒绝）';
+COMMENT ON COLUMN escort_reservation.qualification_id IS '预约时使用的资格ID，受控段IN确认时重查未撤销';
+COMMENT ON COLUMN escort_reservation.shift_start IS '班段起点（UTC，半开区间[start,end)），实际接班时刻（换算UTC）须不早于此';
+COMMENT ON COLUMN escort_reservation.shift_end IS '班段终点（UTC，半开区间[start,end)），实际接班时刻恰到此点拒绝';
+COMMENT ON COLUMN escort_reservation.status IS 'ACTIVE生效中/RELEASED已释放（撤销预约、资格撤销连带释放或运单终结释放）';
+COMMENT ON COLUMN escort_reservation.version_no IS '预约版本号：从1起，每次修改（含释放）加1';
+COMMENT ON COLUMN escort_reservation.released_at IS '释放时刻（Asia/Shanghai业务时钟）；未释放为NULL';
 
 -- 接力双人打卡：同一接力段每种角色仅一条，单人打卡不生效
 CREATE TABLE IF NOT EXISTS relay_checkin (
