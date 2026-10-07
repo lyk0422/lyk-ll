@@ -22,10 +22,21 @@ public class RollLifeRepository {
         this.jdbc = jdbc;
     }
 
-    /** 轧辊台账行。status 为 IN_SERVICE/BANNED；totalKm 为累计实绩里程（公里）。 */
-    public record RollRow(String rollNo, String status, BigDecimal totalKm, BigDecimal cycleLimitKm,
+    /**
+     * 轧辊台账行。status 为 IN_SERVICE/BANNED；totalKm 为该代累计实绩里程（公里）；
+     * physicalId 为合成物理辊唯一编号；generationNo 为该物理辊代次号（从 1 起）；
+     * diameterMm 为该代磨后直径（毫米），首代为 null。
+     */
+    public record RollRow(String rollNo, long physicalId, int generationNo, String status,
+                          BigDecimal totalKm, BigDecimal cycleLimitKm, BigDecimal diameterMm,
                           int coilsSinceMount, LocalDateTime mountedAt, LocalDateTime frozenAt,
                           LocalDateTime createdAt, LocalDateTime updatedAt) {
+    }
+
+    /** 合成物理辊聚合行。version 为乐观锁版本（从 1 起）。 */
+    public record PhysicalRollRow(long physicalId, String currentRollNo, int currentGenerationNo,
+                                  int repairCount, int version, LocalDateTime createdAt,
+                                  LocalDateTime updatedAt) {
     }
 
     /** 换辊实绩行。firstUse 为新辊上机后前 5 卷首用标记。 */
@@ -40,10 +51,18 @@ public class RollLifeRepository {
     }
 
     private static final RowMapper<RollRow> ROLL_MAPPER = (rs, n) -> new RollRow(
-            rs.getString("roll_no"), rs.getString("status"), rs.getBigDecimal("total_km"),
-            rs.getBigDecimal("cycle_limit_km"), rs.getInt("coils_since_mount"),
+            rs.getString("roll_no"), rs.getLong("physical_roll_id"), rs.getInt("generation_no"),
+            rs.getString("status"), rs.getBigDecimal("total_km"),
+            rs.getBigDecimal("cycle_limit_km"), rs.getBigDecimal("diameter_mm"),
+            rs.getInt("coils_since_mount"),
             rs.getTimestamp("mounted_at").toLocalDateTime(),
             rs.getTimestamp("frozen_at") == null ? null : rs.getTimestamp("frozen_at").toLocalDateTime(),
+            rs.getTimestamp("created_at").toLocalDateTime(),
+            rs.getTimestamp("updated_at").toLocalDateTime());
+
+    private static final RowMapper<PhysicalRollRow> PHYSICAL_MAPPER = (rs, n) -> new PhysicalRollRow(
+            rs.getLong("physical_id"), rs.getString("current_roll_no"),
+            rs.getInt("current_generation_no"), rs.getInt("repair_count"), rs.getInt("version"),
             rs.getTimestamp("created_at").toLocalDateTime(),
             rs.getTimestamp("updated_at").toLocalDateTime());
 
@@ -63,11 +82,12 @@ public class RollLifeRepository {
     public void insertRoll(RollRow row) {
         jdbc.update("""
                 INSERT INTO roll_life
-                  (roll_no, status, total_km, cycle_limit_km, coils_since_mount,
-                   mounted_at, frozen_at, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                  (roll_no, physical_roll_id, generation_no, status, total_km, cycle_limit_km,
+                   diameter_mm, coils_since_mount, mounted_at, frozen_at, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
-                row.rollNo(), row.status(), row.totalKm(), row.cycleLimitKm(), row.coilsSinceMount(),
+                row.rollNo(), row.physicalId(), row.generationNo(), row.status(), row.totalKm(),
+                row.cycleLimitKm(), row.diameterMm(), row.coilsSinceMount(),
                 Timestamp.valueOf(row.mountedAt()),
                 row.frozenAt() == null ? null : Timestamp.valueOf(row.frozenAt()),
                 Timestamp.valueOf(row.createdAt()), Timestamp.valueOf(row.updatedAt()));
@@ -77,6 +97,15 @@ public class RollLifeRepository {
         List<RollRow> rows = jdbc.query(
                 "SELECT * FROM roll_life WHERE roll_no = ?", ROLL_MAPPER, rollNo);
         return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    /**
+     * 按物理辊编号查全部代次台账，按代次升序，用于展示代次链与各代独立台账。
+     */
+    public List<RollRow> findGenerations(long physicalId) {
+        return jdbc.query(
+                "SELECT * FROM roll_life WHERE physical_roll_id = ? ORDER BY generation_no",
+                ROLL_MAPPER, physicalId);
     }
 
     /**
@@ -210,6 +239,72 @@ public class RollLifeRepository {
     public long countLateEvents(String rollNo) {
         Long count = jdbc.queryForObject(
                 "SELECT COUNT(1) FROM roll_late_event WHERE roll_no = ?", Long.class, rollNo);
+        return count == null ? 0L : count;
+    }
+
+    // ---------------- 物理辊聚合（返修代次链） ----------------
+
+    public void insertPhysical(PhysicalRollRow row) {
+        jdbc.update("""
+                INSERT INTO physical_roll
+                  (physical_id, current_roll_no, current_generation_no, repair_count, version,
+                   created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?)
+                """,
+                row.physicalId(), row.currentRollNo(), row.currentGenerationNo(), row.repairCount(),
+                row.version(), Timestamp.valueOf(row.createdAt()), Timestamp.valueOf(row.updatedAt()));
+    }
+
+    public PhysicalRollRow findPhysical(long physicalId) {
+        List<PhysicalRollRow> rows = jdbc.query(
+                "SELECT * FROM physical_roll WHERE physical_id = ?", PHYSICAL_MAPPER, physicalId);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    public PhysicalRollRow findPhysicalByRollNo(String rollNo) {
+        List<PhysicalRollRow> rows = jdbc.query("""
+                SELECT p.* FROM physical_roll p
+                JOIN roll_life r ON r.physical_roll_id = p.physical_id
+                WHERE r.roll_no = ?
+                """, PHYSICAL_MAPPER, rollNo);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    /**
+     * 返修成功后原子推进物理辊聚合：仅当版本仍为 expectedVersion 时切换当前代次并加 1，
+     * 数据库裁决并发双建（第二个成功后继拿不到行，affected=0）。
+     *
+     * @return 受影响行数；1 表示版本匹配推进成功，0 表示版本过期（409）
+     */
+    public int advancePhysicalOnApproval(long physicalId, String newRollNo, int newGenerationNo,
+                                         int repairCount, int expectedVersion, LocalDateTime now) {
+        return jdbc.update("""
+                UPDATE physical_roll
+                SET current_roll_no = ?, current_generation_no = ?, repair_count = ?,
+                    version = version + 1, updated_at = ?
+                WHERE physical_id = ? AND version = ?
+                """, newRollNo, newGenerationNo, repairCount, Timestamp.valueOf(now),
+                physicalId, expectedVersion);
+    }
+
+    // ---------------- 返修后旧代迟到实绩证据 ----------------
+
+    public void insertRepairLateEvidence(long id, String oldRollNo, long physicalId,
+                                         String requestId, BigDecimal rollingKm,
+                                         LocalDateTime recordedAt, LocalDateTime now) {
+        jdbc.update("""
+                INSERT INTO roll_repair_late_evidence
+                  (id, old_roll_no, physical_id, request_id, rolling_km, recorded_at, created_at)
+                VALUES (?,?,?,?,?,?,?)
+                """,
+                id, oldRollNo, physicalId, requestId, rollingKm, Timestamp.valueOf(recordedAt),
+                Timestamp.valueOf(now));
+    }
+
+    public long countRepairLateEvidence(String oldRollNo) {
+        Long count = jdbc.queryForObject(
+                "SELECT COUNT(1) FROM roll_repair_late_evidence WHERE old_roll_no = ?",
+                Long.class, oldRollNo);
         return count == null ? 0L : count;
     }
 

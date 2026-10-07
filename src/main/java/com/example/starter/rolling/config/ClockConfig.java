@@ -7,12 +7,12 @@ import java.time.Clock;
 import java.time.ZoneId;
 
 /**
- * 时钟配置：统一使用 Asia/Shanghai；测试可替换为固定时钟。
+ * 时钟配置：统一使用 UTC（返修放行流程要求全部时间按 UTC 记录）；测试可替换为固定时钟。
  */
 @Configuration
 public class ClockConfig {
 
-    public static final ZoneId ZONE = ZoneId.of("Asia/Shanghai");
+    public static final ZoneId ZONE = ZoneId.of("UTC");
 
     @Bean
     public Clock clock() {

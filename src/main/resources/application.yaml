@@ -17,7 +17,7 @@ spring:
       mode: embedded
       encoding: UTF-8
   jackson:
-    time-zone: Asia/Shanghai
+    time-zone: UTC
   lifecycle:
     timeout-per-shutdown-phase: 20s
 

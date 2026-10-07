@@ -8,6 +8,7 @@ import com.example.starter.rolling.api.dto.RollView;
 import com.example.starter.rolling.repo.IdAllocator;
 import com.example.starter.rolling.repo.RollLifeRepository;
 import com.example.starter.rolling.repo.RollLifeRepository.IdempotentRow;
+import com.example.starter.rolling.repo.RollLifeRepository.PhysicalRollRow;
 import com.example.starter.rolling.repo.RollLifeRepository.RollActualRow;
 import com.example.starter.rolling.repo.RollLifeRepository.RollRow;
 import org.springframework.http.HttpStatus;
@@ -82,8 +83,12 @@ public class RollLifeService {
             // 换辊重新上机：卷数归零，前 5 卷重新进入首用烫辊位；累计里程不清零。
             repo.remount(request.rollNo(), request.mountedAt(), now);
         } else {
-            repo.insertRoll(new RollRow(request.rollNo(), STATUS_IN_SERVICE, BigDecimal.ZERO,
-                    request.cycleLimitKm(), 0, request.mountedAt(), null, now, now));
+            // 首代绑定已有辊号：登记合成物理辊唯一编号，代次链从第 1 代起。
+            long physicalId = idAllocator.nextId();
+            repo.insertRoll(new RollRow(request.rollNo(), physicalId, 1, STATUS_IN_SERVICE,
+                    BigDecimal.ZERO, request.cycleLimitKm(), null, 0, request.mountedAt(),
+                    null, now, now));
+            repo.insertPhysical(new PhysicalRollRow(physicalId, request.rollNo(), 1, 0, 1, now, now));
         }
 
         RollView view = buildView(repo.findRoll(request.rollNo()));
@@ -121,8 +126,21 @@ public class RollLifeService {
 
         LocalDateTime now = LocalDateTime.now(clock);
 
-        // 日冻结终态：迟到实绩只记迟到事件，不改已冻结里程与禁排结论。
+        // 日冻结终态：迟到实绩不改已冻结里程与禁排结论。
         if (roll.frozenAt() != null) {
+            PhysicalRollRow physical = repo.findPhysical(roll.physicalId());
+            if (physical != null && !physical.currentRollNo().equals(request.rollNo())) {
+                // 该代已被返修新代替代：迟到旧实绩只落旧代迟到证据，
+                // 不改旧代冻结里程、也不影响新代独立台账。
+                long evidenceId = idAllocator.nextId();
+                repo.insertRepairLateEvidence(evidenceId, request.rollNo(), roll.physicalId(),
+                        request.requestId(), request.rollingKm(), request.recordedAt(), now);
+                RollActualView evidenceView = new RollActualView(request.rollNo(), null, false, true,
+                        false, roll.totalKm(), remaining(roll), isBanned(roll), request.recordedAt());
+                saveIdempotent(request.requestId(), BIZ_ACTUAL, fp, 200,
+                        FingerprintUtil.toJson(evidenceView));
+                return evidenceView;
+            }
             long eventId = idAllocator.nextId();
             repo.insertLateEvent(eventId, request.rollNo(), request.requestId(),
                     request.rollingKm(), request.recordedAt(), now);
