@@ -20,6 +20,7 @@ import com.example.starter.damage.dto.Views.PhotoResult;
 import com.example.starter.damage.store.DamageCaseRepository;
 import com.example.starter.damage.store.DamageCaseRepository.CaseRow;
 import com.example.starter.damage.store.DamageFlowRepository;
+import com.example.starter.damage.store.ChangeOrderRepository;
 import com.example.starter.damage.store.InquiryRepository;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -50,17 +51,20 @@ public class DamageCaseTxService {
     private final DamageCaseRepository caseRepository;
     private final DamageFlowRepository flowRepository;
     private final InquiryRepository inquiryRepository;
+    private final ChangeOrderRepository changeOrderRepository;
     private final IdempotencyExecutor idempotency;
     private final Clock clock;
 
     public DamageCaseTxService(DamageCaseRepository caseRepository,
                                DamageFlowRepository flowRepository,
                                InquiryRepository inquiryRepository,
+                               ChangeOrderRepository changeOrderRepository,
                                IdempotencyExecutor idempotency,
                                Clock clock) {
         this.caseRepository = caseRepository;
         this.flowRepository = flowRepository;
         this.inquiryRepository = inquiryRepository;
+        this.changeOrderRepository = changeOrderRepository;
         this.idempotency = idempotency;
         this.clock = clock;
     }
@@ -177,6 +181,11 @@ public class DamageCaseTxService {
         CaseRow row = lockCase(caseId);
         if (row.status() != CaseStatus.APPROVED && row.status() != CaseStatus.REWORK) {
             throw ApiException.conflict("当前状态不允许登记完工: " + row.status());
+        }
+        // 变更候选待复核期间原完工入口拒绝，不能用旧批复绕行；与候选建立在案件行锁上串行
+        if (changeOrderRepository.hasPendingForCase(caseId)) {
+            throw ApiException.conflict("本案存在待复核的修理变更候选，原完工入口暂不可用，"
+                    + "须待候选生效换版或撤回/驳回后再登记完工");
         }
         ApprovalView active = flowRepository.findActiveApproval(caseId);
         if (active == null) {

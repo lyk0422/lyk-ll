@@ -112,10 +112,19 @@ public class DamageFlowRepository {
     /** 新增修理批复并记录来源（询价中标转批复时 source=INQUIRY 且写入 opening_id）；旧批复置 SUPERSEDED */
     public long insertApproval(long caseId, long estimateId, LocalDate approvalDate,
                                String source, Long openingId, LocalDateTime now) {
+        return insertApproval(caseId, estimateId, approvalDate, source, openingId, null, now);
+    }
+
+    /**
+     * 新增修理批复并记录完整来源（变更单生效换版时 source=CHANGE，沿用原 opening_id 并写入 change_order_id）；
+     * 旧批复置 SUPERSEDED（旧批复的完工/复检资格随之失效）。
+     */
+    public long insertApproval(long caseId, long estimateId, LocalDate approvalDate,
+                               String source, Long openingId, Long changeOrderId, LocalDateTime now) {
         jdbc.update("update repair_approval set status = 'SUPERSEDED' where case_id = ? and status = 'ACTIVE'", caseId);
-        jdbc.update("insert into repair_approval(case_id, estimate_id, approval_date, status, source, opening_id, created_at)"
-                        + " values (?,?,?,?,?,?,?)",
-                caseId, estimateId, approvalDate, "ACTIVE", source, openingId, now);
+        jdbc.update("insert into repair_approval(case_id, estimate_id, approval_date, status, source, opening_id,"
+                        + " change_order_id, created_at) values (?,?,?,?,?,?,?,?)",
+                caseId, estimateId, approvalDate, "ACTIVE", source, openingId, changeOrderId, now);
         Long id = jdbc.queryForObject("select max(id) from repair_approval where case_id = ?", Long.class, caseId);
         return id == null ? 0 : id;
     }
