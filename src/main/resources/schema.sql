@@ -172,3 +172,52 @@ CREATE TABLE IF NOT EXISTS dispensing_change_check (
     CONSTRAINT uk_change_check_seq UNIQUE (change_order_id, review_seq),
     CONSTRAINT fk_change_check_order FOREIGN KEY (change_order_id) REFERENCES dispensing_change_order (id)
 ) COMMENT='变更单双人复核链，按次序留存，两名复核人员必须不同';
+
+CREATE TABLE IF NOT EXISTS dispensing_withdrawal_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id VARCHAR(64) NOT NULL COMMENT '撤回申请幂等请求标识',
+    fingerprint VARCHAR(64) NOT NULL COMMENT '申请幂等指纹：结构化（长度前缀）覆盖 requestId、母液、原因与排序后的任务集合（含各自冻结版本）',
+    mother_liquor_id BIGINT NOT NULL COMMENT '被撤回分装共同所属母液批次主键；全清单核素须一致',
+    reason VARCHAR(256) NOT NULL COMMENT '整批撤回原因（合成数据）',
+    status VARCHAR(16) NOT NULL COMMENT '撤回单状态：PENDING 待双人批准 / APPROVED 已批准且分装已转 VOID(终态) / VOID 未批准整体撤销(终态) / REJECTED 申请时存在不合法项整单拒绝(终态)',
+    version_no INT NOT NULL DEFAULT 1 COMMENT '撤回单乐观版本号，从 1 开始；批准或撤销成功加 1，旧 expectedVersion 返回 409',
+    first_approver VARCHAR(64) COMMENT '第一名批准人员；NULL 表示尚未批准',
+    second_approver VARCHAR(64) COMMENT '第二名批准人员；须与第一名不同；NULL 表示未完成双人批准',
+    approved_at_epoch BIGINT COMMENT '批准生效时刻，UTC epoch 秒；NULL 表示未批准',
+    cancel_request_id VARCHAR(64) COMMENT '整体撤销操作幂等请求标识；NULL 表示未撤销',
+    cancelled_at_epoch BIGINT COMMENT '整体撤销时刻，UTC epoch 秒；NULL 表示未撤销',
+    created_at_epoch BIGINT NOT NULL COMMENT '申请创建时刻，UTC epoch 秒',
+    updated_at_epoch BIGINT NOT NULL COMMENT '最近更新时刻，UTC epoch 秒',
+    CONSTRAINT uk_withdrawal_request UNIQUE (request_id),
+    CONSTRAINT uk_withdrawal_cancel_request UNIQUE (cancel_request_id),
+    CONSTRAINT fk_withdrawal_mother FOREIGN KEY (mother_liquor_id) REFERENCES mother_liquor (id)
+) COMMENT='未发药整批撤回单；申请只冻结清单待批准，批准在最终事务重查全清单，全合法才同批转 VOID，不回加母液';
+
+CREATE TABLE IF NOT EXISTS dispensing_withdrawal_item (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    withdrawal_order_id BIGINT NOT NULL COMMENT '撤回单主键',
+    dispensing_id BIGINT NOT NULL COMMENT '被撤回分装批次主键',
+    frozen_version_no INT NOT NULL COMMENT '创建时冻结的分装当前有效计算版本号（从 1 开始）；最终批准重查若已换则整批不撤回',
+    reason VARCHAR(256) NOT NULL COMMENT '该分装撤回原因（合成数据）',
+    terminated_candidate_id BIGINT COMMENT '批准时被终结（置 VOID）的该分装挂起时刻候选单主键；NULL 表示无挂起候选',
+    active_order_flag INT COMMENT '活动占用标志：PENDING 撤回单为 1；批准或撤销同事务置 NULL 释放占用；列可空，唯一索引允许多个 NULL',
+    created_at_epoch BIGINT NOT NULL COMMENT '清单项冻结时刻，UTC epoch 秒',
+    CONSTRAINT uk_withdrawal_item_order_dispensing UNIQUE (withdrawal_order_id, dispensing_id),
+    CONSTRAINT uk_withdrawal_item_dispensing_active UNIQUE (dispensing_id, active_order_flag),
+    CONSTRAINT fk_withdrawal_item_order FOREIGN KEY (withdrawal_order_id)
+        REFERENCES dispensing_withdrawal_order (id),
+    CONSTRAINT fk_withdrawal_item_dispensing FOREIGN KEY (dispensing_id) REFERENCES dispensing (id),
+    CONSTRAINT fk_withdrawal_item_candidate FOREIGN KEY (terminated_candidate_id)
+        REFERENCES dispensing_change_order (id)
+) COMMENT='撤回单冻结清单：逐项冻结版本与原因；active_order_flag=1 保证一个分装至多属于一张活动撤回单，批准/撤销后置 NULL 释放';
+
+CREATE TABLE IF NOT EXISTS dispensing_withdrawal_approval (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    withdrawal_order_id BIGINT NOT NULL COMMENT '撤回单主键',
+    approver VARCHAR(64) NOT NULL COMMENT '批准人员标识（合成数据）',
+    approval_seq INT NOT NULL COMMENT '批准次序：1 第一人 / 2 第二人',
+    approved_at_epoch BIGINT NOT NULL COMMENT '批准时刻，UTC epoch 秒',
+    CONSTRAINT uk_withdrawal_approval_seq UNIQUE (withdrawal_order_id, approval_seq),
+    CONSTRAINT fk_withdrawal_approval_order FOREIGN KEY (withdrawal_order_id)
+        REFERENCES dispensing_withdrawal_order (id)
+) COMMENT='撤回单双人批准链，按次序留存，两名批准人员必须不同';

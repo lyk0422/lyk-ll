@@ -133,6 +133,27 @@ public class ChangeOrderRepository {
                 nowEpoch, id);
     }
 
+    /**
+     * 整批撤回批准时终结分装的挂起时刻候选：候选置 VOID 终态（不写作废幂等键，区别于主动作废）。
+     * 调用方须已先持分装行锁、再持候选行锁，与发药/复核路径锁顺序一致。
+     */
+    public int markVoidByWithdrawal(long id, long nowEpoch) {
+        return jdbc.update(
+                "UPDATE dispensing_change_order SET status = 'VOID', voided_at_epoch = ?, updated_at_epoch = ?"
+                        + " WHERE id = ? AND status = 'PENDING'",
+                nowEpoch, nowEpoch, id);
+    }
+
+    /**
+     * 某分装全部仍未生效（PENDING）的时刻候选主键，行锁；撤回批准时逐个终结。
+     */
+    public List<Long> findPendingIdsByDispensingForUpdate(long dispensingId) {
+        return jdbc.query(
+                "SELECT id FROM dispensing_change_order WHERE dispensing_id = ? AND status = 'PENDING'"
+                        + " ORDER BY id FOR UPDATE",
+                (rs, i) -> rs.getLong("id"), dispensingId);
+    }
+
     public long insertCheck(long changeOrderId, String reviewer, int reviewSeq, long reviewedAtEpoch) {
         KeyHolder keys = new GeneratedKeyHolder();
         jdbc.update(con -> {

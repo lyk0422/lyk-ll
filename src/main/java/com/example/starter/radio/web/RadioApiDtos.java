@@ -2,11 +2,14 @@ package com.example.starter.radio.web;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
+import jakarta.validation.constraints.Size;
 
 /**
  * 放射性药物服务 API 请求/响应载体。时刻字段请求与响应均为 ISO-8601 UTC 字符串。
@@ -107,5 +110,37 @@ public final class RadioApiDtos {
 
     /** 变更候选作废请求：requestId 幂等。 */
     public record ChangeVoidRequest(@NotBlank String requestId) {
+    }
+
+    /** 未发药整批撤回申请：引用同一母液的 1~10 份不同分装；clientTime 为申请 UTC 精确时刻（计入幂等指纹）。 */
+    public record WithdrawalCreateRequest(
+            @NotBlank String requestId,
+            @NotNull Long motherLiquorId,
+            @NotBlank String clientTime,
+            @NotBlank String reason,
+            @NotNull @Size(min = 1, max = 10) List<@Valid WithdrawalItemRequest> items) {
+
+        public long clientTimeEpoch() {
+            return Instant.parse(clientTime).getEpochSecond();
+        }
+    }
+
+    /** 撤回清单项：分装、客户端持有的当前有效计算版本（从 1 开始）与该项撤回原因。 */
+    public record WithdrawalItemRequest(
+            @NotNull Long dispensingId,
+            @Positive int expectedVersion,
+            @NotBlank String reason) {
+    }
+
+    /** 撤回双人批准请求：expectedVersion 为撤回单乐观版本（从 1 开始），旧版 409。 */
+    public record WithdrawalApproveRequest(
+            @Positive int expectedVersion,
+            @NotBlank String approver) {
+    }
+
+    /** 撤回整体撤销请求：独立幂等键 + 撤回单乐观版本。 */
+    public record WithdrawalCancelRequest(
+            @NotBlank String requestId,
+            @Positive int expectedVersion) {
     }
 }

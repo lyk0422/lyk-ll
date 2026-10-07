@@ -91,6 +91,9 @@ public class ChangeOrderService {
         if (dispensing.status() == DispensingStatus.REJECTED) {
             throw new BusinessException("分装已拒绝，禁止提交变更");
         }
+        if (dispensing.status() == DispensingStatus.VOID) {
+            throw new BusinessException("分装已整批撤回（VOID 终态），不得重新激活或改时刻");
+        }
         if (expectedVersion != dispensing.versionNo()) {
             throw new ConflictException("分装版本已变化: expected=" + expectedVersion
                     + " actual=" + dispensing.versionNo());

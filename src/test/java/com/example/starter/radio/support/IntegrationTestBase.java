@@ -33,6 +33,9 @@ public abstract class IntegrationTestBase {
     void resetState() {
         jdbc.update("DELETE FROM late_event");
         jdbc.update("DELETE FROM reconciliation_ledger");
+        jdbc.update("DELETE FROM dispensing_withdrawal_item");
+        jdbc.update("DELETE FROM dispensing_withdrawal_approval");
+        jdbc.update("DELETE FROM dispensing_withdrawal_order");
         jdbc.update("DELETE FROM dispensing_change_check");
         jdbc.update("DELETE FROM dispensing_change_order");
         jdbc.update("DELETE FROM dispensing_check");

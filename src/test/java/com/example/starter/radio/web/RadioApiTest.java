@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
@@ -21,6 +22,9 @@ class RadioApiTest extends IntegrationTestBase {
 
     @Autowired
     private MockMvc mvc;
+
+    @Autowired
+    private JdbcTemplate jdbc;
 
     @Test
     void fullFlowOverHttp() throws Exception {
@@ -219,6 +223,97 @@ class RadioApiTest extends IntegrationTestBase {
         // 变更单不存在 → 404
         mvc.perform(get("/api/dispensings/changes/{id}", 999999))
                 .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void withdrawalFlowOverHttpKeepsMotherBalanceAndVoidsBothTasks() throws Exception {
+        long calibratorId = postAndGetId("/api/calibrators",
+                "{\"code\":\"CAL-WD-1\",\"name\":\"合成活度计\"}");
+        mvc.perform(post("/api/calibrators/daily-check").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"requestId\":\"REQ-WD-CHK\",\"calibratorId\":" + calibratorId
+                                + ",\"checkDate\":\"2026-09-26\",\"referenceActivityBq\":1000.0,"
+                                + "\"measuredActivityBq\":1000.0}"))
+                .andExpect(status().isOk());
+        long motherId = postAndGetId("/api/mother-liquors",
+                "{\"batchCode\":\"ML-WD-1\",\"nuclideCode\":\"SYN-1H\",\"initialActivityBq\":2200.0,"
+                        + "\"referenceTime\":\"2026-09-26T00:00:00Z\"}");
+        long rx1 = postAndGetId("/api/prescriptions",
+                "{\"code\":\"RX-WD-1\",\"nuclideCode\":\"SYN-1H\",\"prescribedActivityBq\":1000.0,"
+                        + "\"administrationTime\":\"2026-09-26T01:00:00Z\"}");
+        long rx2 = postAndGetId("/api/prescriptions",
+                "{\"code\":\"RX-WD-2\",\"nuclideCode\":\"SYN-1H\",\"prescribedActivityBq\":1000.0,"
+                        + "\"administrationTime\":\"2026-09-26T01:00:00Z\"}");
+        long d1 = postAndGetId("/api/dispensings/calculate",
+                "{\"requestId\":\"REQ-WD-CALC-1\",\"motherLiquorId\":" + motherId
+                        + ",\"prescriptionId\":" + rx1 + ",\"calibratorId\":" + calibratorId + "}");
+        long d2 = postAndGetId("/api/dispensings/calculate",
+                "{\"requestId\":\"REQ-WD-CALC-2\",\"motherLiquorId\":" + motherId
+                        + ",\"prescriptionId\":" + rx2 + ",\"calibratorId\":" + calibratorId + "}");
+
+        String createBody = "{\"requestId\":\"REQ-WD-CREATE\",\"motherLiquorId\":" + motherId
+                + ",\"clientTime\":\"2026-09-26T09:00:00Z\",\"reason\":\"合成批次整批撤回\""
+                + ",\"items\":["
+                + "{\"dispensingId\":" + d1 + ",\"expectedVersion\":1,\"reason\":\"任务一撤回\"},"
+                + "{\"dispensingId\":" + d2 + ",\"expectedVersion\":1,\"reason\":\"任务二撤回\"}]}";
+        long withdrawalId = postAndGetId("/api/withdrawals", createBody);
+        // 同键同参重放
+        mvc.perform(post("/api/withdrawals").contentType(MediaType.APPLICATION_JSON).content(createBody))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(withdrawalId))
+                .andExpect(jsonPath("$.replayed").value(true));
+        // 同键不同时刻 → 409
+        mvc.perform(post("/api/withdrawals").contentType(MediaType.APPLICATION_JSON)
+                        .content(createBody.replace("09:00:00Z", "09:00:01Z")))
+                .andExpect(status().isConflict());
+
+        // 冻结清单查询：逐项冻结版本、原因，候选终结证据为空
+        mvc.perform(get("/api/withdrawals/{id}", withdrawalId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PENDING"))
+                .andExpect(jsonPath("$.versionNo").value(1))
+                .andExpect(jsonPath("$.items.length()").value(2))
+                .andExpect(jsonPath("$.items[0].frozenVersionNo").value(1))
+                .andExpect(jsonPath("$.items[0].terminatedCandidateId").value(org.hamcrest.Matchers.nullValue()));
+
+        // 双人批准：第一人后版本 2；旧版本再批准 → 409；第二人版本 2 生效
+        mvc.perform(post("/api/withdrawals/{id}/approvals", withdrawalId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"expectedVersion\":1,\"approver\":\"carol\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.versionNo").value(2));
+        mvc.perform(post("/api/withdrawals/{id}/approvals", withdrawalId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"expectedVersion\":1,\"approver\":\"dave\"}"))
+                .andExpect(status().isConflict());
+        mvc.perform(post("/api/withdrawals/{id}/approvals", withdrawalId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"expectedVersion\":2,\"approver\":\"dave\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("APPROVED"))
+                .andExpect(jsonPath("$.versionNo").value(3));
+
+        // 两份分装一起 VOID
+        mvc.perform(get("/api/dispensings/{id}", d1))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("VOID"));
+        mvc.perform(get("/api/dispensings/{id}", d2))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("VOID"));
+        // 撤回后新发药拒绝
+        mvc.perform(post("/api/dispensings/dispense").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"requestId\":\"REQ-WD-DISP\",\"dispensingId\":" + d1
+                                + ",\"remainingActivityBq\":0.0,\"measuredAt\":\"2026-09-26T01:00:00Z\"}"))
+                .andExpect(status().isUnprocessableEntity());
+        // 已批准不能撤销
+        mvc.perform(post("/api/withdrawals/{id}/cancel", withdrawalId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"requestId\":\"REQ-WD-CANCEL\",\"expectedVersion\":3}"))
+                .andExpect(status().isUnprocessableEntity());
+
+        // 母液余额不回加：基线计算未扣库存，撤回也不加量
+        Double remaining = jdbc.queryForObject(
+                "SELECT remaining_activity_bq FROM mother_liquor WHERE id = ?", Double.class, motherId);
+        org.assertj.core.api.Assertions.assertThat(remaining).isEqualTo(2200.0);
     }
 
     private long postChangeId(String body) throws Exception {

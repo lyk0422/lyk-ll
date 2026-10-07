@@ -82,10 +82,11 @@ public class DispensingRepository {
     }
 
     /**
-     * 同一母液批次下未拒绝的全部分装，用于勾稽分装总量复算。
+     * 同一母液批次下有效（未拒绝、未整批撤回 VOID）的全部分装，用于勾稽分装总量复算。
+     * REJECTED 从未形成分装量；VOID 为未发药撤回、不回加母液，亦不计入分装总量。
      */
     public List<Dispensing> findActiveByMotherLiquor(long motherLiquorId) {
-        return jdbc.query("SELECT * FROM dispensing WHERE mother_liquor_id = ? AND status <> 'REJECTED'",
+        return jdbc.query("SELECT * FROM dispensing WHERE mother_liquor_id = ? AND status NOT IN ('REJECTED', 'VOID')",
                 this::mapDispensing, motherLiquorId);
     }
 
@@ -105,6 +106,20 @@ public class DispensingRepository {
                         + " dispense_fingerprint = ?, dispensed_at_epoch = ?, active_change_order_id = NULL,"
                         + " updated_at_epoch = ? WHERE id = ?",
                 dispenseRequestId, dispenseFingerprint, nowEpoch, nowEpoch, id);
+    }
+
+    /**
+     * 未发药整批撤回批准：同事务把分装转为 VOID 终态、清除挂起候选引用并使双人核对不再有效
+     * （first/second_checker 置空；dispensing_check 签认行保留作证据）。
+     * 原计算与版本证据不删除；VOID 的终态语义使新发药、改时刻、重新核对一律拒绝。
+     * 仅非终态行可更新，返回受影响行数供调用方在最终事务内断言。
+     */
+    public int markWithdrawnVoid(long id, long nowEpoch) {
+        return jdbc.update(
+                "UPDATE dispensing SET status = 'VOID', active_change_order_id = NULL,"
+                        + " first_checker = NULL, second_checker = NULL, updated_at_epoch = ?"
+                        + " WHERE id = ? AND status NOT IN ('DISPENSED', 'REJECTED', 'VOID')",
+                nowEpoch, id);
     }
 
     /**

@@ -13,12 +13,14 @@ import com.example.starter.radio.model.DispensingVersion;
 import com.example.starter.radio.model.MotherLiquor;
 import com.example.starter.radio.model.Prescription;
 import com.example.starter.radio.model.ReconciliationLedger;
+import com.example.starter.radio.model.WithdrawalItem;
 import com.example.starter.radio.repository.DispensingRepository;
 import com.example.starter.radio.service.CalibratorService;
 import com.example.starter.radio.service.ChangeOrderService;
 import com.example.starter.radio.service.DispensingService;
 import com.example.starter.radio.service.NotFoundException;
 import com.example.starter.radio.service.RegistrationService;
+import com.example.starter.radio.service.WithdrawalService;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -39,17 +41,20 @@ public class RadioController {
     private final DispensingService dispensingService;
     private final RegistrationService registrationService;
     private final ChangeOrderService changeOrderService;
+    private final WithdrawalService withdrawalService;
     private final DispensingRepository dispensings;
 
     public RadioController(CalibratorService calibratorService,
                            DispensingService dispensingService,
                            RegistrationService registrationService,
                            ChangeOrderService changeOrderService,
+                           WithdrawalService withdrawalService,
                            DispensingRepository dispensings) {
         this.calibratorService = calibratorService;
         this.dispensingService = dispensingService;
         this.registrationService = registrationService;
         this.changeOrderService = changeOrderService;
+        this.withdrawalService = withdrawalService;
         this.dispensings = dispensings;
     }
 
@@ -209,6 +214,54 @@ public class RadioController {
     }
 
     /**
+     * 未发药整批撤回申请：只冻结全清单为 PENDING，不作废任何分装。
+     */
+    @PostMapping("/withdrawals")
+    public Map<String, Object> createWithdrawal(@Valid @RequestBody RadioApiDtos.WithdrawalCreateRequest req) {
+        List<WithdrawalService.CreateItem> items = req.items().stream()
+                .map(i -> new WithdrawalService.CreateItem(i.dispensingId(), i.expectedVersion(), i.reason()))
+                .toList();
+        WithdrawalService.CreateResult result = withdrawalService.create(req.requestId(), req.motherLiquorId(),
+                req.clientTimeEpoch(), req.reason(), items);
+        Map<String, Object> view = withdrawalView(result.order());
+        view.put("replayed", result.replayed());
+        return view;
+    }
+
+    /**
+     * 撤回双人批准；第二人批准在最终事务重查全清单，全合法才同批转 VOID。
+     */
+    @PostMapping("/withdrawals/{id}/approvals")
+    public Map<String, Object> approveWithdrawal(@PathVariable long id,
+                                                 @Valid @RequestBody RadioApiDtos.WithdrawalApproveRequest req) {
+        return withdrawalView(withdrawalService.approve(id, req.expectedVersion(), req.approver()));
+    }
+
+    /**
+     * 未批准整体撤销并释放占用；已批准不能撤销。
+     */
+    @PostMapping("/withdrawals/{id}/cancel")
+    public Map<String, Object> cancelWithdrawal(@PathVariable long id,
+                                                @Valid @RequestBody RadioApiDtos.WithdrawalCancelRequest req) {
+        return withdrawalView(withdrawalService.cancel(req.requestId(), id, req.expectedVersion()));
+    }
+
+    /**
+     * 撤回单查询：逐项给出冻结版本、撤回原因与候选终结证据，以及双人批准链。
+     */
+    @GetMapping("/withdrawals/{id}")
+    public Map<String, Object> getWithdrawal(@PathVariable long id) {
+        WithdrawalService.WithdrawalEvidence evidence = withdrawalService.evidence(id);
+        Map<String, Object> view = withdrawalView(evidence.order());
+        view.put("approvalChain", evidence.approvals().stream().map(a -> Map.of(
+                "approver", (Object) a.approver(),
+                "approvalSeq", a.approvalSeq(),
+                "approvedAt", Instant.ofEpochSecond(a.approvedAtEpoch()).toString())).toList());
+        view.put("items", evidence.items().stream().map(this::withdrawalItemView).toList());
+        return view;
+    }
+
+    /**
      * 勾稽台账复算：按衰变公式由原始数据重新计算，用于核对已存台账。
      */
     @GetMapping("/dispensings/{id}/reconciliation")
@@ -280,6 +333,32 @@ public class RadioController {
         view.put("decayResidualBq", ledger.decayResidualBq());
         view.put("balanced", ledger.balanced());
         view.put("measuredAt", Instant.ofEpochSecond(ledger.measuredAtEpoch()).toString());
+        return view;
+    }
+
+    private Map<String, Object> withdrawalView(com.example.starter.radio.model.WithdrawalOrder w) {
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("id", w.id());
+        view.put("requestId", w.requestId());
+        view.put("motherLiquorId", w.motherLiquorId());
+        view.put("reason", w.reason());
+        view.put("status", w.status().name());
+        view.put("versionNo", w.versionNo());
+        view.put("firstApprover", w.firstApprover());
+        view.put("secondApprover", w.secondApprover());
+        view.put("approvedAt",
+                w.approvedAtEpoch() == null ? null : Instant.ofEpochSecond(w.approvedAtEpoch()).toString());
+        view.put("cancelledAt",
+                w.cancelledAtEpoch() == null ? null : Instant.ofEpochSecond(w.cancelledAtEpoch()).toString());
+        return view;
+    }
+
+    private Map<String, Object> withdrawalItemView(WithdrawalItem item) {
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("dispensingId", item.dispensingId());
+        view.put("frozenVersionNo", item.frozenVersionNo());
+        view.put("reason", item.reason());
+        view.put("terminatedCandidateId", item.terminatedCandidateId());
         return view;
     }
 }

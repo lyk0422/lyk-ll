@@ -127,7 +127,8 @@ public class DispensingService {
         Dispensing dispensing = dispensings.findDispensingByIdForUpdate(dispensingId)
                 .orElseThrow(() -> new NotFoundException("分装批次不存在: " + dispensingId));
         if (dispensing.status() == DispensingStatus.REJECTED
-                || dispensing.status() == DispensingStatus.DISPENSED) {
+                || dispensing.status() == DispensingStatus.DISPENSED
+                || dispensing.status() == DispensingStatus.VOID) {
             throw new BusinessException("分装批次已处于终态，禁止核对: " + dispensing.status());
         }
         long now = clock.instant().getEpochSecond();
