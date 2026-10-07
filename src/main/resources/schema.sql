@@ -213,6 +213,87 @@ COMMENT ON COLUMN unseal_quota_usage.task_id IS '消费额度产生的调节任�
 COMMENT ON COLUMN unseal_quota_usage.request_id IS '受控调节的客户端幂等键，全局唯一';
 COMMENT ON COLUMN unseal_quota_usage.used_at IS '额度消费时刻（UTC）';
 
+CREATE TABLE IF NOT EXISTS coupled_group (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    station_id BIGINT NOT NULL REFERENCES heat_station (id),
+    status VARCHAR(16) NOT NULL,
+    version INT NOT NULL,
+    request_id VARCHAR(64) NOT NULL,
+    fingerprint VARCHAR(128) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    dissolved_at TIMESTAMP,
+    CONSTRAINT uk_coupled_group_request UNIQUE (request_id)
+);
+COMMENT ON TABLE coupled_group IS '联调组：同站 2~5 只不同阀的耦合调节分组，阀只能属于一个活动组';
+COMMENT ON COLUMN coupled_group.id IS '主键';
+COMMENT ON COLUMN coupled_group.station_id IS '所属换热站 ID';
+COMMENT ON COLUMN coupled_group.status IS '状态：ACTIVE 活动 / DISSOLVED 已解除（仅释放组归属，不回拨开度、不返还额度）';
+COMMENT ON COLUMN coupled_group.version IS '联调单乐观锁版本，从 1 开始，成功修改/解除加 1，旧版 409';
+COMMENT ON COLUMN coupled_group.request_id IS '建组客户端幂等键，全局唯一';
+COMMENT ON COLUMN coupled_group.fingerprint IS '幂等指纹：requestId 与全阀集合及权重的结构化 SHA-256';
+COMMENT ON COLUMN coupled_group.created_at IS '建组时刻（UTC）';
+COMMENT ON COLUMN coupled_group.dissolved_at IS '解除时刻（UTC）；未解除时为空';
+
+CREATE TABLE IF NOT EXISTS coupled_group_member (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    group_id BIGINT NOT NULL REFERENCES coupled_group (id),
+    valve_id BIGINT NOT NULL REFERENCES valve (id),
+    weight INT NOT NULL,
+    valve_version INT NOT NULL,
+    CONSTRAINT uk_coupled_member UNIQUE (group_id, valve_id),
+    CONSTRAINT ck_coupled_member_weight CHECK (weight >= 1 AND weight <= 10)
+);
+COMMENT ON TABLE coupled_group_member IS '联调组成员：建组/改组时冻结的阀门权重与开度版本';
+COMMENT ON COLUMN coupled_group_member.id IS '主键';
+COMMENT ON COLUMN coupled_group_member.group_id IS '所属联调组 ID';
+COMMENT ON COLUMN coupled_group_member.valve_id IS '成员阀门 ID，组内唯一；活动组间不重复（服务层在站行锁内校验）';
+COMMENT ON COLUMN coupled_group_member.weight IS '联调权重，正整数 1~10，建组时冻结';
+COMMENT ON COLUMN coupled_group_member.valve_version IS '建组/改组时冻结的阀门开度版本（valve_opening_version 当前最大版本号，无版本为 0）';
+
+CREATE TABLE IF NOT EXISTS coupled_adjustment (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    group_id BIGINT NOT NULL REFERENCES coupled_group (id),
+    station_id BIGINT NOT NULL REFERENCES heat_station (id),
+    request_id VARCHAR(64) NOT NULL,
+    fingerprint VARCHAR(128) NOT NULL,
+    adjust_at TIMESTAMP NOT NULL,
+    executed_at TIMESTAMP NOT NULL,
+    version INT NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_coupled_adjustment_request UNIQUE (request_id)
+);
+COMMENT ON TABLE coupled_adjustment IS '联调单：全组目标开度的原子提交记录，失败全组零变化';
+COMMENT ON COLUMN coupled_adjustment.id IS '主键';
+COMMENT ON COLUMN coupled_adjustment.group_id IS '所属联调组 ID';
+COMMENT ON COLUMN coupled_adjustment.station_id IS '所属换热站 ID（冗余自联调组，便于锁定）';
+COMMENT ON COLUMN coupled_adjustment.request_id IS '客户端幂等键，全局唯一；失败不占键';
+COMMENT ON COLUMN coupled_adjustment.fingerprint IS '幂等指纹：requestId、全阀集合、权重、逐阀目标/版本/解封单与 UTC 时刻的结构化 SHA-256';
+COMMENT ON COLUMN coupled_adjustment.adjust_at IS '客户端声明的联调时刻（UTC），参与幂等指纹';
+COMMENT ON COLUMN coupled_adjustment.executed_at IS '联调实际执行时刻（UTC），逐阀任务稳定期起点';
+COMMENT ON COLUMN coupled_adjustment.version IS '联调单版本，从 1 开始';
+COMMENT ON COLUMN coupled_adjustment.created_at IS '联调单受理时刻（UTC）';
+
+CREATE TABLE IF NOT EXISTS coupled_adjustment_item (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    coupled_id BIGINT NOT NULL REFERENCES coupled_adjustment (id),
+    valve_id BIGINT NOT NULL REFERENCES valve (id),
+    weight INT NOT NULL,
+    old_opening DECIMAL(5,2) NOT NULL,
+    new_opening DECIMAL(5,2) NOT NULL,
+    unseal_id BIGINT,
+    task_id BIGINT,
+    CONSTRAINT uk_coupled_item UNIQUE (coupled_id, valve_id)
+);
+COMMENT ON TABLE coupled_adjustment_item IS '联调逐阀明细：联调前后开度与权重留痕，可复算净加权开度及逐阀额度';
+COMMENT ON COLUMN coupled_adjustment_item.id IS '主键';
+COMMENT ON COLUMN coupled_adjustment_item.coupled_id IS '所属联调单 ID';
+COMMENT ON COLUMN coupled_adjustment_item.valve_id IS '成员阀门 ID';
+COMMENT ON COLUMN coupled_adjustment_item.weight IS '联调时冻结的阀门权重，正整数 1~10';
+COMMENT ON COLUMN coupled_adjustment_item.old_opening IS '联调前开度，单位 %，0~100 整数百分点';
+COMMENT ON COLUMN coupled_adjustment_item.new_opening IS '联调目标开度，单位 %，0~100 整数百分点；与旧值相等表示本阀不变';
+COMMENT ON COLUMN coupled_adjustment_item.unseal_id IS '铅封阀使用的解封单 ID；未封阀为空';
+COMMENT ON COLUMN coupled_adjustment_item.task_id IS '实际变化阀生成的调节任务 ID（沿用原温差评估及归档）；不变阀为空';
+
 CREATE TABLE IF NOT EXISTS late_temperature_event (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     unit_id BIGINT NOT NULL REFERENCES heating_unit (id),

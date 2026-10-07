@@ -34,6 +34,10 @@ public abstract class IntegrationTestBase {
 
     @BeforeEach
     void resetDatabase() {
+        jdbc.update("DELETE FROM coupled_adjustment_item");
+        jdbc.update("DELETE FROM coupled_adjustment");
+        jdbc.update("DELETE FROM coupled_group_member");
+        jdbc.update("DELETE FROM coupled_group");
         jdbc.update("DELETE FROM unseal_quota_usage");
         jdbc.update("DELETE FROM unseal_order");
         jdbc.update("DELETE FROM valve_seal");
@@ -51,6 +55,10 @@ public abstract class IntegrationTestBase {
         jdbc.update("ALTER TABLE valve_seal ALTER COLUMN id RESTART WITH 1");
         jdbc.update("ALTER TABLE unseal_order ALTER COLUMN id RESTART WITH 1");
         jdbc.update("ALTER TABLE unseal_quota_usage ALTER COLUMN id RESTART WITH 1");
+        jdbc.update("ALTER TABLE coupled_group ALTER COLUMN id RESTART WITH 1");
+        jdbc.update("ALTER TABLE coupled_group_member ALTER COLUMN id RESTART WITH 1");
+        jdbc.update("ALTER TABLE coupled_adjustment ALTER COLUMN id RESTART WITH 1");
+        jdbc.update("ALTER TABLE coupled_adjustment_item ALTER COLUMN id RESTART WITH 1");
         jdbc.update("INSERT INTO heat_station (id, code, name) VALUES (1, 'ST-EAST-01', '城东一号换热站')");
         jdbc.update("INSERT INTO heating_unit (id, station_id, code, name) VALUES"
                 + " (1, 1, 'U1', '一号单元'), (2, 1, 'U2', '二号单元'),"
