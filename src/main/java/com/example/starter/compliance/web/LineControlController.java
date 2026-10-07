@@ -7,6 +7,7 @@ import com.example.starter.compliance.web.Requests.ConfirmCertificateRequest;
 import com.example.starter.compliance.web.Requests.ControlledProductionRequest;
 import com.example.starter.compliance.web.Requests.FormulaAllergenRequest;
 import com.example.starter.compliance.web.Requests.RegisterLineRequest;
+import com.example.starter.compliance.web.Requests.RegisterReworkLotRequest;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -77,6 +78,19 @@ public class LineControlController {
     public ResponseEntity<LineControlResults.ControlledProductionView> controlledProduction(
             @RequestBody ControlledProductionRequest request) {
         return respond(service.controlledProduction(request));
+    }
+
+    /** 返工料登记：引用一条已成功量产记录，冻结来源配方版本及过敏原集合，同来源只登记一次。 */
+    @PostMapping("/rework-lots")
+    public ResponseEntity<LineControlResults.ReworkLotView> registerReworkLot(
+            @RequestBody RegisterReworkLotRequest request) {
+        return respond(service.registerReworkLot(request));
+    }
+
+    /** 返工料账勾稽查询：来源、原量、逐笔消费与余额。 */
+    @GetMapping("/rework-lots/{lotCode}")
+    public LineControlResults.ReworkLotLedgerView reworkLot(@PathVariable String lotCode) {
+        return service.getReworkLotLedger(lotCode);
     }
 
     private static <T> ResponseEntity<T> respond(ServiceResult<T> result) {

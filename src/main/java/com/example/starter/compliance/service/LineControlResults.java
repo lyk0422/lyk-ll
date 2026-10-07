@@ -49,7 +49,7 @@ public final class LineControlResults {
             boolean replayed) {
     }
 
-    /** 受控量产结果：occupiedVersion 为该笔量产占用的线路版本。 */
+    /** 受控量产结果：occupiedVersion 为该笔量产占用的线路版本；reworkConsumptions 为本笔返工料消费明细。 */
     public record ControlledProductionView(
             Long productionRecordId,
             Long filingId,
@@ -59,6 +59,7 @@ public final class LineControlResults {
             String quantityKg,
             Long reportedAt,
             Long certificateId,
+            List<ReworkConsumptionView> reworkConsumptions,
             boolean replayed) {
     }
 
@@ -66,5 +67,39 @@ public final class LineControlResults {
     public record LineProductionView(
             String lineCode,
             List<ControlledProductionView> productions) {
+    }
+
+    /**
+     * 返工料账视图：availableKg 为登记原量、consumedKg 为累计消费、balanceKg 为余额（单位公斤）；
+     * version 为料账乐观版本，从 1 开始，每次成功消费加 1。
+     */
+    public record ReworkLotView(
+            Long lotId,
+            String lotCode,
+            Long productionRecordId,
+            String productCode,
+            Integer formulaVersion,
+            List<String> allergens,
+            String availableKg,
+            String consumedKg,
+            String balanceKg,
+            Integer version,
+            Long registeredAt,
+            boolean replayed) {
+    }
+
+    /** 返工料消费明细视图：quantityKg 单位公斤，consumedAt 为 UTC epoch 毫秒。 */
+    public record ReworkConsumptionView(
+            Long consumptionId,
+            String lotCode,
+            Long productionRecordId,
+            String quantityKg,
+            Long consumedAt) {
+    }
+
+    /** 返工料账勾稽视图：来源、原量、消费明细与余额一笔核对。 */
+    public record ReworkLotLedgerView(
+            ReworkLotView lot,
+            List<ReworkConsumptionView> consumptions) {
     }
 }

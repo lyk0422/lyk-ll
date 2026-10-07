@@ -9,14 +9,21 @@ import com.example.starter.compliance.repo.FormulaRow;
 import com.example.starter.compliance.repo.LineControlRepository;
 import com.example.starter.compliance.repo.ProductionLineRow;
 import com.example.starter.compliance.repo.ProductionRecordRow;
+import com.example.starter.compliance.repo.ReworkConsumptionRow;
+import com.example.starter.compliance.repo.ReworkLotRow;
 import com.example.starter.compliance.time.ComplianceClock;
 import com.example.starter.compliance.web.Requests.ConfirmCertificateRequest;
 import com.example.starter.compliance.web.Requests.ControlledProductionRequest;
 import com.example.starter.compliance.web.Requests.FormulaAllergenRequest;
 import com.example.starter.compliance.web.Requests.RegisterLineRequest;
+import com.example.starter.compliance.web.Requests.RegisterReworkLotRequest;
+import com.example.starter.compliance.web.Requests.ReworkInputDto;
+import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import org.springframework.dao.DuplicateKeyException;
@@ -36,6 +43,13 @@ import org.springframework.transaction.annotation.Transactional;
  * 配方、核销并作废旧凭证；任一校验失败整体回滚，不消耗凭证。两笔量产并发时同一线路版本至多一笔
  * 成功（行锁 + (line_code, occupied_version) 唯一约束双重保证）。
  *
+ * <p>返工料投用：登记引用一条已成功量产记录（同来源只登记一次，唯一料号，正数可用公斤最多三位
+ * 小数），冻结来源配方版本及过敏原集合，登记量为本题独立合成额度，不声称旧记录已有产量；料号不得
+ * 换来源或清空过敏原，历史消费不可改。受控量产可投 1 至 10 个不同料号，全部数为正且最多三位小数，
+ * 返工合计不得超过总量 20%（恰等允许，精确小数比较不靠舍入）；全部来源过敏原并集必须被目标配方
+ * 版本声明，清线凭证只证明线路清洁，不能替代实际物料的过敏原声明。一次受理原子扣全部返工额度并写
+ * 量产，任一不足或备案失效整笔零扣；两批争同料由料账行锁串行、条件扣减兜底，不得超用。
+ *
  * <p>全部新增写操作以 requestId 幂等：完整参数含版本、集合与精确时刻，同键同参重放首次冻结结果，
  * 异参 409，失败不占键。参数非法 400、对象不存在 404、业务拒绝 422。
  */
@@ -44,6 +58,15 @@ public class LineControlService {
 
     /** 凭证有效期：UTC 确认后 2 小时，恰满 2 小时失效。 */
     public static final long CERTIFICATE_VALIDITY_MILLIS = 2L * 60L * 60L * 1000L;
+
+    /** 返工料投用合计占量产总量的上限（恰等允许，精确小数比较）。 */
+    public static final BigDecimal REWORK_MAX_RATIO = new BigDecimal("0.2");
+
+    /** 单笔量产最多投用的不同返工料号数。 */
+    public static final int MAX_REWORK_INPUTS = 10;
+
+    /** 返工相关公斤数允许的最大小数位。 */
+    public static final int MAX_KG_SCALE = 3;
 
     private final LineControlRepository lineRepository;
     private final ComplianceRepository repository;
@@ -227,6 +250,81 @@ public class LineControlService {
                 });
     }
 
+    // ---------------- 返工料登记 ----------------
+
+    /**
+     * 返工料登记：引用一条已成功量产记录（同来源只登记一次），冻结来源配方版本及过敏原集合；
+     * 登记量为本题独立合成额度，不声称旧记录已有产量。料账版本从 1 开始；料号不得换来源或清空
+     * 过敏原，不提供修改入口，重复料号或重复来源一律 409。
+     */
+    @Transactional
+    public ServiceResult<LineControlResults.ReworkLotView> registerReworkLot(
+            RegisterReworkLotRequest request) {
+        return idempotency.execute(request.requestId(), request,
+                LineControlResults.ReworkLotView.class, () -> {
+                    String lotCode = requireText(request.lotCode(), "返工料号不能为空");
+                    if (request.productionRecordId() == null) {
+                        throw invalid("来源量产记录不能为空");
+                    }
+                    String productCode = requireText(request.productCode(), "来源产品编码不能为空");
+                    requireKg(request.availableKg(), "登记可用公斤数");
+                    if (request.expectedVersion() == null || request.expectedVersion() != 0) {
+                        throw invalid("expectedVersion 新增登记传 0（料账版本从 1 开始，"
+                                + "料号不得换来源或清空过敏原，无修改入口）");
+                    }
+                    if (request.registeredAt() == null || request.registeredAt() < 0) {
+                        throw invalid("registeredAt 精确时刻不能为空");
+                    }
+
+                    ProductionRecordRow source = repository
+                            .findProductionRecordById(request.productionRecordId())
+                            .orElseThrow(() -> notFound("REWORK_SOURCE_NOT_FOUND",
+                                    "来源量产记录不存在：" + request.productionRecordId()));
+                    FilingRow filing = repository.findFilingById(source.filingId())
+                            .orElseThrow(() -> notFound("FILING_NOT_FOUND",
+                                    "来源记录对应备案不存在：" + source.filingId()));
+                    FormulaRow formula = repository.findFormulaById(filing.formulaId())
+                            .orElseThrow(() -> notFound("FORMULA_NOT_FOUND",
+                                    "来源记录对应配方不存在：" + filing.formulaId()));
+                    if (!formula.productCode().equals(productCode)) {
+                        // 不能引用别人的配方记录：声明产品必须与来源记录实际所属产品一致。
+                        throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                                "REWORK_SOURCE_MISMATCH",
+                                "来源量产记录属于产品 " + formula.productCode()
+                                        + "，不能按产品 " + productCode + " 登记");
+                    }
+                    // 冻结来源配方版本过敏原集合：未登记则无法冻结，拒绝登记。
+                    FormulaAllergenRow allergenRow = lineRepository
+                            .findFormulaAllergen(productCode, formula.version())
+                            .orElseThrow(() -> new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                                    "REWORK_ALLERGEN_NOT_REGISTERED",
+                                    "来源配方版本尚未登记过敏原集合，无法冻结：" + productCode + "#"
+                                            + formula.version()));
+                    if (lineRepository.findReworkLotByCode(lotCode).isPresent()) {
+                        throw new ApiException(HttpStatus.CONFLICT, "REWORK_LOT_EXISTS",
+                                "返工料号已登记：" + lotCode);
+                    }
+                    if (lineRepository.findReworkLotBySource(source.id()).isPresent()) {
+                        throw new ApiException(HttpStatus.CONFLICT,
+                                "REWORK_SOURCE_ALREADY_REGISTERED",
+                                "同一来源量产记录只登记一次：" + source.id());
+                    }
+                    long now = clock.nowMillis();
+                    try {
+                        lineRepository.insertReworkLot(lotCode, source.id(), productCode,
+                                formula.version(), allergenRow.allergens(), request.availableKg(),
+                                request.requestId(), request.registeredAt(), now);
+                    } catch (DuplicateKeyException e) {
+                        // 并发登记：唯一（料号 / 来源记录）约束兜底，仅一方成功。
+                        throw new ApiException(HttpStatus.CONFLICT, "REWORK_LOT_EXISTS",
+                                "返工料号或来源记录已被并发登记：" + lotCode);
+                    }
+                    ReworkLotRow saved = lineRepository.findReworkLotByCode(lotCode).orElseThrow();
+                    return new IdempotentExecutor.Outcome<>(buildReworkLotView(saved, false),
+                            HttpStatus.OK.value());
+                });
+    }
+
     // ---------------- 受控量产 ----------------
 
     @Transactional
@@ -292,6 +390,18 @@ public class LineControlService {
                         usedCertificateId = certificate.id();
                     }
 
+                    // 返工料投用：校验数量/比例/过敏原声明并锁定料账行（按料号字典序防死锁）；
+                    // 清线凭证只证明线路清洁，不能替代实际物料的过敏原声明。
+                    List<ReworkInputDto> reworkInputs = request.reworkInputs() == null
+                            ? List.of() : request.reworkInputs();
+                    Map<String, BigDecimal> reworkQuantityByLot = Map.of();
+                    List<ReworkLotRow> lockedLots = List.of();
+                    if (!reworkInputs.isEmpty()) {
+                        reworkQuantityByLot = validateReworkInputs(reworkInputs,
+                                request.quantityKg());
+                        lockedLots = lockReworkLots(reworkQuantityByLot, newAllergens);
+                    }
+
                     long recordId;
                     try {
                         recordId = repository.insertControlledProductionRecord(filing.id(),
@@ -301,6 +411,25 @@ public class LineControlService {
                         // 唯一约束兜底：并发同线路同占用版本仅一笔成功，败者不写任何记录。
                         throw new ApiException(HttpStatus.CONFLICT, "LINE_VERSION_CONFLICT",
                                 "同一线路版本已有量产提交，占用版本：" + request.occupiedVersion());
+                    }
+                    // 一次受理原子扣全部返工额度并写消费明细；任一失败整笔回滚零扣。
+                    List<LineControlResults.ReworkConsumptionView> consumptionViews =
+                            new ArrayList<>();
+                    for (ReworkLotRow lot : lockedLots) {
+                        BigDecimal quantity = reworkQuantityByLot.get(lot.lotCode());
+                        if (!lineRepository.deductReworkLot(lot.id(), quantity,
+                                request.reportedAt())) {
+                            // 行锁内余额已被并发消费（兜底）：整笔回滚，不得超用。
+                            throw new ApiException(HttpStatus.CONFLICT,
+                                    "REWORK_LOT_CONCURRENT_CONFLICT",
+                                    "返工料余额被并发消费，整笔回滚：" + lot.lotCode());
+                        }
+                        long consumptionId = lineRepository.insertReworkConsumption(lot.id(),
+                                recordId, quantity, request.reportedAt());
+                        consumptionViews.add(new LineControlResults.ReworkConsumptionView(
+                                consumptionId, lot.lotCode(), recordId,
+                                quantity.stripTrailingZeros().toPlainString(),
+                                request.reportedAt()));
                     }
                     if (!lineRepository.occupyLine(lineCode, request.occupiedVersion(),
                             formula.productCode(), formula.version(), request.reportedAt())) {
@@ -322,7 +451,8 @@ public class LineControlService {
                             new LineControlResults.ControlledProductionView(recordId, filing.id(),
                                     lineCode, request.occupiedVersion(), request.batchNo(),
                                     request.quantityKg().stripTrailingZeros().toPlainString(),
-                                    request.reportedAt(), usedCertificateId, false),
+                                    request.reportedAt(), usedCertificateId,
+                                    List.copyOf(consumptionViews), false),
                             HttpStatus.OK.value());
                 });
     }
@@ -363,6 +493,20 @@ public class LineControlService {
                         .map(this::buildProductionView)
                         .toList();
         return new LineControlResults.LineProductionView(lineCode, productions);
+    }
+
+    /** 返工料账勾稽查询：来源、原量、逐笔消费与余额一笔核对。 */
+    @Transactional(readOnly = true)
+    public LineControlResults.ReworkLotLedgerView getReworkLotLedger(String lotCode) {
+        ReworkLotRow lot = lineRepository.findReworkLotByCode(lotCode)
+                .orElseThrow(() -> notFound("REWORK_LOT_NOT_FOUND",
+                        "返工料号不存在：" + lotCode));
+        List<LineControlResults.ReworkConsumptionView> consumptions =
+                lineRepository.findReworkConsumptionsByLot(lot.id()).stream()
+                        .map(row -> buildConsumptionView(row, lot.lotCode()))
+                        .toList();
+        return new LineControlResults.ReworkLotLedgerView(buildReworkLotView(lot, false),
+                consumptions);
     }
 
     // ---------------- 内部辅助 ----------------
@@ -447,6 +591,90 @@ public class LineControlService {
         return row.allergens();
     }
 
+    /**
+     * 校验返工料投用列表：1 至 10 个不同料号，数量均为正且最多三位小数；
+     * 返工合计不得超过总量 20%（恰等允许，精确小数比较不靠舍入）。
+     * 返回按料号字典序排序的投用数量表。
+     */
+    private Map<String, BigDecimal> validateReworkInputs(List<ReworkInputDto> inputs,
+            BigDecimal totalQuantityKg) {
+        if (inputs.size() > MAX_REWORK_INPUTS) {
+            throw invalid("返工料投用最多 " + MAX_REWORK_INPUTS + " 个不同料号，当前 "
+                    + inputs.size() + " 个");
+        }
+        requireKg(totalQuantityKg, "投用返工料时量产总公斤数");
+        Map<String, BigDecimal> quantityByLot = new LinkedHashMap<>();
+        BigDecimal reworkTotal = BigDecimal.ZERO;
+        for (ReworkInputDto input : inputs) {
+            if (input == null) {
+                throw invalid("返工料投用明细不能为空项");
+            }
+            String lotCode = requireText(input.lotCode(), "返工料号不能为空");
+            requireKg(input.quantityKg(), "返工料投用重量");
+            if (quantityByLot.putIfAbsent(lotCode, input.quantityKg()) != null) {
+                throw invalid("返工料号重复投用：" + lotCode);
+            }
+            reworkTotal = reworkTotal.add(input.quantityKg());
+        }
+        BigDecimal maxAllowed = totalQuantityKg.multiply(REWORK_MAX_RATIO);
+        if (reworkTotal.compareTo(maxAllowed) > 0) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "REWORK_RATIO_EXCEEDED",
+                    "返工料合计 " + reworkTotal.stripTrailingZeros().toPlainString()
+                            + " 公斤超过总量 20% 上限 "
+                            + maxAllowed.stripTrailingZeros().toPlainString() + " 公斤");
+        }
+        Map<String, BigDecimal> sorted = new LinkedHashMap<>();
+        quantityByLot.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(entry -> sorted.put(entry.getKey(), entry.getValue()));
+        return sorted;
+    }
+
+    /**
+     * 按料号字典序锁定料账行并校验余额与过敏原声明：
+     * 全部来源过敏原并集必须被目标配方版本声明（清线凭证不能豁免）；
+     * 任一料号余额不足即拒绝，整笔零扣。
+     */
+    private List<ReworkLotRow> lockReworkLots(Map<String, BigDecimal> quantityByLot,
+            List<String> declaredAllergens) {
+        List<ReworkLotRow> locked = new ArrayList<>();
+        Set<String> union = new TreeSet<>();
+        for (Map.Entry<String, BigDecimal> entry : quantityByLot.entrySet()) {
+            ReworkLotRow lot = lineRepository.findReworkLotByCodeForUpdate(entry.getKey())
+                    .orElseThrow(() -> notFound("REWORK_LOT_NOT_FOUND",
+                            "返工料号不存在：" + entry.getKey()));
+            if (lot.balanceKg().compareTo(entry.getValue()) < 0) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        "REWORK_QUOTA_INSUFFICIENT",
+                        "返工料 " + lot.lotCode() + " 余额 "
+                                + lot.balanceKg().stripTrailingZeros().toPlainString()
+                                + " 公斤不足投用 "
+                                + entry.getValue().stripTrailingZeros().toPlainString() + " 公斤");
+            }
+            union.addAll(lot.allergens());
+            locked.add(lot);
+        }
+        Set<String> undeclared = new TreeSet<>(union);
+        undeclared.removeAll(declaredAllergens);
+        if (!undeclared.isEmpty()) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    "REWORK_ALLERGEN_UNDECLARED",
+                    "返工料来源过敏原未被目标配方版本声明：" + new ArrayList<>(undeclared)
+                            + "（清线凭证只证明线路清洁，不能替代物料过敏原声明）");
+        }
+        return locked;
+    }
+
+    /** 公斤数校验：正数且最多三位小数。 */
+    private static void requireKg(BigDecimal value, String label) {
+        if (value == null || value.signum() <= 0) {
+            throw invalid(label + "必须为正数");
+        }
+        if (value.stripTrailingZeros().scale() > MAX_KG_SCALE) {
+            throw invalid(label + "最多三位小数");
+        }
+    }
+
     /** 规范化过敏原集合：去空白、去重、按编码字典序排列，并校验合成目录存在。 */
     private List<String> normalizeAllergens(List<String> allergens) {
         if (allergens == null) {
@@ -507,9 +735,37 @@ public class LineControlService {
 
     private LineControlResults.ControlledProductionView buildProductionView(
             ProductionRecordRow row) {
+        List<LineControlResults.ReworkConsumptionView> consumptions =
+                lineRepository.findReworkConsumptionsByRecord(row.id()).stream()
+                        .map(consumption -> {
+                            String lotCode = lineRepository
+                                    .findReworkLotById(consumption.lotId())
+                                    .map(ReworkLotRow::lotCode)
+                                    .orElse("?");
+                            return buildConsumptionView(consumption, lotCode);
+                        })
+                        .toList();
         return new LineControlResults.ControlledProductionView(row.id(), row.filingId(),
                 row.lineCode(), row.occupiedVersion(), row.batchNo(),
                 row.quantityKg().stripTrailingZeros().toPlainString(), row.reportedAt(),
-                row.clearanceCertificateId(), false);
+                row.clearanceCertificateId(), consumptions, false);
+    }
+
+    private static LineControlResults.ReworkLotView buildReworkLotView(ReworkLotRow row,
+            boolean replayed) {
+        return new LineControlResults.ReworkLotView(row.id(), row.lotCode(),
+                row.productionRecordId(), row.productCode(), row.formulaVersion(),
+                List.copyOf(row.allergens()),
+                row.availableKg().stripTrailingZeros().toPlainString(),
+                row.consumedKg().stripTrailingZeros().toPlainString(),
+                row.balanceKg().stripTrailingZeros().toPlainString(),
+                row.version(), row.registeredAt(), replayed);
+    }
+
+    private static LineControlResults.ReworkConsumptionView buildConsumptionView(
+            ReworkConsumptionRow row, String lotCode) {
+        return new LineControlResults.ReworkConsumptionView(row.id(), lotCode,
+                row.productionRecordId(),
+                row.quantityKg().stripTrailingZeros().toPlainString(), row.consumedAt());
     }
 }

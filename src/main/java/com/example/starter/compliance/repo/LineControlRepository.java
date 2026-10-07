@@ -214,6 +214,135 @@ public class LineControlRepository {
 
     // ---------------- 受控量产记录 ----------------
 
+    // ---------------- 返工料账 ----------------
+
+    public Optional<ReworkLotRow> findReworkLotByCode(String lotCode) {
+        try {
+            return Optional.of(jdbcTemplate.queryForObject(
+                    "SELECT id, lot_code, production_record_id, product_code, formula_version, "
+                            + "allergens, available_kg, consumed_kg, version, registered_at, "
+                            + "updated_at FROM rework_lot WHERE lot_code = ?",
+                    REWORK_LOT_MAPPER, lotCode));
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    public Optional<ReworkLotRow> findReworkLotById(long id) {
+        try {
+            return Optional.of(jdbcTemplate.queryForObject(
+                    "SELECT id, lot_code, production_record_id, product_code, formula_version, "
+                            + "allergens, available_kg, consumed_kg, version, registered_at, "
+                            + "updated_at FROM rework_lot WHERE id = ?",
+                    REWORK_LOT_MAPPER, id));
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    public Optional<ReworkLotRow> findReworkLotBySource(long productionRecordId) {
+        try {
+            return Optional.of(jdbcTemplate.queryForObject(
+                    "SELECT id, lot_code, production_record_id, product_code, formula_version, "
+                            + "allergens, available_kg, consumed_kg, version, registered_at, "
+                            + "updated_at FROM rework_lot WHERE production_record_id = ?",
+                    REWORK_LOT_MAPPER, productionRecordId));
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    /** 行级锁读取：受控量产扣减前锁定料账行，串行化两批争同料的并发消费。 */
+    public Optional<ReworkLotRow> findReworkLotByCodeForUpdate(String lotCode) {
+        try {
+            return Optional.of(jdbcTemplate.queryForObject(
+                    "SELECT id, lot_code, production_record_id, product_code, formula_version, "
+                            + "allergens, available_kg, consumed_kg, version, registered_at, "
+                            + "updated_at FROM rework_lot WHERE lot_code = ? FOR UPDATE",
+                    REWORK_LOT_MAPPER, lotCode));
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    public long insertReworkLot(String lotCode, long productionRecordId, String productCode,
+            int formulaVersion, List<String> allergens, java.math.BigDecimal availableKg,
+            String requestId, long registeredAt, long updatedAt) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbcTemplate.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO rework_lot(lot_code, production_record_id, product_code, "
+                            + "formula_version, allergens, available_kg, consumed_kg, version, "
+                            + "request_id, registered_at, updated_at) "
+                            + "VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)",
+                    Statement.RETURN_GENERATED_KEYS);
+            ps.setString(1, lotCode);
+            ps.setLong(2, productionRecordId);
+            ps.setString(3, productCode);
+            ps.setInt(4, formulaVersion);
+            ps.setString(5, JsonSupport.write(allergens));
+            ps.setBigDecimal(6, availableKg);
+            ps.setString(7, requestId);
+            ps.setLong(8, registeredAt);
+            ps.setLong(9, updatedAt);
+            return ps;
+        }, keyHolder);
+        Number key = keyHolder.getKey();
+        if (key == null) {
+            throw new IllegalStateException("返工料账主键生成失败");
+        }
+        return key.longValue();
+    }
+
+    /**
+     * 原子扣减返工额度：仅当扣后不超可用量时成功（消费加 quantity、料账版本加 1），
+     * 与行锁配合保证两批争同料不超用；返回是否扣减成功。
+     */
+    public boolean deductReworkLot(long lotId, java.math.BigDecimal quantityKg, long updatedAt) {
+        return jdbcTemplate.update(
+                "UPDATE rework_lot SET consumed_kg = consumed_kg + ?, version = version + 1, "
+                        + "updated_at = ? WHERE id = ? AND consumed_kg + ? <= available_kg",
+                quantityKg, updatedAt, lotId, quantityKg) > 0;
+    }
+
+    public long insertReworkConsumption(long lotId, long productionRecordId,
+            java.math.BigDecimal quantityKg, long consumedAt) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbcTemplate.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO rework_consumption(lot_id, production_record_id, quantity_kg, "
+                            + "consumed_at) VALUES (?, ?, ?, ?)",
+                    Statement.RETURN_GENERATED_KEYS);
+            ps.setLong(1, lotId);
+            ps.setLong(2, productionRecordId);
+            ps.setBigDecimal(3, quantityKg);
+            ps.setLong(4, consumedAt);
+            return ps;
+        }, keyHolder);
+        Number key = keyHolder.getKey();
+        if (key == null) {
+            throw new IllegalStateException("返工料消费明细主键生成失败");
+        }
+        return key.longValue();
+    }
+
+    /** 某料号全部消费明细（按消费先后升序），用于勾稽原量、消费与余额。 */
+    public List<ReworkConsumptionRow> findReworkConsumptionsByLot(long lotId) {
+        return jdbcTemplate.query(
+                "SELECT id, lot_id, production_record_id, quantity_kg, consumed_at "
+                        + "FROM rework_consumption WHERE lot_id = ? ORDER BY id",
+                REWORK_CONSUMPTION_MAPPER, lotId);
+    }
+
+    /** 某笔量产记录的返工料消费明细（按料号字典序，响应稳定）。 */
+    public List<ReworkConsumptionRow> findReworkConsumptionsByRecord(long productionRecordId) {
+        return jdbcTemplate.query(
+                "SELECT c.id, c.lot_id, c.production_record_id, c.quantity_kg, c.consumed_at "
+                        + "FROM rework_consumption c JOIN rework_lot l ON l.id = c.lot_id "
+                        + "WHERE c.production_record_id = ? ORDER BY l.lot_code",
+                REWORK_CONSUMPTION_MAPPER, productionRecordId);
+    }
+
     // ---------------- 行映射 ----------------
 
     private static List<String> readAllergens(String json) {
@@ -238,4 +367,16 @@ public class LineControlRepository {
                     rs.getLong("cleared_at"), rs.getInt("occupied_version"),
                     rs.getString("status"), rs.getLong("confirmed_at"),
                     rs.getObject("consumed_at", Long.class));
+
+    private static final RowMapper<ReworkLotRow> REWORK_LOT_MAPPER = (rs, n) ->
+            new ReworkLotRow(rs.getLong("id"), rs.getString("lot_code"),
+                    rs.getLong("production_record_id"), rs.getString("product_code"),
+                    rs.getInt("formula_version"), readAllergens(rs.getString("allergens")),
+                    rs.getBigDecimal("available_kg"), rs.getBigDecimal("consumed_kg"),
+                    rs.getInt("version"), rs.getLong("registered_at"), rs.getLong("updated_at"));
+
+    private static final RowMapper<ReworkConsumptionRow> REWORK_CONSUMPTION_MAPPER = (rs, n) ->
+            new ReworkConsumptionRow(rs.getLong("id"), rs.getLong("lot_id"),
+                    rs.getLong("production_record_id"), rs.getBigDecimal("quantity_kg"),
+                    rs.getLong("consumed_at"));
 }

@@ -446,6 +446,15 @@ public class ComplianceRepository {
                 PRODUCTION_RECORD_MAPPER, lineCode);
     }
 
+    /** 某备案全部量产记录（按提交先后升序），用于返工料来源勾稽。 */
+    public List<ProductionRecordRow> findProductionRecordsByFiling(long filingId) {
+        return jdbcTemplate.query(
+                "SELECT id, filing_id, batch_no, quantity_kg, reported_at, line_code, "
+                        + "occupied_version, clearance_certificate_id FROM production_record "
+                        + "WHERE filing_id = ? ORDER BY id",
+                PRODUCTION_RECORD_MAPPER, filingId);
+    }
+
     public Optional<ProductionRecordRow> findProductionRecordById(long id) {
         try {
             return Optional.of(jdbcTemplate.queryForObject(
@@ -489,6 +498,8 @@ public class ComplianceRepository {
     // ---------------- 测试清理 ----------------
 
     public void deleteBusinessData() {
+        jdbcTemplate.update("DELETE FROM rework_consumption");
+        jdbcTemplate.update("DELETE FROM rework_lot");
         jdbcTemplate.update("DELETE FROM production_record");
         jdbcTemplate.update("DELETE FROM filing_review");
         jdbcTemplate.update("DELETE FROM active_filing");

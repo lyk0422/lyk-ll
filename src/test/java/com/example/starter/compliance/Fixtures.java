@@ -10,6 +10,8 @@ import com.example.starter.compliance.web.Requests.FormulaAllergenRequest;
 import com.example.starter.compliance.web.Requests.IngredientDto;
 import com.example.starter.compliance.web.Requests.ProductionReportRequest;
 import com.example.starter.compliance.web.Requests.RegisterLineRequest;
+import com.example.starter.compliance.web.Requests.RegisterReworkLotRequest;
+import com.example.starter.compliance.web.Requests.ReworkInputDto;
 import com.example.starter.compliance.web.Requests.StandardUpdateRequest;
 import com.example.starter.compliance.web.Requests.SubmitFormulaRequest;
 import java.math.BigDecimal;
@@ -103,6 +105,23 @@ public final class Fixtures {
             String lineCode, int occupiedVersion, String batchNo, String quantityKg,
             Long certificateId, long reportedAt) {
         return new ControlledProductionRequest(requestId, filingId, lineCode, occupiedVersion,
-                batchNo, new BigDecimal(quantityKg), certificateId, reportedAt);
+                batchNo, new BigDecimal(quantityKg), certificateId, reportedAt, null);
+    }
+
+    public static ControlledProductionRequest controlledWithRework(String requestId, long filingId,
+            String lineCode, int occupiedVersion, String batchNo, String quantityKg,
+            Long certificateId, long reportedAt, List<ReworkInputDto> reworkInputs) {
+        return new ControlledProductionRequest(requestId, filingId, lineCode, occupiedVersion,
+                batchNo, new BigDecimal(quantityKg), certificateId, reportedAt, reworkInputs);
+    }
+
+    public static ReworkInputDto reworkInput(String lotCode, String quantityKg) {
+        return new ReworkInputDto(lotCode, new BigDecimal(quantityKg));
+    }
+
+    public static RegisterReworkLotRequest reworkLot(String requestId, String lotCode,
+            long productionRecordId, String productCode, String availableKg, long registeredAt) {
+        return new RegisterReworkLotRequest(requestId, lotCode, productionRecordId, productCode,
+                new BigDecimal(availableKg), 0, registeredAt);
     }
 }
