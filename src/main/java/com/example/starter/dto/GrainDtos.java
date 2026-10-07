@@ -226,15 +226,99 @@ public final class GrainDtos {
             boolean replayed) {
     }
 
-    /** 解除双复核视图。 */
+    /** 解除双复核视图；checkedRosterVersion 为确认时依据的名单版本，null 表示未启用多测点的旧单。 */
     public record ReleaseView(
             long id,
             long fumigationId,
             int checkedVersion,
             int lastSeqNo,
             int firstSeqNo,
+            Integer checkedRosterVersion,
             List<String> reviewers,
             Instant releasedAt,
             boolean replayed) {
+    }
+
+    /**
+     * 登记测点名单请求：散气前登记 2 至 10 个不同测点并冻结为名单版本 1；
+     * 登记后该单成为受控单，旧单点采样入口拒绝。
+     */
+    public record RegisterRosterRequest(
+            @NotBlank String requestId,
+            @NotNull Integer expectedVersion,
+            @NotNull @jakarta.validation.constraints.Size(min = 2, max = 10)
+            List<@NotBlank String> points) {
+    }
+
+    /** 增测点请求：散气期间可增点（每次至少 1 个新点，总数不超过 10），不得删点；成功生成新名单版本。 */
+    public record AddRosterPointsRequest(
+            @NotBlank String requestId,
+            @NotNull Integer expectedVersion,
+            @NotNull @jakarta.validation.constraints.Size(min = 1, max = 10)
+            List<@NotBlank String> points) {
+    }
+
+    /** 测点名单视图；points 按编码排序。 */
+    public record RosterView(
+            long id,
+            long fumigationId,
+            int rosterVersion,
+            List<String> points,
+            boolean replayed) {
+    }
+
+    /** 采样帧单点读数：pointCode 必须属于当前名单版本；concentration 单位 ppm，有限非负小数。 */
+    public record FramePointReading(
+            @NotBlank String pointCode,
+            @NotNull BigDecimal concentration) {
+    }
+
+    /**
+     * 多测点采样帧请求：全名单各点共用同一 UTC 采样时刻；
+     * 缺点、重复点、未知点或非递增时刻全帧拒绝，不写部分读数。
+     */
+    public record GasFrameRequest(
+            @NotBlank String requestId,
+            @NotNull Integer expectedVersion,
+            @NotNull Integer seqNo,
+            @NotNull Instant measuredAt,
+            @NotNull @jakarta.validation.constraints.Size(min = 1, max = 10)
+            List<@jakarta.validation.Valid FramePointReading> readings) {
+    }
+
+    /** 帧测点读数视图。 */
+    public record FramePointView(
+            String pointCode,
+            BigDecimal concentration) {
+    }
+
+    /** 采样帧视图；maxConcentration 为本帧最差值，safe 为全点≤阈值。 */
+    public record GasFrameView(
+            long id,
+            long fumigationId,
+            int rosterVersion,
+            int seqNo,
+            Instant measuredAt,
+            BigDecimal maxConcentration,
+            boolean safe,
+            boolean late,
+            List<FramePointView> points,
+            boolean replayed) {
+    }
+
+    /**
+     * 安全连续段复算视图：按当前名单版本的非迟到帧重算有效连续安全段，
+     * releasable 表示最近三帧连续安全且首末间隔 ≥ 30 分钟（恰等合法）。
+     */
+    public record GasSafetyView(
+            long fumigationId,
+            int rosterVersion,
+            int consecutiveSafeFrames,
+            Integer firstSeqNo,
+            Integer lastSeqNo,
+            Instant firstMeasuredAt,
+            Instant lastMeasuredAt,
+            Long gapSeconds,
+            boolean releasable) {
     }
 }

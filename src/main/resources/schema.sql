@@ -152,10 +152,54 @@ CREATE TABLE IF NOT EXISTS fumigation_release (
     reviewer1 VARCHAR(64) NOT NULL COMMENT '复核人1标识；两名复核人必须不同',
     reviewer2 VARCHAR(64) NOT NULL COMMENT '复核人2标识；两名复核人必须不同',
     checked_version INT NOT NULL COMMENT '确认时重查的熏蒸单最新版本；与期望不符则拒绝',
-    last_seq_no INT NOT NULL COMMENT '确认时重查到的最新读数序号',
-    first_seq_no INT NOT NULL COMMENT '放行三点的首点序号',
+    last_seq_no INT NOT NULL COMMENT '确认时重查到的最新读数/帧序号',
+    first_seq_no INT NOT NULL COMMENT '放行三点/三帧的首点序号',
+    checked_roster_version INT NULL COMMENT '确认时依据的测点名单版本；NULL表示未启用多测点的旧单',
     fingerprint VARCHAR(64) NOT NULL COMMENT '幂等指纹：requestId与全部业务字段的SHA-256',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '解除时间，时区Asia/Shanghai',
     CONSTRAINT uk_release_request UNIQUE (request_id),
     CONSTRAINT uk_release_order UNIQUE (fumigation_id)
 ) COMMENT='熏蒸解除双复核记录';
+
+CREATE TABLE IF NOT EXISTS fumigation_roster (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    fumigation_id BIGINT NOT NULL COMMENT '所属熏蒸单ID',
+    roster_version INT NOT NULL COMMENT '测点名单版本，单内从1起，每次成功增点+1；冻结后旧版本只读保留',
+    request_id VARCHAR(64) NOT NULL COMMENT '名单登记/增点幂等请求ID，全局唯一',
+    expected_version INT NOT NULL COMMENT '客户端期望的熏蒸单版本',
+    fingerprint VARCHAR(64) NOT NULL COMMENT '幂等指纹：requestId与全部测点（排序后）的SHA-256',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '登记时间，时区Asia/Shanghai',
+    CONSTRAINT uk_roster_request UNIQUE (request_id),
+    CONSTRAINT uk_roster_version UNIQUE (fumigation_id, roster_version)
+) COMMENT='熏蒸散气测点名单版本';
+
+CREATE TABLE IF NOT EXISTS fumigation_roster_point (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    roster_id BIGINT NOT NULL COMMENT '所属名单版本ID',
+    point_code VARCHAR(64) NOT NULL COMMENT '测点编码，名单内唯一；只能增不能删',
+    CONSTRAINT uk_roster_point UNIQUE (roster_id, point_code)
+) COMMENT='熏蒸散气测点名单明细';
+
+CREATE TABLE IF NOT EXISTS gas_frame (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    fumigation_id BIGINT NOT NULL COMMENT '所属熏蒸单ID',
+    roster_id BIGINT NOT NULL COMMENT '采样时冻结的名单版本ID；解除只按当前名单版本的帧评估',
+    request_id VARCHAR(64) NOT NULL COMMENT '采样帧幂等请求ID，全局唯一',
+    seq_no INT NOT NULL COMMENT '单号内帧序号；缺号打断连续安全计数',
+    measured_at TIMESTAMP NOT NULL COMMENT '帧采样时刻，UTC；同帧各点共用，单号内必须严格递增',
+    max_concentration DECIMAL(8,3) NOT NULL COMMENT '本帧最差（最高）浓度，单位ppm；查询可复算',
+    safe BOOLEAN NOT NULL COMMENT '本帧是否安全：全名单各点浓度均≤安全阈值（恰等判安全）',
+    late BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否解除后的迟到帧：TRUE只记录不改冻结证据/FALSE正常证据',
+    fingerprint VARCHAR(64) NOT NULL COMMENT '幂等指纹：requestId与全部测点、浓度与精确时刻的SHA-256',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '入库时间，时区Asia/Shanghai',
+    CONSTRAINT uk_frame_request UNIQUE (request_id),
+    CONSTRAINT uk_frame_order_seq UNIQUE (fumigation_id, seq_no)
+) COMMENT='熏蒸散气多测点采样帧';
+
+CREATE TABLE IF NOT EXISTS gas_frame_point (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    frame_id BIGINT NOT NULL COMMENT '所属采样帧ID',
+    point_code VARCHAR(64) NOT NULL COMMENT '测点编码，必须属于采样时名单版本',
+    concentration DECIMAL(8,3) NOT NULL COMMENT '合成气体浓度，单位ppm，有限非负小数',
+    CONSTRAINT uk_frame_point UNIQUE (frame_id, point_code)
+) COMMENT='熏蒸散气采样帧测点读数';

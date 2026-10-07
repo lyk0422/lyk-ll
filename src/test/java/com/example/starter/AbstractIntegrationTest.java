@@ -45,6 +45,10 @@ public abstract class AbstractIntegrationTest {
 
     @BeforeEach
     void cleanDatabase() {
+        jdbc.update("DELETE FROM gas_frame_point");
+        jdbc.update("DELETE FROM gas_frame");
+        jdbc.update("DELETE FROM fumigation_roster_point");
+        jdbc.update("DELETE FROM fumigation_roster");
         jdbc.update("DELETE FROM fumigation_release");
         jdbc.update("DELETE FROM gas_reading");
         jdbc.update("DELETE FROM fumigation_approval");

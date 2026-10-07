@@ -2,14 +2,20 @@ package com.example.starter.controller;
 
 import java.util.List;
 
+import com.example.starter.dto.GrainDtos.AddRosterPointsRequest;
 import com.example.starter.dto.GrainDtos.ApplyFumigationRequest;
 import com.example.starter.dto.GrainDtos.ApproveFumigationRequest;
 import com.example.starter.dto.GrainDtos.BeginAerationRequest;
 import com.example.starter.dto.GrainDtos.FumigationView;
+import com.example.starter.dto.GrainDtos.GasFrameRequest;
+import com.example.starter.dto.GrainDtos.GasFrameView;
 import com.example.starter.dto.GrainDtos.GasReadingRequest;
 import com.example.starter.dto.GrainDtos.GasReadingView;
+import com.example.starter.dto.GrainDtos.GasSafetyView;
+import com.example.starter.dto.GrainDtos.RegisterRosterRequest;
 import com.example.starter.dto.GrainDtos.ReleaseFumigationRequest;
 import com.example.starter.dto.GrainDtos.ReleaseView;
+import com.example.starter.dto.GrainDtos.RosterView;
 import com.example.starter.dto.GrainDtos.StartFumigationRequest;
 import com.example.starter.service.FumigationService;
 
@@ -101,5 +107,47 @@ public class FumigationController {
     @GetMapping("/fumigation-orders/{orderId}/release")
     public ReleaseView getRelease(@PathVariable long orderId) {
         return fumigationService.getRelease(orderId);
+    }
+
+    /** 登记测点名单（散气前，2 至 10 个不同测点，冻结为名单版本 1）。 */
+    @PostMapping("/fumigation-orders/{orderId}/roster")
+    public ResponseEntity<RosterView> registerRoster(@PathVariable long orderId,
+                                                     @Valid @RequestBody RegisterRosterRequest request) {
+        RosterView view = fumigationService.registerRoster(orderId, request);
+        return ResponseEntity.status(view.replayed() ? HttpStatus.OK : HttpStatus.CREATED).body(view);
+    }
+
+    /** 增测点（只增不删，生成新名单版本，待解除确认失效）。 */
+    @PostMapping("/fumigation-orders/{orderId}/roster/points")
+    public ResponseEntity<RosterView> addRosterPoints(@PathVariable long orderId,
+                                                      @Valid @RequestBody AddRosterPointsRequest request) {
+        RosterView view = fumigationService.addRosterPoints(orderId, request);
+        return ResponseEntity.status(view.replayed() ? HttpStatus.OK : HttpStatus.CREATED).body(view);
+    }
+
+    /** 查询当前测点名单。 */
+    @GetMapping("/fumigation-orders/{orderId}/roster")
+    public RosterView getRoster(@PathVariable long orderId) {
+        return fumigationService.getRoster(orderId);
+    }
+
+    /** 多测点采样帧（全名单同一时刻，缺点/重复点/未知点/非递增时刻全帧拒绝）。 */
+    @PostMapping("/fumigation-orders/{orderId}/gas-frames")
+    public ResponseEntity<GasFrameView> gasFrame(@PathVariable long orderId,
+                                                 @Valid @RequestBody GasFrameRequest request) {
+        GasFrameView view = fumigationService.ingestGasFrame(orderId, request);
+        return ResponseEntity.status(view.replayed() ? HttpStatus.OK : HttpStatus.CREATED).body(view);
+    }
+
+    /** 查询全部采样帧（含各点读数与每帧最差值）。 */
+    @GetMapping("/fumigation-orders/{orderId}/gas-frames")
+    public List<GasFrameView> gasFrames(@PathVariable long orderId) {
+        return fumigationService.gasFrames(orderId);
+    }
+
+    /** 复算当前名单版本的有效连续安全段。 */
+    @GetMapping("/fumigation-orders/{orderId}/gas-frames/safety")
+    public GasSafetyView gasSafety(@PathVariable long orderId) {
+        return fumigationService.gasSafety(orderId);
     }
 }
