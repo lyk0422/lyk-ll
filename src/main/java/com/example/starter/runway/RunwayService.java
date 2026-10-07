@@ -33,6 +33,7 @@ public class RunwayService {
     private final WeatherRepository weatherRepository;
     private final RoutinePlanRepository routinePlanRepository;
     private final RunwayLockRepository runwayLockRepository;
+    private final ConstructionLockGuard constructionLockGuard;
     private final RunwayProperties properties;
     private final IdempotencyExecutor idempotencyExecutor;
     private final Clock clock;
@@ -44,6 +45,7 @@ public class RunwayService {
                          WeatherRepository weatherRepository,
                          RoutinePlanRepository routinePlanRepository,
                          RunwayLockRepository runwayLockRepository,
+                         ConstructionLockGuard constructionLockGuard,
                          RunwayProperties properties,
                          IdempotencyExecutor idempotencyExecutor,
                          Clock clock) {
@@ -54,6 +56,7 @@ public class RunwayService {
         this.weatherRepository = weatherRepository;
         this.routinePlanRepository = routinePlanRepository;
         this.runwayLockRepository = runwayLockRepository;
+        this.constructionLockGuard = constructionLockGuard;
         this.properties = properties;
         this.idempotencyExecutor = idempotencyExecutor;
         this.clock = clock;
@@ -208,6 +211,9 @@ public class RunwayService {
 
     private ReopenResponse doReopen(long eventId, ReopenRequest request) {
         RunwayEvent event = mustFind(eventId);
+        // 与施工生效、最后验收在同一跑道行锁上串行化：按事务次序判定，不留带活动闭锁的新开放。
+        runwayLockRepository.lockRunway(event.runwayId());
+        event = mustFind(eventId);
         if (event.status() == EventStatus.ARCHIVED) {
             throw ApiException.conflict("EVENT_ARCHIVED", "事件已归档，不得恢复开放");
         }
@@ -234,6 +240,8 @@ public class RunwayService {
         if (!history.getLast().passed()) {
             throw ApiException.unprocessable("FRICTION_BELOW_THRESHOLD", "摩擦系数低于0.35，须持续关闭");
         }
+        // 整跑道恢复入口：所有施工段均完成（无活动施工闭锁）方可开放；未受控跑道原行为不变。
+        constructionLockGuard.assertNoActiveLock(event.runwayId());
         Instant now = clock.instant();
         eventRepository.updateStatus(eventId, EventStatus.REOPENED, event.escalated(), event.assessmentType(),
                 true, now);
