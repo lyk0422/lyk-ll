@@ -158,6 +158,11 @@ public class RedFlushService {
 
     private ConfirmResponse doConfirm(String requestNo, ConfirmRequest request) {
         RequestRow row = lockRequestByNo(requestNo);
+        if (row.batchId() != null) {
+            // 受控子单只能随整批确认，普通确认入口不得绕过整批原子性
+            throw ApiException.conflict("CONTROLLED_CHILD",
+                    "受控子单须通过整批确认入口处理: " + requestNo);
+        }
         if ("ISSUED".equals(row.status())) {
             return new ConfirmResponse(requestNo, "ISSUED", row.redInvoiceNo(),
                     creditService.computeAvailable(sellerOf(row.blueInvoiceId())));
@@ -323,7 +328,7 @@ public class RedFlushService {
     private RequestRow lockRequestByNo(String requestNo) {
         return jdbc.query(
                         "SELECT id, request_no, blue_invoice_id, blue_invoice_no, flush_type, total_amount,"
-                                + " status, seller_confirmed, buyer_confirmed, red_invoice_no"
+                                + " status, seller_confirmed, buyer_confirmed, red_invoice_no, batch_id"
                                 + " FROM red_flush_request WHERE request_no = ? FOR UPDATE",
                         (rs, rowNum) -> mapRequest(rs), requestNo)
                 .stream()
@@ -334,7 +339,7 @@ public class RedFlushService {
     private RequestRow findRequestByNo(String requestNo) {
         return jdbc.query(
                         "SELECT id, request_no, blue_invoice_id, blue_invoice_no, flush_type, total_amount,"
-                                + " status, seller_confirmed, buyer_confirmed, red_invoice_no"
+                                + " status, seller_confirmed, buyer_confirmed, red_invoice_no, batch_id"
                                 + " FROM red_flush_request WHERE request_no = ?",
                         (rs, rowNum) -> mapRequest(rs), requestNo)
                 .stream()
@@ -343,10 +348,12 @@ public class RedFlushService {
     }
 
     private RequestRow mapRequest(java.sql.ResultSet rs) throws java.sql.SQLException {
+        long batchId = rs.getLong("batch_id");
+        Long batchIdOrNull = rs.wasNull() ? null : batchId;
         return new RequestRow(rs.getLong("id"), rs.getString("request_no"), rs.getLong("blue_invoice_id"),
                 rs.getString("blue_invoice_no"), rs.getString("flush_type"), rs.getBigDecimal("total_amount"),
                 rs.getString("status"), rs.getBoolean("seller_confirmed"), rs.getBoolean("buyer_confirmed"),
-                rs.getString("red_invoice_no"));
+                rs.getString("red_invoice_no"), batchIdOrNull);
     }
 
     /**
@@ -462,6 +469,111 @@ public class RedFlushService {
     }
 
     /**
+     * 整批受理时为单张蓝票创建受控子单并预占行可红冲余额（须在整批事务内执行）。
+     * 复用单票部分红冲的逐行规则：票据状态、行级差异暂停、行余额与在途占用
+     * （在途含普通红冲、其他整批子单，与差异登记共享行互斥）；
+     * 只创建 PENDING 子单实现预占，不开红票、不动额度；
+     * 任一校验失败抛业务异常，由整批事务回滚保证不留下子单或占用。
+     *
+     * @return 受控子单视图（含子单号、购销双方与预占金额）
+     */
+    public ControlledChild createControlledChild(String blueInvoiceNo, List<RedLineRequest> lines,
+                                                 long batchId) {
+        BlueInvoiceRow blue = lockBlueByNo(blueInvoiceNo);
+        BigDecimal remaining = blue.totalAmount().subtract(blue.redFlushedAmount());
+        if (remaining.compareTo(BigDecimal.ZERO) <= 0) {
+            throw ApiException.conflict("NO_REMAINING_BALANCE",
+                    "蓝票已全额红冲，无可红冲余额: " + blueInvoiceNo);
+        }
+        if (!List.of("DELIVERED", "PARTIAL_RED", "ARCHIVED").contains(blue.status())) {
+            throw ApiException.conflict("INVALID_STATE",
+                    "蓝票状态 " + blue.status() + " 不允许红冲（须已交付或已归档）");
+        }
+        // 满 72 小时未答复的差异恰满即升级（同事务落库）；未结差异只暂停对应行
+        discrepancyGuard.escalateExpired(blue.id());
+        BigDecimal remainingForNew = remaining.subtract(pendingAmount(blue.id()));
+        Map<Integer, BigDecimal> lineBalances = lineBalances(blue.id());
+        Map<Integer, BigDecimal> linePending = pendingLineAmounts(blue.id());
+        BigDecimal amount = BigDecimal.ZERO;
+        for (RedLineRequest line : lines) {
+            BigDecimal balance = lineBalances.get(line.lineNo());
+            if (balance == null) {
+                throw ApiException.badRequest("LINE_NOT_FOUND", "蓝票不存在行号: " + line.lineNo());
+            }
+            if (discrepancyGuard.isLineBlocked(blue.id(), line.lineNo())) {
+                throw ApiException.conflict("LINE_DISPUTED",
+                        "行 " + line.lineNo() + " 存在未结对账差异，该行新增红冲暂停");
+            }
+            BigDecimal allowed = balance.subtract(linePending.getOrDefault(line.lineNo(), BigDecimal.ZERO));
+            if (line.amount().compareTo(allowed) > 0) {
+                throw ApiException.conflict("RED_FLUSH_EXCEEDS_LINE",
+                        "行 " + line.lineNo() + " 累计红冲将超可红冲余额：可申请 " + allowed
+                                + "，本次 " + line.amount());
+            }
+            amount = amount.add(line.amount());
+        }
+        if (amount.compareTo(remainingForNew) > 0) {
+            throw ApiException.conflict("RED_FLUSH_EXCEEDS_BALANCE",
+                    "累计红冲将超可红冲余额：可申请 " + remainingForNew + "，本次 " + amount);
+        }
+        long requestId = insertControlledRequest(blue, amount, batchId);
+        String requestNo = jdbc.queryForObject(
+                "SELECT request_no FROM red_flush_request WHERE id = ?", String.class, requestId);
+        for (RedLineRequest line : lines) {
+            Long blueLineId = jdbc.queryForObject(
+                    "SELECT id FROM invoice_line WHERE invoice_id = ? AND line_no = ?",
+                    Long.class, blue.id(), line.lineNo());
+            jdbc.update(
+                    "INSERT INTO red_flush_line (request_id, blue_line_id, line_no, amount) VALUES (?, ?, ?, ?)",
+                    requestId, blueLineId, line.lineNo(), line.amount());
+        }
+        return new ControlledChild(requestNo, blue.invoiceNo(), blue.sellerId(), blue.buyerId(), amount);
+    }
+
+    /**
+     * 整批双确认生效时为受控子单开具红票并同事务恢复额度（须在整批事务内执行）。
+     * 复用单票确认的开票与校验逻辑；任一子单失败则整批事务回滚。
+     *
+     * @return 开具的红票号码
+     */
+    public String issueControlledChild(String requestNo) {
+        RequestRow row = lockRequestByNo(requestNo);
+        if (row.batchId() == null) {
+            throw ApiException.conflict("NOT_CONTROLLED_CHILD", "非受控子单，不能随整批开具: " + requestNo);
+        }
+        if (!"PENDING".equals(row.status())) {
+            throw ApiException.conflict("INVALID_STATE",
+                    "受控子单状态 " + row.status() + " 不允许开具: " + requestNo);
+        }
+        return issueRedInvoice(row, requestNo).redInvoiceNo();
+    }
+
+    /**
+     * 整批终止（拒绝或撤回）时释放全部预占：在途受控子单置为 TERMINATED，
+     * 不再计入在途占用（须在整批事务内执行）。
+     */
+    public void releaseControlledChildren(long batchId) {
+        jdbc.update("UPDATE red_flush_request SET status = 'TERMINATED', updated_at = CURRENT_TIMESTAMP"
+                + " WHERE batch_id = ? AND status = 'PENDING'", batchId);
+    }
+
+    /**
+     * 插入受控子单主行并回写正式编号（前缀+主键序号），batch_id 标记所属整批。
+     */
+    private long insertControlledRequest(BlueInvoiceRow blue, BigDecimal amount, long batchId) {
+        String tempNo = "TMP-" + java.util.UUID.randomUUID();
+        jdbc.update(
+                "INSERT INTO red_flush_request (request_no, blue_invoice_id, blue_invoice_no, flush_type,"
+                        + " total_amount, status, batch_id) VALUES (?, ?, ?, 'PARTIAL', ?, 'PENDING', ?)",
+                tempNo, blue.id(), blue.invoiceNo(), amount, batchId);
+        Long id = jdbc.queryForObject("SELECT id FROM red_flush_request WHERE request_no = ?",
+                Long.class, tempNo);
+        String requestNo = "RFR" + String.format("%08d", id);
+        jdbc.update("UPDATE red_flush_request SET request_no = ? WHERE id = ?", requestNo, id);
+        return id;
+    }
+
+    /**
      * 蓝票内部行视图。
      */
     record BlueInvoiceRow(long id, String invoiceNo, String sellerId, String buyerId, boolean buyerBooked,
@@ -473,7 +585,7 @@ public class RedFlushService {
      */
     record RequestRow(long id, String requestNo, long blueInvoiceId, String blueInvoiceNo, String flushType,
                       BigDecimal totalAmount, String status, boolean sellerConfirmed, boolean buyerConfirmed,
-                      String redInvoiceNo) {
+                      String redInvoiceNo, Long batchId) {
     }
 
     /**
@@ -534,5 +646,12 @@ public class RedFlushService {
                                       BigDecimal totalAmount, String status, boolean sellerConfirmed,
                                       boolean buyerConfirmed, String redInvoiceNo,
                                       List<RedFlushLineView> lines, List<ConfirmationView> confirmations) {
+    }
+
+    /**
+     * 整批受控子单视图。
+     */
+    public record ControlledChild(String requestNo, String blueInvoiceNo, String sellerId, String buyerId,
+                                  BigDecimal amount) {
     }
 }

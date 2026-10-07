@@ -55,10 +55,11 @@ CREATE TABLE IF NOT EXISTS red_flush_request (
     blue_invoice_no VARCHAR(64)  NOT NULL COMMENT '被红冲蓝票号码（红冲链引用）',
     flush_type      VARCHAR(8)   NOT NULL COMMENT '红冲类型：FULL全额/PARTIAL部分（按行项目）',
     total_amount    DECIMAL(19,2) NOT NULL COMMENT '本次申请红冲金额，单位元',
-    status          VARCHAR(16)  NOT NULL COMMENT '状态：PENDING待双方确认/SUSPENDED意见不一致挂起/ISSUED已开红票',
+    status          VARCHAR(16)  NOT NULL COMMENT '状态：PENDING待双方确认/SUSPENDED意见不一致挂起/ISSUED已开红票/TERMINATED整批终止释放',
     seller_confirmed BOOLEAN     NOT NULL DEFAULT FALSE COMMENT '销方是否已确认',
     buyer_confirmed  BOOLEAN     NOT NULL DEFAULT FALSE COMMENT '购方是否已确认',
     red_invoice_no  VARCHAR(64)  NULL COMMENT '开具的红票号码；未开具为NULL',
+    batch_id        BIGINT       NULL COMMENT '所属整批红冲ID；普通红冲为NULL，受控子单禁止普通确认入口',
     created_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最近更新时间',
     PRIMARY KEY (id),
@@ -128,4 +129,28 @@ CREATE TABLE IF NOT EXISTS discrepancy_conflict (
     reason          VARCHAR(32)   NOT NULL COMMENT '冲突原因：RED_FLUSH_IN_PROGRESS红冲在途/RED_FLUSH_COMPLETED红冲已完成',
     created_at      TIMESTAMP     NOT NULL COMMENT '记录时间（UTC）',
     PRIMARY KEY (id)
+);
+
+CREATE TABLE IF NOT EXISTS red_flush_batch (
+    id              BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
+    batch_no        VARCHAR(64)   NOT NULL COMMENT '整批红冲编号，全局唯一',
+    seller_id       VARCHAR(64)   NOT NULL COMMENT '销方ID（批内各票一致）',
+    buyer_id        VARCHAR(64)   NOT NULL COMMENT '购方ID（批内各票一致）',
+    total_amount    DECIMAL(19,2) NOT NULL COMMENT '整批预占红冲金额合计，单位元',
+    status          VARCHAR(16)   NOT NULL COMMENT '状态：PENDING待双方确认/ISSUED已生效开红票/TERMINATED已终止（拒绝或撤回）',
+    version         INT           NOT NULL DEFAULT 1 COMMENT '乐观锁版本，自1起，每次确认/拒绝/撤回成功加1',
+    created_at      TIMESTAMP     NOT NULL COMMENT '创建时间（UTC）',
+    updated_at      TIMESTAMP     NOT NULL COMMENT '最近更新时间（UTC）',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_red_batch_no (batch_no)
+);
+
+CREATE TABLE IF NOT EXISTS red_flush_batch_opinion (
+    id         BIGINT      NOT NULL AUTO_INCREMENT COMMENT '主键',
+    batch_id   BIGINT      NOT NULL COMMENT '所属整批ID',
+    side       VARCHAR(8)  NOT NULL COMMENT '确认方：SELLER销方/BUYER购方',
+    opinion    VARCHAR(8)  NOT NULL COMMENT '意见：AGREE同意/REJECT拒绝；单方同意只留意见不生效',
+    created_at TIMESTAMP   NOT NULL COMMENT '意见时间（UTC）',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_batch_opinion_side (batch_id, side)
 );
