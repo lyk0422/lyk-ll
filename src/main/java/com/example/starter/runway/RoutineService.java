@@ -41,6 +41,7 @@ public class RoutineService {
     private final RoutineCompletionRepository completionRepository;
     private final RunwayEventRepository eventRepository;
     private final RunwayLockRepository runwayLockRepository;
+    private final ConstructionSegmentRepository constructionSegmentRepository;
     private final IdempotencyExecutor idempotencyExecutor;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -52,6 +53,7 @@ public class RoutineService {
                           RoutineCompletionRepository completionRepository,
                           RunwayEventRepository eventRepository,
                           RunwayLockRepository runwayLockRepository,
+                          ConstructionSegmentRepository constructionSegmentRepository,
                           IdempotencyExecutor idempotencyExecutor,
                           ObjectMapper objectMapper,
                           Clock clock) {
@@ -62,6 +64,7 @@ public class RoutineService {
         this.completionRepository = completionRepository;
         this.eventRepository = eventRepository;
         this.runwayLockRepository = runwayLockRepository;
+        this.constructionSegmentRepository = constructionSegmentRepository;
         this.idempotencyExecutor = idempotencyExecutor;
         this.objectMapper = objectMapper;
         this.clock = clock;
@@ -244,6 +247,10 @@ public class RoutineService {
         if (eventRepository.existsActiveByRunway(plan.runwayId())) {
             throw ApiException.unprocessable("EMERGENCY_CLOSURE_ACTIVE",
                     "跑道存在进行中紧急关闭事件，例行巡检不得开始");
+        }
+        if (constructionSegmentRepository.existsLockedByRunway(plan.runwayId())) {
+            throw ApiException.unprocessable("CONSTRUCTION_LOCKDOWN_ACTIVE",
+                    "跑道存在活动施工闭锁，整跑道新使用被阻断，例行巡检不得开始");
         }
         int latest = latestCalendarVersion();
         List<FlightOccupancyWindow> windows =

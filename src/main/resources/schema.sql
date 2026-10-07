@@ -258,3 +258,102 @@ CREATE TABLE IF NOT EXISTS runway_lock (
 );
 
 COMMENT ON TABLE runway_lock IS '跑道咨询锁：同跑道的例行开始与紧急接报事务先对该行 FOR UPDATE 串行化，跨跑道互不阻塞';
+
+-- 受控跑道：登记正整数米长度；存在活动施工后不许缩改长度
+CREATE TABLE IF NOT EXISTS controlled_runway (
+    runway_id VARCHAR(32) NOT NULL PRIMARY KEY,
+    length_m INT NOT NULL,
+    version INT NOT NULL DEFAULT 1,
+    request_id VARCHAR(64) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+COMMENT ON TABLE controlled_runway IS '受控跑道：登记正整数米长度；存在活动施工后不许缩改；未登记跑道保持原行为不变';
+COMMENT ON COLUMN controlled_runway.runway_id IS '跑道编号（合成数据）';
+COMMENT ON COLUMN controlled_runway.length_m IS '跑道长度（单位：米，正整数）；施工段区间端点不得超过该值';
+COMMENT ON COLUMN controlled_runway.version IS '聚合乐观锁版本：从1开始，每次成功变更加1；修改携带 expectedVersion';
+COMMENT ON COLUMN controlled_runway.request_id IS '登记幂等请求标识';
+COMMENT ON COLUMN controlled_runway.created_at IS '记录创建时间（UTC）';
+COMMENT ON COLUMN controlled_runway.updated_at IS '记录最近更新时间（UTC）';
+
+-- 施工单：引用受控跑道与1至10个不同段号；生效后冻结区间并闭锁整跑道，不得删除或缩段
+CREATE TABLE IF NOT EXISTS construction_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    runway_id VARCHAR(32) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    version INT NOT NULL DEFAULT 1,
+    activated_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    withdrawn_at TIMESTAMP,
+    request_id VARCHAR(64) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_construction_order_runway_status ON construction_order (runway_id, status);
+
+COMMENT ON TABLE construction_order IS '施工单：登记(PENDING)→生效(ACTIVE)→全部段验收完成(COMPLETED)；未生效可撤回(WITHDRAWN)，已生效不得删除或缩段';
+COMMENT ON COLUMN construction_order.id IS '施工单主键';
+COMMENT ON COLUMN construction_order.runway_id IS '受控跑道编号';
+COMMENT ON COLUMN construction_order.status IS '状态：PENDING未生效/ACTIVE已生效闭锁/COMPLETED全部段验收完成/WITHDRAWN已撤回(终态)';
+COMMENT ON COLUMN construction_order.version IS '聚合乐观锁版本：从1开始，每次成功变更加1；修改携带 expectedVersion';
+COMMENT ON COLUMN construction_order.activated_at IS '生效时刻（UTC），未生效为NULL';
+COMMENT ON COLUMN construction_order.completed_at IS '全部段验收完成时刻（UTC），未完成为NULL';
+COMMENT ON COLUMN construction_order.withdrawn_at IS '撤回时刻（UTC），未撤回为NULL';
+COMMENT ON COLUMN construction_order.request_id IS '登记幂等请求标识';
+COMMENT ON COLUMN construction_order.created_at IS '记录创建时间（UTC）';
+COMMENT ON COLUMN construction_order.updated_at IS '记录最近更新时间（UTC）';
+
+-- 施工段：半开整数米区间 [start_m, end_m)；同单段号唯一且区间不得重叠（端点相接允许）
+CREATE TABLE IF NOT EXISTS construction_segment (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id BIGINT NOT NULL,
+    segment_no INT NOT NULL,
+    start_m INT NOT NULL,
+    end_m INT NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    completed_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_construction_segment_no ON construction_segment (order_id, segment_no);
+CREATE INDEX IF NOT EXISTS idx_construction_segment_order ON construction_segment (order_id, id);
+
+COMMENT ON TABLE construction_segment IS '施工段：半开整数米区间[start_m,end_m)；两个不同验收人凭据齐全后完成，仅消除本段闭锁';
+COMMENT ON COLUMN construction_segment.id IS '施工段主键';
+COMMENT ON COLUMN construction_segment.order_id IS '所属施工单ID';
+COMMENT ON COLUMN construction_segment.segment_no IS '段号：单内唯一，1至10个不同段号';
+COMMENT ON COLUMN construction_segment.start_m IS '段起点（单位：米，含），0<=start_m<end_m<=跑道长度';
+COMMENT ON COLUMN construction_segment.end_m IS '段终点（单位：米，不含）';
+COMMENT ON COLUMN construction_segment.status IS '状态：LOCKED闭锁中/COMPLETED验收完成';
+COMMENT ON COLUMN construction_segment.completed_at IS '段验收完成时刻（UTC），未完成为NULL';
+COMMENT ON COLUMN construction_segment.created_at IS '记录创建时间（UTC）';
+COMMENT ON COLUMN construction_segment.updated_at IS '记录最近更新时间（UTC）';
+
+-- 验收清场凭据（合成）：每段须两个不同验收人各提交一条；施工结束后的迟到凭据仅登记留痕
+CREATE TABLE IF NOT EXISTS acceptance_credential (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    segment_id BIGINT NOT NULL,
+    order_id BIGINT NOT NULL,
+    inspector_id VARCHAR(64) NOT NULL,
+    credential VARCHAR(255) NOT NULL,
+    submitted_at TIMESTAMP NOT NULL,
+    late TINYINT NOT NULL DEFAULT 0,
+    request_id VARCHAR(64) NOT NULL,
+    created_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_acceptance_credential_segment ON acceptance_credential (segment_id, id);
+
+COMMENT ON TABLE acceptance_credential IS '验收清场凭据（合成）：每段两个不同验收人各一条后段完成；迟到凭据仅登记，不改变状态、不复活已中止巡检';
+COMMENT ON COLUMN acceptance_credential.id IS '凭据主键';
+COMMENT ON COLUMN acceptance_credential.segment_id IS '所属施工段ID';
+COMMENT ON COLUMN acceptance_credential.order_id IS '所属施工单ID（冗余便于查询）';
+COMMENT ON COLUMN acceptance_credential.inspector_id IS '验收人标识（合成）；同段同一验收人仅计一次';
+COMMENT ON COLUMN acceptance_credential.credential IS '合成清场凭据文本';
+COMMENT ON COLUMN acceptance_credential.submitted_at IS '凭据提交时刻（UTC，精确时刻由请求给出）';
+COMMENT ON COLUMN acceptance_credential.late IS '是否迟到凭据：1=施工单已结束后提交，仅登记留痕；0=生效期内正常提交';
+COMMENT ON COLUMN acceptance_credential.request_id IS '凭据提交幂等请求标识';
+COMMENT ON COLUMN acceptance_credential.created_at IS '记录创建时间（UTC）';

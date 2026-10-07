@@ -33,6 +33,7 @@ public class RunwayService {
     private final WeatherRepository weatherRepository;
     private final RoutinePlanRepository routinePlanRepository;
     private final RunwayLockRepository runwayLockRepository;
+    private final ConstructionSegmentRepository constructionSegmentRepository;
     private final RunwayProperties properties;
     private final IdempotencyExecutor idempotencyExecutor;
     private final Clock clock;
@@ -44,6 +45,7 @@ public class RunwayService {
                          WeatherRepository weatherRepository,
                          RoutinePlanRepository routinePlanRepository,
                          RunwayLockRepository runwayLockRepository,
+                         ConstructionSegmentRepository constructionSegmentRepository,
                          RunwayProperties properties,
                          IdempotencyExecutor idempotencyExecutor,
                          Clock clock) {
@@ -54,6 +56,7 @@ public class RunwayService {
         this.weatherRepository = weatherRepository;
         this.routinePlanRepository = routinePlanRepository;
         this.runwayLockRepository = runwayLockRepository;
+        this.constructionSegmentRepository = constructionSegmentRepository;
         this.properties = properties;
         this.idempotencyExecutor = idempotencyExecutor;
         this.clock = clock;
@@ -189,6 +192,7 @@ public class RunwayService {
 
     /**
      * 恢复开放：与航行通告发布在同一事务内完成；修复类须复测合格；requestId 幂等。
+     * 整跑道恢复前必须确认该跑道所有施工段均验收完成（无活动施工闭锁）。
      */
     public ReopenResponse reopen(long eventId, ReopenRequest request) {
         String fingerprint = fingerprint(SCOPE_REOPEN, request.requestId(), String.valueOf(eventId),
@@ -213,6 +217,12 @@ public class RunwayService {
         }
         if (event.status() == EventStatus.REOPENED) {
             throw ApiException.conflict("EVENT_ALREADY_REOPENED", "事件已恢复开放");
+        }
+        // 与施工生效/最后验收在同一跑道上串行化：恢复前必须确认所有施工段均完成，不留带活动闭锁的新开放。
+        runwayLockRepository.lockRunway(event.runwayId());
+        if (constructionSegmentRepository.existsLockedByRunway(event.runwayId())) {
+            throw ApiException.unprocessable("CONSTRUCTION_LOCKDOWN_ACTIVE",
+                    "跑道存在未完成施工段闭锁，所有施工段验收完成前不得恢复开放");
         }
         List<AssessmentRecord> history = assessmentRepository.findByEventIdOrderByAssessedAt(eventId);
         if (history.isEmpty()) {
