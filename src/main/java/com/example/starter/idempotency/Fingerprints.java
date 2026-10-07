@@ -1,5 +1,11 @@
 package com.example.starter.idempotency;
 
+import com.example.starter.dto.ColdChainCorrectRequest;
+import com.example.starter.dto.ColdChainReadingInput;
+import com.example.starter.dto.ColdChainReadingsSubmitRequest;
+import com.example.starter.dto.ColdChainSegmentInput;
+import com.example.starter.dto.ColdChainSegmentReadingsInput;
+import com.example.starter.dto.ColdChainSegmentRegisterRequest;
 import com.example.starter.dto.CorrectRequest;
 import com.example.starter.dto.CustomsAmendRequest;
 import com.example.starter.dto.CustomsBindRequest;
@@ -30,6 +36,9 @@ public final class Fingerprints {
     public static final String CUSTOMS_REVOKE = "CUSTOMS_REVOKE";
     public static final String CUSTOMS_AMEND = "CUSTOMS_AMEND";
     public static final String SUBBATCH_WITHDRAW = "SUBBATCH_WITHDRAW";
+    public static final String COLDCHAIN_REGISTER = "COLDCHAIN_REGISTER";
+    public static final String COLDCHAIN_READINGS = "COLDCHAIN_READINGS";
+    public static final String COLDCHAIN_CORRECT = "COLDCHAIN_CORRECT";
 
     private Fingerprints() {
     }
@@ -127,6 +136,75 @@ public final class Fingerprints {
                 .number(request.expectedVersion())
                 .field(request.at() == null ? null : request.at().toString());
         return sha256(cb.build());
+    }
+
+    // ==================== 冷链运输台账：结构化长度前缀指纹 ====================
+
+    /** 冷链片段登记指纹：操作 + 批号 + 全部片段（序号/起止精确时刻）+ 登记时刻。 */
+    public static String coldChainRegister(ColdChainSegmentRegisterRequest request) {
+        CanonicalBuilder cb = new CanonicalBuilder(COLDCHAIN_REGISTER);
+        cb.field(request.requestId())
+                .field(request.batchNo());
+        appendSegments(cb, request.segments());
+        cb.field(instant(request.at()));
+        return sha256(cb.build());
+    }
+
+    /** 冷链读数提交指纹：操作 + 批号 + 期望版本 + 全片段读数（序号/精确时刻/温度）+ 提交时刻。 */
+    public static String coldChainReadings(ColdChainReadingsSubmitRequest request) {
+        CanonicalBuilder cb = new CanonicalBuilder(COLDCHAIN_READINGS);
+        cb.field(request.requestId())
+                .field(request.batchNo())
+                .number(request.expectedVersion())
+                .number(request.segments().size());
+        for (ColdChainSegmentReadingsInput block : request.segments()) {
+            cb.field(integer(block.segmentSeq()))
+                    .number(block.readings().size());
+            for (ColdChainReadingInput reading : block.readings()) {
+                cb.field(integer(reading.seq()))
+                        .field(instant(reading.at()))
+                        .field(decimal(reading.temperature()));
+            }
+        }
+        cb.field(instant(request.at()));
+        return sha256(cb.build());
+    }
+
+    /** 冷链补录/更正指纹：操作 + 批号 + 期望版本 + 更正后全部片段 + 更正时刻。 */
+    public static String coldChainCorrect(ColdChainCorrectRequest request) {
+        CanonicalBuilder cb = new CanonicalBuilder(COLDCHAIN_CORRECT);
+        cb.field(request.requestId())
+                .field(request.batchNo())
+                .number(request.expectedVersion());
+        appendSegments(cb, request.segments());
+        cb.field(instant(request.at()));
+        return sha256(cb.build());
+    }
+
+    private static void appendSegments(CanonicalBuilder cb, List<ColdChainSegmentInput> segments) {
+        cb.number(segments.size());
+        for (ColdChainSegmentInput segment : segments) {
+            cb.field(integer(segment.seq()))
+                    .field(instant(segment.startUtc()))
+                    .field(instant(segment.endUtc()));
+        }
+    }
+
+    private static String instant(java.time.Instant instant) {
+        return instant == null ? null : instant.toString();
+    }
+
+    /** 可空序号字段：null 与数值编码不歧义（null 走 field 的空值编码）。 */
+    private static String integer(Integer value) {
+        return value == null ? null : value.toString();
+    }
+
+    /** 温度归一化：2.0 与 2.00 语义相同指纹一致；零值统一为 "0"。 */
+    private static String decimal(java.math.BigDecimal value) {
+        if (value == null) {
+            return null;
+        }
+        return value.signum() == 0 ? "0" : value.stripTrailingZeros().toPlainString();
     }
 
     /**

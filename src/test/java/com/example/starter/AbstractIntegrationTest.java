@@ -31,6 +31,8 @@ public abstract class AbstractIntegrationTest {
     @Autowired
     protected CustomsService customsService;
     @Autowired
+    protected com.example.starter.service.ColdChainService coldChainService;
+    @Autowired
     protected MutableBusinessClock clock;
     @Autowired
     protected JdbcTemplate jdbc;
@@ -43,6 +45,10 @@ public abstract class AbstractIntegrationTest {
         jdbc.update("DELETE FROM review_event");
         jdbc.update("DELETE FROM publicity_record");
         jdbc.update("DELETE FROM inspection_record");
+        // 冷链读数/片段外键引用台账，台账外键引用审查流程，须按序先清理。
+        jdbc.update("DELETE FROM cold_chain_reading");
+        jdbc.update("DELETE FROM cold_chain_segment");
+        jdbc.update("DELETE FROM cold_chain_ledger");
         // 子批绑定外键引用审查流程与通关单，须先于两者清理。
         jdbc.update("DELETE FROM subbatch_binding");
         jdbc.update("DELETE FROM batch_review");

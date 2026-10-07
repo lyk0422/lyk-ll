@@ -5,6 +5,7 @@ import com.example.starter.catalog.InspectionCatalog;
 import com.example.starter.catalog.InspectionEvaluator;
 import com.example.starter.catalog.InspectionSpec;
 import com.example.starter.domain.BindingStatus;
+import com.example.starter.domain.ColdChainLedger;
 import com.example.starter.domain.CustomsDeclaration;
 import com.example.starter.domain.CustomsStatus;
 import com.example.starter.domain.EnterpriseProductStatus;
@@ -26,6 +27,7 @@ import com.example.starter.dto.ReviewView;
 import com.example.starter.dto.ServiceResult;
 import com.example.starter.idempotency.Fingerprints;
 import com.example.starter.json.JsonSupport;
+import com.example.starter.repo.ColdChainRepository;
 import com.example.starter.repo.CustomsRepository;
 import com.example.starter.repo.EnterpriseProductStatusRepository;
 import com.example.starter.repo.IdempotencyRepository;
@@ -66,6 +68,7 @@ public class ReviewService {
     private final EnterpriseProductStatusRepository statusRepository;
     private final IdempotencyRepository idempotencyRepository;
     private final CustomsRepository customsRepository;
+    private final ColdChainRepository coldChainRepository;
     private final ReviewViewAssembler assembler;
     private final JsonSupport jsonSupport;
     private final BusinessClock clock;
@@ -75,6 +78,7 @@ public class ReviewService {
                          EnterpriseProductStatusRepository statusRepository,
                          IdempotencyRepository idempotencyRepository,
                          CustomsRepository customsRepository,
+                         ColdChainRepository coldChainRepository,
                          ReviewViewAssembler assembler,
                          JsonSupport jsonSupport,
                          BusinessClock clock,
@@ -83,6 +87,7 @@ public class ReviewService {
         this.statusRepository = statusRepository;
         this.idempotencyRepository = idempotencyRepository;
         this.customsRepository = customsRepository;
+        this.coldChainRepository = coldChainRepository;
         this.assembler = assembler;
         this.jsonSupport = jsonSupport;
         this.clock = clock;
@@ -463,6 +468,16 @@ public class ReviewService {
         if (review.getStatus() != ReviewStatus.PUBLICITY_EFFECTIVE) {
             return ServiceResult.status(409, new ErrorResponse("NOT_ISSUEABLE",
                     "仅公示期满生效的批次可签发归档，当前状态: " + review.getStatus()));
+        }
+
+        // 冷链门禁：受控子批（已登记冷链台账）同事务检查当前温证，不能只信公示合格。
+        // 台账锁在 review 行锁之后获取（review → ledger），与补录/更正的加锁顺序一致，
+        // 更正与签发的竞争由行锁唯一序列化：更正先提交则此处看到新版本温证失效。
+        ColdChainLedger coldChain = coldChainRepository.lockLedgerByReviewId(review.getId());
+        if (coldChain != null && !coldChain.isCertificateValid()) {
+            return ServiceResult.status(422, new ErrorResponse("COLD_CHAIN_CERT_INVALID",
+                    "受控子批当前台账版本 " + coldChain.getVersion() + " 无合格温证（冻结版本 "
+                            + coldChain.getQualifiedVersion() + "），须先重核冷链证据"));
         }
 
         if (binding != null) {
