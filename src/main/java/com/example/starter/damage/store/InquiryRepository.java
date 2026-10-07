@@ -380,6 +380,12 @@ public class InquiryRepository {
                 .stream().findFirst();
     }
 
+    /** 按开标记录 ID 查询（修理变更单溯源原中标证据） */
+    public Optional<OpeningRow> findOpeningById(long openingId) {
+        return jdbc.query("select * from bid_opening where id = ?", OPENING_MAPPER, openingId)
+                .stream().findFirst();
+    }
+
     /** 插入开标清单冻结行（含资格快照与排除原因/排名） */
     public void insertOpeningEntry(long openingId, long supplierId, long bidVersionId, long totalCents,
                                    int qualificationVersion, String qualificationStatus,

@@ -343,6 +343,83 @@ create unique index if not exists uk_bid_review_opening_reviewer on bid_review(o
 
 alter table repair_approval add column if not exists source varchar(16) not null default 'DIRECT';
 alter table repair_approval add column if not exists opening_id bigint null;
-comment on column repair_approval.source is '批复来源：DIRECT 无询价旧入口 / INQUIRY 密封询价中标转批复';
-comment on column repair_approval.opening_id is '询价转批复时的开标记录 ID（冻结证据）；DIRECT 旧入口为 NULL';
+comment on column repair_approval.source is '批复来源：DIRECT 无询价旧入口 / INQUIRY 密封询价中标转批复 / CHANGE 修理变更单切换';
+comment on column repair_approval.opening_id is '询价转批复时的开标记录 ID（冻结证据）；DIRECT 旧入口为 NULL；CHANGE 沿用原开标 ID';
 comment on column case_event.payload is '事件负载（如照片引用），NULL 表示无';
+
+-- ======================================================================
+-- 修理变更单（中标批复后改工法/分报价，合成规则，仅本地演示）
+-- 金额单位：正整数分；所有时刻均为 UTC 精确时刻（timestamp）。
+-- ======================================================================
+
+create table if not exists change_order (
+    id bigint auto_increment primary key,
+    case_id bigint not null,
+    version int not null,
+    status varchar(16) not null,
+    approval_id bigint not null,
+    opening_id bigint null,
+    supplier_id bigint not null,
+    qualification_version int not null,
+    original_total_cents bigint not null,
+    new_total_cents bigint not null,
+    new_estimate_id bigint null,
+    new_approval_id bigint null,
+    active_case_id bigint null,
+    request_id varchar(64) not null,
+    created_at timestamp not null,
+    updated_at timestamp not null,
+    decided_at timestamp null
+);
+comment on table change_order is '修理变更单候选；仅处理已批复未完工修箱案，冻结原批复/全清单/资格版本快照，双人复核同意后切换新估价与批复';
+comment on column change_order.version is '单据乐观锁版本，从 1 起，成功变更 +1，修改须携带 expectedVersion';
+comment on column change_order.status is 'PENDING 待复核（阻断原完工入口） / EFFECTIVE 已生效 / WITHDRAWN 已撤回 / REJECTED 已驳回';
+comment on column change_order.approval_id is '冻结的原有效批复 ID（切换前重查须仍为当前批复）';
+comment on column change_order.opening_id is '原中标开标记录 ID（证据链），DIRECT 批复不允许变更故恒非空';
+comment on column change_order.supplier_id is '原中标供应商 ID（变更报价主体）';
+comment on column change_order.qualification_version is '申请时刻供应商最新资格版本号快照';
+comment on column change_order.original_total_cents is '原中标全清单合计，正整数分';
+comment on column change_order.new_total_cents is '变更后全清单合计（未改项沿用原中标），正整数分';
+comment on column change_order.new_estimate_id is '生效后形成的新估价版本 ID；未生效为 NULL';
+comment on column change_order.new_approval_id is '生效后形成的新批复 ID；未生效为 NULL';
+comment on column change_order.active_case_id is '活动候选所属案件唯一键；PENDING 时=case_id，终态置 NULL（每案最多一个活动候选）';
+comment on column change_order.request_id is '产生本候选的幂等请求 ID';
+comment on column change_order.decided_at is '生效/撤回/驳回时刻（UTC）；PENDING 为 NULL';
+
+create unique index if not exists uk_change_order_active on change_order(active_case_id);
+
+create table if not exists change_order_line (
+    id bigint auto_increment primary key,
+    change_order_id bigint not null,
+    damage_item_id bigint not null,
+    line_no int not null,
+    changed boolean not null,
+    before_method varchar(16) not null,
+    before_amount_cents bigint not null,
+    after_method varchar(16) not null,
+    after_amount_cents bigint not null
+);
+comment on table change_order_line is '变更单全清单快照：每项前后工法与金额（正整数分），未改项前后一致';
+comment on column change_order_line.damage_item_id is '案件残损项 ID（仅本案已有项可改）';
+comment on column change_order_line.line_no is '快照行号，按案件残损项登记顺序从 1 递增';
+comment on column change_order_line.changed is 'true 本项被变更 / false 沿用原中标';
+comment on column change_order_line.before_method is '原中标工法代码';
+comment on column change_order_line.before_amount_cents is '原中标金额，正整数分';
+comment on column change_order_line.after_method is '变更后工法代码（未改项同原工法）';
+comment on column change_order_line.after_amount_cents is '变更后金额，正整数分（未改项同原金额）';
+
+create unique index if not exists uk_change_order_line_item on change_order_line(change_order_id, damage_item_id);
+
+create table if not exists change_order_review (
+    id bigint auto_increment primary key,
+    change_order_id bigint not null,
+    reviewer varchar(64) not null,
+    decision varchar(16) not null,
+    request_id varchar(64) not null,
+    created_at timestamp not null
+);
+comment on table change_order_review is '变更单复核记录；两名不同复核人均同意才切换，任一驳回即驳回候选';
+comment on column change_order_review.reviewer is '复核人标识；同一变更单内唯一';
+comment on column change_order_review.decision is '复核决定：APPROVE 同意 / REJECT 驳回';
+
+create unique index if not exists uk_change_order_review on change_order_review(change_order_id, reviewer);

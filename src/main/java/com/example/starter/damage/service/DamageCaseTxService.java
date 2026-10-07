@@ -19,6 +19,7 @@ import com.example.starter.damage.dto.Views.EstimateView;
 import com.example.starter.damage.dto.Views.PhotoResult;
 import com.example.starter.damage.store.DamageCaseRepository;
 import com.example.starter.damage.store.DamageCaseRepository.CaseRow;
+import com.example.starter.damage.store.ChangeOrderRepository;
 import com.example.starter.damage.store.DamageFlowRepository;
 import com.example.starter.damage.store.InquiryRepository;
 import org.springframework.dao.DuplicateKeyException;
@@ -50,17 +51,20 @@ public class DamageCaseTxService {
     private final DamageCaseRepository caseRepository;
     private final DamageFlowRepository flowRepository;
     private final InquiryRepository inquiryRepository;
+    private final ChangeOrderRepository changeOrderRepository;
     private final IdempotencyExecutor idempotency;
     private final Clock clock;
 
     public DamageCaseTxService(DamageCaseRepository caseRepository,
                                DamageFlowRepository flowRepository,
                                InquiryRepository inquiryRepository,
+                               ChangeOrderRepository changeOrderRepository,
                                IdempotencyExecutor idempotency,
                                Clock clock) {
         this.caseRepository = caseRepository;
         this.flowRepository = flowRepository;
         this.inquiryRepository = inquiryRepository;
+        this.changeOrderRepository = changeOrderRepository;
         this.idempotency = idempotency;
         this.clock = clock;
     }
@@ -177,6 +181,10 @@ public class DamageCaseTxService {
         CaseRow row = lockCase(caseId);
         if (row.status() != CaseStatus.APPROVED && row.status() != CaseStatus.REWORK) {
             throw ApiException.conflict("当前状态不允许登记完工: " + row.status());
+        }
+        // 存在待生效修理变更候选时原完工入口拒绝，不能用旧批复绕行；与候选建立经案件行锁串行
+        if (changeOrderRepository.hasActiveCandidate(caseId)) {
+            throw ApiException.conflict("存在待生效的修理变更候选，原完工入口已阻断，须先完成或撤回变更");
         }
         ApprovalView active = flowRepository.findActiveApproval(caseId);
         if (active == null) {
