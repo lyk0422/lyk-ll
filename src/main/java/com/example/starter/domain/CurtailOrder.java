@@ -30,6 +30,8 @@ public class CurtailOrder {
     private LocalDate planDate;
     /** 绑定时段序号 0..95（UTC 半开区间）；null 表示未绑定。 */
     private Integer segmentIndex;
+    /** 受控分段执行标记："Y" 为受控分段指令；null 为旧模式指令，旧入口行为不变。 */
+    private String controlledFlag;
 
     public Long getId() {
         return id;
@@ -149,5 +151,18 @@ public class CurtailOrder {
 
     public void setSegmentIndex(Integer segmentIndex) {
         this.segmentIndex = segmentIndex;
+    }
+
+    public String getControlledFlag() {
+        return controlledFlag;
+    }
+
+    public void setControlledFlag(String controlledFlag) {
+        this.controlledFlag = controlledFlag;
+    }
+
+    /** 是否为受控分段执行指令。 */
+    public boolean isControlled() {
+        return "Y".equals(controlledFlag);
     }
 }

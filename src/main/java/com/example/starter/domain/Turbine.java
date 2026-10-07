@@ -16,6 +16,8 @@ public class Turbine {
     private int technicalMinKw;
     private int availablePowerKw;
     private Instant updatedAt;
+    /** 可用状态：AVAILABLE 可用 / UNAVAILABLE 失效；受控分段计划每分钟事务内重查。 */
+    private String runStatus = "AVAILABLE";
 
     public Long getId() {
         return id;
@@ -71,5 +73,13 @@ public class Turbine {
 
     public void setUpdatedAt(Instant updatedAt) {
         this.updatedAt = updatedAt;
+    }
+
+    public String getRunStatus() {
+        return runStatus;
+    }
+
+    public void setRunStatus(String runStatus) {
+        this.runStatus = runStatus;
     }
 }

@@ -37,6 +37,7 @@ import com.example.starter.dto.PlanOrderReceiveResponse;
 import com.example.starter.dto.ReportRequest;
 import com.example.starter.dto.ReportResponse;
 import com.example.starter.dto.SettleResponse;
+import com.example.starter.repo.ControlledPlanRepository;
 import com.example.starter.repo.DispatchRepository;
 import com.example.starter.repo.IdempotentRepository;
 import com.example.starter.repo.PlanRepository;
@@ -66,6 +67,7 @@ public class DispatchService {
     private final DispatchRepository dispatchRepository;
     private final IdempotentRepository idempotentRepository;
     private final PlanRepository planRepository;
+    private final ControlledPlanRepository controlledPlanRepository;
     private final ObjectMapper objectMapper;
 
     public DispatchService(ServiceClock clock,
@@ -73,12 +75,14 @@ public class DispatchService {
                            DispatchRepository dispatchRepository,
                            IdempotentRepository idempotentRepository,
                            PlanRepository planRepository,
+                           ControlledPlanRepository controlledPlanRepository,
                            ObjectMapper objectMapper) {
         this.clock = clock;
         this.turbineRepository = turbineRepository;
         this.dispatchRepository = dispatchRepository;
         this.idempotentRepository = idempotentRepository;
         this.planRepository = planRepository;
+        this.controlledPlanRepository = controlledPlanRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -149,6 +153,8 @@ public class DispatchService {
         if (active != null) {
             // 同一事务：旧指令作废（active 释放）→ 新指令生效，不存在双指令同时生效窗口。
             dispatchRepository.markSuperseded(active.getId(), newId);
+            // 旧指令若为受控分段模式：同事务关闭其有效计划版本并释放机组占用。
+            controlledPlanRepository.closeOpenPlanAndRelease(active.getId(), now);
         }
         dispatchRepository.insertCycle(buildCycle(newId, 1, now));
         dispatchRepository.insertAllocations(newId, 1, allocations);
@@ -263,6 +269,8 @@ public class DispatchService {
 
         if (active != null) {
             dispatchRepository.markSuperseded(active.getId(), newId);
+            // 旧指令若为受控分段模式：同事务关闭其有效计划版本并释放机组占用。
+            controlledPlanRepository.closeOpenPlanAndRelease(active.getId(), now);
         }
         dispatchRepository.insertCycle(buildCycle(newId, 1, now));
         dispatchRepository.insertAllocations(newId, 1, allocations);
@@ -395,8 +403,10 @@ public class DispatchService {
             throw new ApiBadRequestException("该风场尚无任何限电指令，无法接收回报");
         }
 
-        // 封存（或作废）后迟到回报：只登记迟到事件，不进入执行曲线。
-        if (order.getStatus() == OrderStatus.SETTLED || order.getStatus() == OrderStatus.SUPERSEDED) {
+        // 封存（或作废/受控完成/受控取消）后迟到回报：只登记迟到事件，不进入执行曲线。
+        if (order.getStatus() == OrderStatus.SETTLED || order.getStatus() == OrderStatus.SUPERSEDED
+                || order.getStatus() == OrderStatus.COMPLETED
+                || order.getStatus() == OrderStatus.CANCELLED) {
             return recordLateReport(order, request, now, fingerprint);
         }
 
@@ -407,6 +417,12 @@ public class DispatchService {
             return recordLateReport(locked, request, now, fingerprint);
         }
         order = locked;
+
+        // 普通旧回执入口不能绕过受控指令阶梯：受控分段指令须走整分钟回执入口。
+        if (order.isControlled()) {
+            throw new ApiConflictException(
+                    "受控分段指令须使用分段回执入口逐分钟确认，旧回执入口不能绕过阶梯：" + order.getOrderNo());
+        }
 
         // 按机组＋时刻去重：不同 requestId 回报同一时刻点，返回首次结果，不重复入库。
         ExecutionReport samePoint =
@@ -572,9 +588,9 @@ public class DispatchService {
 
     /**
      * 以冻结核定计划裁剪实时可用：返回同序机组视图，其 availablePowerKw=min(实时, 计划)，
-     * 作为最低保留与比例分摊的输入基数。
+     * 作为最低保留与比例分摊的输入基数。包内静态，供受控分段模式复用同一规则。
      */
-    private List<Turbine> applyPlanBasis(List<Turbine> turbines, Map<Long, Integer> plannedById) {
+    static List<Turbine> applyPlanBasis(List<Turbine> turbines, Map<Long, Integer> plannedById) {
         List<Turbine> views = new ArrayList<>(turbines.size());
         for (Turbine t : turbines) {
             Integer planned = plannedById.get(t.getId());
@@ -595,9 +611,9 @@ public class DispatchService {
         return views;
     }
 
-    /** 将每轮分摊明细回填冻结的核定计划值与该轮实时可用值（参与出力取较小者）。 */
-    private void freezePlanBasis(List<Allocation> allocations, List<Turbine> turbines,
-                                 Map<Long, Integer> plannedById) {
+    /** 将每轮分摊明细回填冻结的核定计划值与该轮实时可用值（参与出力取较小者）。包内静态复用。 */
+    static void freezePlanBasis(List<Allocation> allocations, List<Turbine> turbines,
+                                Map<Long, Integer> plannedById) {
         Map<Long, Integer> realtimeById = turbines.stream()
                 .collect(Collectors.toMap(Turbine::getId, Turbine::getAvailablePowerKw));
         for (Allocation a : allocations) {
@@ -641,8 +657,15 @@ public class DispatchService {
         if (order.getStatus() == OrderStatus.SUPERSEDED) {
             throw new ApiBadRequestException("指令已被新指令作废，不能日结封存：" + orderNo);
         }
+        if (order.getStatus() == OrderStatus.COMPLETED
+                || order.getStatus() == OrderStatus.CANCELLED) {
+            throw new ApiBadRequestException(
+                    "受控指令已终态（" + order.getStatus() + "），不能日结封存：" + orderNo);
+        }
         Instant now = clock.now();
         dispatchRepository.markSettled(order.getId(), now);
+        // 受控分段指令日结：同事务关闭有效计划版本并释放机组占用。
+        controlledPlanRepository.closeOpenPlanAndRelease(order.getId(), now);
         return new SettleResponse(order.getId(), order.getOrderNo(),
                 OrderStatus.SETTLED.name(), now, false);
     }

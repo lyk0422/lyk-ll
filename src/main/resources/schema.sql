@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS late_report_event (
 CREATE TABLE IF NOT EXISTS idempotent_record (
     id            BIGINT AUTO_INCREMENT PRIMARY KEY,
     request_id    VARCHAR(96) NOT NULL COMMENT '请求幂等键',
-    biz_type      VARCHAR(16) NOT NULL COMMENT '业务类型：ORDER/REPORT/PLAN/PLAN_ORDER',
+    biz_type      VARCHAR(16) NOT NULL COMMENT '业务类型：ORDER/REPORT/PLAN/PLAN_ORDER/CTRL_ORDER/CTRL_CONFIRM/CTRL_REPLAN/CTRL_CANCEL',
     fingerprint   VARCHAR(64) NOT NULL COMMENT '覆盖 requestId 与全部业务字段的指纹',
     ref_id        BIGINT COMMENT '首建业务实体 id',
     response_body CLOB NOT NULL COMMENT '首次响应 JSON，重放时原样返回',
@@ -146,3 +146,70 @@ ALTER TABLE curtail_order ADD COLUMN IF NOT EXISTS segment_index INT COMMENT '�
 -- base_available_kw 即参与出力 = min(实时可用, 核定计划)；超时重分摊仍引用原版本计划值，仅刷新实时值。
 ALTER TABLE allocation ADD COLUMN IF NOT EXISTS planned_power_kw INT COMMENT '该轮冻结的日前核定计划出力，单位 kW，NULL 表示未绑定计划的旧指令';
 ALTER TABLE allocation ADD COLUMN IF NOT EXISTS realtime_available_kw INT COMMENT '该轮时刻的机组实时可用出力，单位 kW，NULL 表示未绑定计划的旧指令';
+
+-- ============ 可选受控分段执行模式（旧未启用指令保持原行为） ============
+
+-- 受控分段计划版本表：同指令版本从 1 起，修改（重规划）成功加 1；
+-- 冻结启动 UTC 时刻、总分钟数与逐分钟进度，进度与功率、版本、幂等同事务推进。
+CREATE TABLE IF NOT EXISTS controlled_plan (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id         BIGINT NOT NULL COMMENT '所属限电指令 id',
+    plan_version     INT NOT NULL COMMENT '分段计划版本号，同指令从 1 开始，修改成功加 1',
+    status           VARCHAR(16) NOT NULL COMMENT '状态：EXECUTING 执行中/PAUSED 已暂停/CANCELLED 已取消/COMPLETED 已完成/REPLACED 被新版本替换',
+    start_at         TIMESTAMP NOT NULL COMMENT '本版本启动时刻（UTC 存储）；第 k 分钟计划时刻 = 启动时刻 + k 分钟',
+    duration_minutes INT NOT NULL COMMENT '计划总分钟数，取各参与机组期限最大值，1..15',
+    confirmed_minute INT NOT NULL COMMENT '已整分钟确认到的分钟序号，0 表示尚未确认',
+    request_id       VARCHAR(96) NOT NULL COMMENT '形成本版本的请求幂等键（自动重规划为合成键）',
+    fingerprint      VARCHAR(64) NOT NULL COMMENT '覆盖 requestId 与全部业务字段的结构化指纹',
+    created_at       TIMESTAMP NOT NULL COMMENT '版本形成时刻（UTC 存储）',
+    closed_at        TIMESTAMP COMMENT '版本关闭（完成/取消/被替换）时刻，NULL 表示仍有效',
+    CONSTRAINT uk_controlled_plan_version UNIQUE (order_id, plan_version)
+);
+
+-- 受控分段计划机组参数表：冻结登记起始实际功率、每分钟升降上限、期限与最终分摊目标。
+CREATE TABLE IF NOT EXISTS controlled_plan_turbine (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    plan_id             BIGINT NOT NULL COMMENT '所属分段计划版本 id',
+    turbine_id          BIGINT NOT NULL COMMENT '机组 id',
+    start_power_kw      INT NOT NULL COMMENT '登记起始实际功率，单位 kW，须在最低保留与当时可用出力之间',
+    ramp_rate_kw_per_min INT NOT NULL COMMENT '每分钟升降上限，单位 kW/min，正整数',
+    duration_minutes    INT NOT NULL COMMENT '该机组到达期限，1..15 分钟',
+    target_power_kw     INT NOT NULL COMMENT '冻结的最终分摊目标，单位 kW',
+    CONSTRAINT uk_controlled_plan_turbine UNIQUE (plan_id, turbine_id)
+);
+
+-- 受控分段阶梯表：每机组每分钟一行冻结功率；每分钟向目标移动不超过上限，最后恰达各自目标。
+CREATE TABLE IF NOT EXISTS controlled_plan_step (
+    id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+    plan_id    BIGINT NOT NULL COMMENT '所属分段计划版本 id',
+    turbine_id BIGINT NOT NULL COMMENT '机组 id',
+    minute_no  INT NOT NULL COMMENT '分钟序号，从 1 开始；计划时刻 = 启动时刻 + 该序号分钟',
+    power_kw   INT NOT NULL COMMENT '该分钟冻结阶梯功率，单位 kW',
+    CONSTRAINT uk_controlled_step UNIQUE (plan_id, turbine_id, minute_no)
+);
+CREATE INDEX IF NOT EXISTS idx_controlled_step_plan ON controlled_plan_step(plan_id);
+
+-- 机组占用表：主键即机组 id，保证同一机组同一时刻至多一份执行中/暂停中分段计划；
+-- 取消、完成、被替换或被新指令作废时删除行释放占用，不自动恢复原功率。
+CREATE TABLE IF NOT EXISTS controlled_occupation (
+    turbine_id  BIGINT PRIMARY KEY COMMENT '被占用机组 id',
+    order_id    BIGINT NOT NULL COMMENT '占用所属指令 id',
+    plan_id     BIGINT NOT NULL COMMENT '占用所属分段计划版本 id',
+    occupied_at TIMESTAMP NOT NULL COMMENT '占用形成时刻（UTC 存储）'
+);
+
+-- 整分钟确认记录：整分钟一起确认后登记；唯一索引兜底并发重复确认同一分钟。
+CREATE TABLE IF NOT EXISTS controlled_minute_confirm (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    plan_id      BIGINT NOT NULL COMMENT '所属分段计划版本 id',
+    minute_no    INT NOT NULL COMMENT '确认的分钟序号',
+    request_id   VARCHAR(96) NOT NULL COMMENT '确认请求幂等键',
+    confirmed_at TIMESTAMP NOT NULL COMMENT '确认时刻（UTC 存储）',
+    CONSTRAINT uk_controlled_confirm UNIQUE (plan_id, minute_no)
+);
+
+-- 受控分段执行标记：'Y' 为受控分段指令；NULL 为旧模式指令，旧入口行为不变。
+ALTER TABLE curtail_order ADD COLUMN IF NOT EXISTS controlled_flag CHAR(1) COMMENT '受控分段执行标记 Y；NULL 为旧模式指令';
+
+-- 机组可用状态：受控分段计划每分钟事务内重查；任一失效则该分钟不执行、计划暂停。
+ALTER TABLE wind_turbine ADD COLUMN IF NOT EXISTS run_status VARCHAR(16) NOT NULL DEFAULT 'AVAILABLE' COMMENT '机组可用状态：AVAILABLE 可用/UNAVAILABLE 失效';

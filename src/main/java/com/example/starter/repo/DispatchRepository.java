@@ -57,6 +57,7 @@ public class DispatchRepository {
         o.setPlanDate(planDate == null ? null : planDate.toLocalDate());
         int segmentIndex = rs.getInt("segment_index");
         o.setSegmentIndex(rs.wasNull() ? null : segmentIndex);
+        o.setControlledFlag(rs.getString("controlled_flag"));
         return o;
     };
 
@@ -133,8 +134,8 @@ public class DispatchRepository {
                         (order_no, farm_code, request_id, fingerprint, target_power_kw,
                          status, current_cycle_no, superseded_by_order_id, active_flag,
                          received_at, settled_at, plan_version_id, plan_version_no,
-                         plan_date, segment_index)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         plan_date, segment_index, controlled_flag)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, Statement.RETURN_GENERATED_KEYS);
             ps.setString(1, order.getOrderNo());
             ps.setString(2, order.getFarmCode());
@@ -172,6 +173,11 @@ public class DispatchRepository {
                 ps.setNull(15, java.sql.Types.INTEGER);
             } else {
                 ps.setInt(15, order.getSegmentIndex());
+            }
+            if (order.getControlledFlag() == null) {
+                ps.setNull(16, java.sql.Types.CHAR);
+            } else {
+                ps.setString(16, order.getControlledFlag());
             }
             return ps;
         }, keyHolder);
@@ -258,6 +264,20 @@ public class DispatchRepository {
         jdbc.update(
                 "UPDATE curtail_order SET status = 'SETTLED', active_flag = NULL, settled_at = ? WHERE id = ?",
                 Timestamp.from(settledAt), orderId);
+    }
+
+    /** 受控分段阶梯最后一分钟确认完成：指令终态 COMPLETED 并释放执行中标记。 */
+    public void markCompleted(long orderId) {
+        jdbc.update(
+                "UPDATE curtail_order SET status = 'COMPLETED', active_flag = NULL WHERE id = ?",
+                orderId);
+    }
+
+    /** 受控分段计划暂停后取消：指令终态 CANCELLED 并释放执行中标记。 */
+    public void markCancelled(long orderId) {
+        jdbc.update(
+                "UPDATE curtail_order SET status = 'CANCELLED', active_flag = NULL WHERE id = ?",
+                orderId);
     }
 
     public void insertCycle(DispatchCycle cycle) {
