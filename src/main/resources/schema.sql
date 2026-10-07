@@ -2,16 +2,18 @@
 -- 时间列统一为 UTC 时间戳（TIMESTAMP），由应用层 Clock 写入。
 
 CREATE TABLE IF NOT EXISTS switching_ticket (
-    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
-    request_id   VARCHAR(64)  NOT NULL,
-    interval_id  VARCHAR(64)  NOT NULL,
-    title        VARCHAR(128) NOT NULL,
-    status       VARCHAR(16)  NOT NULL,
-    reviewer_id  VARCHAR(64),
-    issued_at    TIMESTAMP,
-    expires_at   TIMESTAMP,
-    created_at   TIMESTAMP    NOT NULL,
-    updated_at   TIMESTAMP    NOT NULL
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id      VARCHAR(64)  NOT NULL,
+    interval_id     VARCHAR(64)  NOT NULL,
+    title           VARCHAR(128) NOT NULL,
+    status          VARCHAR(16)  NOT NULL,
+    reviewer_id     VARCHAR(64),
+    issued_at       TIMESTAMP,
+    expires_at      TIMESTAMP,
+    continuation_of BIGINT,
+    version         INT          NOT NULL DEFAULT 1,
+    created_at      TIMESTAMP    NOT NULL,
+    updated_at      TIMESTAMP    NOT NULL
 );
 COMMENT ON TABLE switching_ticket IS '倒闸操作票主表';
 COMMENT ON COLUMN switching_ticket.id IS '主键，自增';
@@ -19,9 +21,11 @@ COMMENT ON COLUMN switching_ticket.request_id IS '拟票幂等请求号';
 COMMENT ON COLUMN switching_ticket.interval_id IS '间隔编号';
 COMMENT ON COLUMN switching_ticket.title IS '操作任务名称（合成数据）';
 COMMENT ON COLUMN switching_ticket.status IS '状态：DRAFT拟票/REVIEWED已审核/ISSUED已预发/EXECUTING执行中/ARCHIVED已归档(终态)/EXCEPTION异常中止/EXPIRED已作废';
-COMMENT ON COLUMN switching_ticket.reviewer_id IS '审核人编号，未审核为空';
+COMMENT ON COLUMN switching_ticket.reviewer_id IS '审核人编号，未审核为空；续票登记双审核人中的主审核人';
 COMMENT ON COLUMN switching_ticket.issued_at IS '预发时刻（UTC），未预发为空';
 COMMENT ON COLUMN switching_ticket.expires_at IS '作废时刻（UTC）=预发+24小时，恰满即作废，未预发为空';
+COMMENT ON COLUMN switching_ticket.continuation_of IS '续票引用的原票主键；普通票为空。续票只能经续票申请单确认与签发，不可走普通审核/预发';
+COMMENT ON COLUMN switching_ticket.version IS '票版本号，从1开始，每次状态变更加1；续票申请与签发据此复核原票未被改动';
 COMMENT ON COLUMN switching_ticket.created_at IS '创建时刻（UTC）';
 COMMENT ON COLUMN switching_ticket.updated_at IS '最近更新时刻（UTC）';
 
@@ -222,3 +226,48 @@ COMMENT ON COLUMN ground_wire_evidence.created_at IS '证据入库时刻（UTC�
 CREATE UNIQUE INDEX IF NOT EXISTS uk_ground_evidence ON ground_wire_evidence (wire_code, ticket_id, step_seq, action);
 CREATE INDEX IF NOT EXISTS idx_ground_loan_ticket ON ground_wire_loan (ticket_id);
 CREATE INDEX IF NOT EXISTS idx_ground_loan_wire ON ground_wire_loan (wire_code);
+
+CREATE TABLE IF NOT EXISTS continuation_request (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id       VARCHAR(64) NOT NULL,
+    source_ticket_id BIGINT      NOT NULL,
+    new_ticket_id    BIGINT      NOT NULL,
+    source_version   INT         NOT NULL,
+    reviewer_a       VARCHAR(64),
+    reviewer_b       VARCHAR(64),
+    status           VARCHAR(16) NOT NULL,
+    version          INT         NOT NULL DEFAULT 1,
+    created_at       TIMESTAMP   NOT NULL,
+    updated_at       TIMESTAMP   NOT NULL
+);
+COMMENT ON TABLE continuation_request IS '余步续票申请单：引用异常/作废未归档原票，冻结剩余步骤生成续票，双人确认后签发生效';
+COMMENT ON COLUMN continuation_request.id IS '主键，自增';
+COMMENT ON COLUMN continuation_request.request_id IS '申请幂等请求号';
+COMMENT ON COLUMN continuation_request.source_ticket_id IS '原票主键，仅允许EXCEPTION/EXPIRED且未归档';
+COMMENT ON COLUMN continuation_request.new_ticket_id IS '生成的续票主键（switching_ticket），步骤为原票剩余步骤的冻结复制';
+COMMENT ON COLUMN continuation_request.source_version IS '申请时原票版本快照，签发时复核原票未被改动';
+COMMENT ON COLUMN continuation_request.reviewer_a IS '确认审核人甲编号，未确认为空';
+COMMENT ON COLUMN continuation_request.reviewer_b IS '确认审核人乙编号，必须与甲不同，未确认为空';
+COMMENT ON COLUMN continuation_request.status IS '状态：PENDING待确认/CONFIRMED已确认待签发/EFFECTIVE已生效(终态)/WITHDRAWN已撤回(终态)';
+COMMENT ON COLUMN continuation_request.version IS '申请单版本号，从1开始，每次成功修改（确认/签发/撤回）加1，旧版409';
+COMMENT ON COLUMN continuation_request.created_at IS '申请时刻（UTC）';
+COMMENT ON COLUMN continuation_request.updated_at IS '最近修改时刻（UTC）';
+
+CREATE TABLE IF NOT EXISTS ground_wire_custody (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    continuation_id     BIGINT      NOT NULL,
+    source_ticket_id    BIGINT      NOT NULL,
+    successor_ticket_id BIGINT      NOT NULL,
+    wire_code           VARCHAR(64) NOT NULL,
+    created_at          TIMESTAMP   NOT NULL
+);
+COMMENT ON TABLE ground_wire_custody IS '接地线责任接续关系：续票生效时登记，原借用编号与历史证据不改，续票仅可拆除并归还本继承链实物';
+COMMENT ON COLUMN ground_wire_custody.id IS '主键，自增';
+COMMENT ON COLUMN ground_wire_custody.continuation_id IS '关联续票申请单主键';
+COMMENT ON COLUMN ground_wire_custody.source_ticket_id IS '原票主键（借出方）';
+COMMENT ON COLUMN ground_wire_custody.successor_ticket_id IS '续票主键（责任承接方）';
+COMMENT ON COLUMN ground_wire_custody.wire_code IS '接地线编号';
+COMMENT ON COLUMN ground_wire_custody.created_at IS '接续登记时刻（UTC），与续票签发同事务';
+
+CREATE INDEX IF NOT EXISTS idx_custody_successor ON ground_wire_custody (successor_ticket_id);
+CREATE INDEX IF NOT EXISTS idx_custody_source ON ground_wire_custody (source_ticket_id);

@@ -75,6 +75,8 @@ public final class TicketDtos {
             String reviewerId,
             Instant issuedAt,
             Instant expiresAt,
+            Long continuationOf,
+            int version,
             Instant createdAt,
             Instant updatedAt) {
     }

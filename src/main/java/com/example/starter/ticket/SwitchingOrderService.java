@@ -53,6 +53,8 @@ public class SwitchingOrderService {
             rs.getString("reviewer_id"),
             toInstant(rs.getTimestamp("issued_at")),
             toInstant(rs.getTimestamp("expires_at")),
+            (Long) rs.getObject("continuation_of"),
+            rs.getInt("version"),
             toInstant(rs.getTimestamp("created_at")),
             toInstant(rs.getTimestamp("updated_at")));
 
@@ -113,22 +115,31 @@ public class SwitchingOrderService {
         return detail(ticketId);
     }
 
-    /** 审核：DRAFT → REVIEWED。 */
+    /** 审核：DRAFT → REVIEWED。续票须走续票申请单双人确认，不可走普通审核。 */
     @Transactional
     public TicketDetailView review(long ticketId, ReviewRequest req) {
         TicketRow ticket = mustLoad(ticketId);
+        if (ticket.continuationOf() != null) {
+            throw ApiException.conflict("CONTINUATION_ONLY",
+                    "续票须通过续票申请单双人确认，不可走普通审核: " + ticketId);
+        }
         if (!"DRAFT".equals(ticket.status())) {
             throw ApiException.conflict("TICKET_STATE", "仅拟票状态可审核，当前状态: " + ticket.status());
         }
-        jdbc.update("UPDATE switching_ticket SET status = 'REVIEWED', reviewer_id = ?, updated_at = ? WHERE id = ?",
+        jdbc.update("UPDATE switching_ticket SET status = 'REVIEWED', reviewer_id = ?,"
+                        + " version = version + 1, updated_at = ? WHERE id = ?",
                 req.reviewerId(), Timestamp.from(Instant.now(clock)), ticketId);
         return detail(ticketId);
     }
 
-    /** 预发：REVIEWED → ISSUED，占用间隔执行锁，登记 24 小时有效期（UTC）。 */
+    /** 预发：REVIEWED → ISSUED，占用间隔执行锁，登记 24 小时有效期（UTC）。续票须走续票签发。 */
     @Transactional
     public TicketDetailView issue(long ticketId, IssueRequest req) {
         TicketRow ticket = mustLoad(ticketId);
+        if (ticket.continuationOf() != null) {
+            throw ApiException.conflict("CONTINUATION_ONLY",
+                    "续票须通过续票申请单签发生效，不可走普通预发: " + ticketId);
+        }
         if (!"REVIEWED".equals(ticket.status())) {
             throw ApiException.conflict("TICKET_STATE", "仅已审核状态可预发，当前状态: " + ticket.status());
         }
@@ -140,8 +151,8 @@ public class SwitchingOrderService {
             throw ApiException.conflict("CONCURRENT_TICKET",
                     "间隔 " + ticket.intervalId() + " 已存在执行中操作票");
         }
-        jdbc.update("UPDATE switching_ticket SET status = 'ISSUED', issued_at = ?, expires_at = ?, updated_at = ?"
-                        + " WHERE id = ?",
+        jdbc.update("UPDATE switching_ticket SET status = 'ISSUED', issued_at = ?, expires_at = ?,"
+                        + " version = version + 1, updated_at = ? WHERE id = ?",
                 Timestamp.from(now), Timestamp.from(now.plus(VALIDITY)), Timestamp.from(now), ticketId);
         return detail(ticketId);
     }
@@ -192,12 +203,17 @@ public class SwitchingOrderService {
                 req.operatorId(), req.guardianId(), Timestamp.from(now), step.id());
         jdbc.update("UPDATE device_state SET state = ?, updated_at = ? WHERE device_id = ?",
                 step.expectedState(), Timestamp.from(now), step.deviceId());
-        jdbc.update("UPDATE switching_ticket SET status = 'EXECUTING', updated_at = ? WHERE id = ?",
+        jdbc.update("UPDATE switching_ticket SET status = 'EXECUTING', version = version + 1, updated_at = ?"
+                        + " WHERE id = ?",
                 Timestamp.from(now), ticketId);
         return new ConfirmView(ticketId, seq, "DONE", "EXECUTING");
     }
 
-    /** 归档：终态。重复归档返回幂等成功；到期票先转作废再归档。 */
+    /**
+     * 归档：终态。重复归档返回幂等成功；到期票先转作废再归档。
+     * 实物核销口径：本票借出实物须全部归还，或已被生效续票继承（原票因继承得以登记中止归档）；
+     * 本票作为续票继承的实物必须全部核销方可归档。
+     */
     @Transactional
     public TicketDetailView archive(long ticketId, ArchiveRequest req) {
         TicketRow ticket = mustLoad(ticketId);
@@ -207,9 +223,12 @@ public class SwitchingOrderService {
         ticket = refreshExpiry(ticket, false);
         switch (ticket.status()) {
             case "ISSUED", "EXECUTING", "EXCEPTION", "EXPIRED" -> {
-                // 归档要求本票借用实物全部归还（历史借用与解锁记录保留）；有挂接实物须先合法拆除并归还。
-                groundWireService.assertAllLoansReturned(ticketId);
-                jdbc.update("UPDATE switching_ticket SET status = 'ARCHIVED', updated_at = ? WHERE id = ?",
+                // 归档要求本票借用实物全部归还或已被生效续票继承（历史借用与解锁记录保留）；
+                // 本票继承来的实物必须全部核销，不得把责任留给上游。
+                groundWireService.assertAllLoansReturnedOrInherited(ticketId);
+                groundWireService.assertInheritedLoansReturned(ticketId);
+                jdbc.update("UPDATE switching_ticket SET status = 'ARCHIVED', version = version + 1, updated_at = ?"
+                                + " WHERE id = ?",
                         Timestamp.from(Instant.now(clock)), ticketId);
                 releaseLock(ticket.intervalId(), ticketId);
             }
@@ -250,7 +269,8 @@ public class SwitchingOrderService {
             jdbc.update("UPDATE switching_step SET verified = TRUE WHERE id = ?", step.id());
             return "VERIFIED";
         }
-        jdbc.update("UPDATE switching_ticket SET status = 'EXCEPTION', updated_at = ? WHERE id = ?",
+        jdbc.update("UPDATE switching_ticket SET status = 'EXCEPTION', version = version + 1, updated_at = ?"
+                        + " WHERE id = ?",
                 Timestamp.from(Instant.now(clock)), ticketId);
         releaseLock(ticket.intervalId(), ticketId);
         return "ABORTED";
@@ -281,7 +301,8 @@ public class SwitchingOrderService {
         if (expirable && ticket.expiresAt() != null && !Instant.now(clock).isBefore(ticket.expiresAt())) {
             // 作废转换独立事务提交：即使外层操作随后拒绝回滚，作废状态与锁释放仍生效
             requiresNewTx.executeWithoutResult(s -> {
-                jdbc.update("UPDATE switching_ticket SET status = 'EXPIRED', updated_at = ? WHERE id = ?",
+                jdbc.update("UPDATE switching_ticket SET status = 'EXPIRED', version = version + 1, updated_at = ?"
+                                + " WHERE id = ?",
                         Timestamp.from(Instant.now(clock)), ticket.id());
                 releaseLock(ticket.intervalId(), ticket.id());
             });
@@ -325,7 +346,8 @@ public class SwitchingOrderService {
                                 toInstant(rs.getTimestamp("created_at"))),
                         ticketId);
         TicketView view = new TicketView(ticket.id(), ticket.intervalId(), ticket.title(), ticket.status(),
-                ticket.reviewerId(), ticket.issuedAt(), ticket.expiresAt(), ticket.createdAt(), ticket.updatedAt());
+                ticket.reviewerId(), ticket.issuedAt(), ticket.expiresAt(), ticket.continuationOf(),
+                ticket.version(), ticket.createdAt(), ticket.updatedAt());
         return new TicketDetailView(view, steps, hits);
     }
 
@@ -335,7 +357,7 @@ public class SwitchingOrderService {
 
     /** 操作票行记录。 */
     record TicketRow(long id, String requestId, String intervalId, String title, String status,
-                     String reviewerId, Instant issuedAt, Instant expiresAt,
+                     String reviewerId, Instant issuedAt, Instant expiresAt, Long continuationOf, int version,
                      Instant createdAt, Instant updatedAt) {
     }
 

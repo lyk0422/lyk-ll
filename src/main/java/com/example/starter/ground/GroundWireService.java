@@ -125,8 +125,8 @@ public class GroundWireService {
     }
 
     /**
-     * 批量归还：仓管核对编号，仅核销本票借出且已拆除待归还的实物；
-     * 已挂接或非本票借用的实物一律拒绝，整批回滚。
+     * 批量归还：仓管核对编号，仅核销本票借出（含继承链接管）且已拆除待归还的实物；
+     * 已挂接或非本票责任链的实物一律拒绝，整批回滚。
      */
     @Transactional
     public WireBatchResult returnWires(long ticketId, ReturnWiresRequest req) {
@@ -138,13 +138,10 @@ public class GroundWireService {
                 throw ApiException.unprocessable("VERSION_MISMATCH",
                         "接地线 " + code + " 期望版本 " + req.expectedVersion() + " 与当前版本 " + wire.version() + " 不符");
             }
-            Long loanId = jdbc.query(
-                            "SELECT id FROM ground_wire_loan WHERE ticket_id = ? AND wire_code = ? AND status = 'BORROWED'",
-                            (rs, n) -> rs.getLong(1), ticketId, code)
-                    .stream().findFirst().orElse(null);
+            Long loanId = findResponsibleLoan(ticketId, code);
             if (loanId == null) {
                 throw ApiException.unprocessable("WIRE_NOT_BORROWED_BY_TICKET",
-                        "接地线 " + code + " 非本票借用或已归还，仓管核对拒绝核销");
+                        "接地线 " + code + " 非本票借用且不在本票继承链，仓管核对拒绝核销");
             }
             if (wire.occupiedByTicket() == null || wire.occupiedByTicket() != ticketId
                     || !"REMOVED_PENDING_RETURN".equals(wire.status())) {
@@ -154,9 +151,7 @@ public class GroundWireService {
         }
         Instant now = Instant.now(clock);
         for (String code : codes) {
-            long loanId = jdbc.queryForObject(
-                    "SELECT id FROM ground_wire_loan WHERE ticket_id = ? AND wire_code = ? AND status = 'BORROWED'",
-                    Long.class, ticketId, code);
+            long loanId = findResponsibleLoan(ticketId, code);
             int updated = jdbc.update(
                     "UPDATE ground_wire SET status = 'AVAILABLE', interval_id = NULL, occupied_by_ticket = NULL,"
                             + " version = version + 1, updated_at = ?"
@@ -242,7 +237,17 @@ public class GroundWireService {
         if (req.operatorId().equals(req.guardianId())) {
             throw ApiException.badRequest("DOUBLE_CONFIRM_REQUIRED", "拆除须操作人与监护人两名不同人员共同确认");
         }
-        StepRef step = mustLoadStep(ticketId, req.stepSeq());
+        StepRef step = findStep(ticketId, req.stepSeq());
+        if (step == null) {
+            // 继承链实物：本票无该步序时，允许引用继承源票的拆线步序（证据仍登记在本票名下，历史证据不改）
+            Long sourceTicket = inheritedSourceTicket(ticketId, req.wireCode());
+            if (sourceTicket != null) {
+                step = findStep(sourceTicket, req.stepSeq());
+            }
+        }
+        if (step == null) {
+            throw ApiException.notFound("STEP_NOT_FOUND", "步骤不存在: " + req.stepSeq());
+        }
         if (!"REMOVE_GROUND".equals(step.operationType())) {
             throw ApiException.unprocessable("STEP_TYPE_MISMATCH",
                     "拆除须引用本票拆接地线步骤(REMOVE_GROUND)，步序 " + req.stepSeq() + " 类型: " + step.operationType());
@@ -289,16 +294,68 @@ public class GroundWireService {
         }
     }
 
-    /** 归档前校验：本票借用的实物必须全部归还，历史借用记录保留不删除。 */
+    /**
+     * 归档前校验（借出方口径）：本票借用的实物必须全部归还，
+     * 或已被生效续票继承（原票因继承得以登记中止归档）；历史借用记录保留不删除。
+     */
     @Transactional(readOnly = true)
-    public void assertAllLoansReturned(long ticketId) {
+    public void assertAllLoansReturnedOrInherited(long ticketId) {
         List<String> outstanding = jdbc.query(
-                "SELECT wire_code FROM ground_wire_loan WHERE ticket_id = ? AND status = 'BORROWED'",
+                "SELECT l.wire_code FROM ground_wire_loan l WHERE l.ticket_id = ? AND l.status = 'BORROWED'"
+                        + " AND NOT EXISTS (SELECT 1 FROM ground_wire_custody c"
+                        + " JOIN continuation_request r ON r.id = c.continuation_id AND r.status = 'EFFECTIVE'"
+                        + " WHERE c.source_ticket_id = l.ticket_id AND c.wire_code = l.wire_code)",
                 (rs, n) -> rs.getString(1), ticketId);
         if (!outstanding.isEmpty()) {
             throw ApiException.unprocessable("GROUND_WIRES_NOT_RETURNED",
-                    "本票借用接地线 " + outstanding + " 尚未全部归还，不允许归档");
+                    "本票借用接地线 " + outstanding + " 尚未全部归还且未被生效续票继承，不允许归档");
         }
+    }
+
+    /**
+     * 归档前校验（继承方口径）：本票作为续票继承的实物必须全部核销归还，
+     * 不得把继承链责任留给上游票。
+     */
+    @Transactional(readOnly = true)
+    public void assertInheritedLoansReturned(long ticketId) {
+        List<String> outstanding = jdbc.query(
+                "SELECT c.wire_code FROM ground_wire_custody c"
+                        + " JOIN ground_wire_loan l ON l.ticket_id = c.source_ticket_id AND l.wire_code = c.wire_code"
+                        + " WHERE c.successor_ticket_id = ? AND l.status = 'BORROWED'",
+                (rs, n) -> rs.getString(1), ticketId);
+        if (!outstanding.isEmpty()) {
+            throw ApiException.unprocessable("INHERITED_WIRES_NOT_RETURNED",
+                    "本票继承的接地线 " + outstanding + " 尚未全部归还核销，不允许归档");
+        }
+    }
+
+    /**
+     * 续票签发生效时在同一事务内转移实物责任：原票未归还借用的实物占用权登记到续票名下，
+     * 原借用编号与历史证据不改，新增责任接续关系；台账行条件更新失败即整事务回滚。
+     *
+     * @return 被接续的接地线编号列表（按编号排序）
+     */
+    @Transactional
+    public List<String> transferCustody(long continuationId, long sourceTicketId, long successorTicketId) {
+        List<String> wires = jdbc.query(
+                "SELECT wire_code FROM ground_wire_loan WHERE ticket_id = ? AND status = 'BORROWED' ORDER BY wire_code",
+                (rs, n) -> rs.getString(1), sourceTicketId);
+        Instant now = Instant.now(clock);
+        for (String code : wires) {
+            int updated = jdbc.update(
+                    "UPDATE ground_wire SET occupied_by_ticket = ?, version = version + 1, updated_at = ?"
+                            + " WHERE code = ? AND occupied_by_ticket = ?",
+                    successorTicketId, Timestamp.from(now), code, sourceTicketId);
+            if (updated == 0) {
+                throw ApiException.conflict("CUSTODY_TRANSFER_FAILED",
+                        "接地线 " + code + " 当前占用与原票不一致，责任接续拒绝，整事务回滚");
+            }
+            jdbc.update(
+                    "INSERT INTO ground_wire_custody (continuation_id, source_ticket_id, successor_ticket_id,"
+                            + " wire_code, created_at) VALUES (?, ?, ?, ?, ?)",
+                    continuationId, sourceTicketId, successorTicketId, code, Timestamp.from(now));
+        }
+        return wires;
     }
 
     /** 查询单条实物明细：台账、借用历史与不可覆盖操作证据。 */
@@ -373,11 +430,42 @@ public class GroundWireService {
     }
 
     private StepRef mustLoadStep(long ticketId, int seq) {
+        StepRef step = findStep(ticketId, seq);
+        if (step == null) {
+            throw ApiException.notFound("STEP_NOT_FOUND", "本票步骤不存在: " + seq);
+        }
+        return step;
+    }
+
+    /** 按票与步序查步骤，不存在返回 null。 */
+    private StepRef findStep(long ticketId, int seq) {
         return jdbc.query("SELECT seq, operation_type, status FROM switching_step WHERE ticket_id = ? AND seq = ?",
                         (rs, n) -> new StepRef(rs.getInt("seq"), rs.getString("operation_type"), rs.getString("status")),
                         ticketId, seq)
-                .stream().findFirst()
-                .orElseThrow(() -> ApiException.notFound("STEP_NOT_FOUND", "本票步骤不存在: " + seq));
+                .stream().findFirst().orElse(null);
+    }
+
+    /**
+     * 查找本票责任链下的在借记录：本票直接借用，或经责任接续关系接管的原票借用。
+     * 责任接续关系在续票签发事务内登记，归还核销与之一致。
+     */
+    private Long findResponsibleLoan(long ticketId, String wireCode) {
+        return jdbc.query(
+                        "SELECT l.id FROM ground_wire_loan l WHERE l.wire_code = ? AND l.status = 'BORROWED'"
+                                + " AND (l.ticket_id = ? OR EXISTS (SELECT 1 FROM ground_wire_custody c"
+                                + " WHERE c.wire_code = l.wire_code AND c.source_ticket_id = l.ticket_id"
+                                + " AND c.successor_ticket_id = ?))",
+                        (rs, n) -> rs.getLong(1), wireCode, ticketId, ticketId)
+                .stream().findFirst().orElse(null);
+    }
+
+    /** 本票就该实物是否接管了其他票的责任；是则返回源票主键，否则 null。 */
+    private Long inheritedSourceTicket(long ticketId, String wireCode) {
+        return jdbc.query(
+                        "SELECT source_ticket_id FROM ground_wire_custody"
+                                + " WHERE successor_ticket_id = ? AND wire_code = ?",
+                        (rs, n) -> rs.getLong(1), ticketId, wireCode)
+                .stream().findFirst().orElse(null);
     }
 
     private WireRow mustLoadWire(String code) {
