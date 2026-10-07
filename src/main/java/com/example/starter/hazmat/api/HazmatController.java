@@ -16,9 +16,13 @@ import org.springframework.web.bind.annotation.RestController;
 import com.example.starter.hazmat.dto.ApplyRequest;
 import com.example.starter.hazmat.dto.CheckinRequest;
 import com.example.starter.hazmat.dto.IdempotentRequest;
+import com.example.starter.hazmat.dto.QualificationCreateRequest;
+import com.example.starter.hazmat.dto.QualificationRevokeRequest;
 import com.example.starter.hazmat.dto.RelayCheckinRequest;
 import com.example.starter.hazmat.dto.RelayPointRequest;
 import com.example.starter.hazmat.dto.RerouteRequest;
+import com.example.starter.hazmat.dto.ReservationCreateRequest;
+import com.example.starter.hazmat.dto.ReservationRevokeRequest;
 import com.example.starter.hazmat.service.HazmatService;
 import com.example.starter.hazmat.service.ServiceResult;
 
@@ -30,8 +34,13 @@ import com.example.starter.hazmat.service.ServiceResult;
  *   <li>POST /api/shipments/{no}/approvals/decide?approved=true|false 路线核准</li>
  *   <li>POST /api/shipments/{no}/dispatch 发运</li>
  *   <li>POST /api/shipments/{no}/checkins 押运打卡（运单+途经点序号去重）</li>
- *   <li>POST /api/shipments/{no}/relay-points 设置安全接力点（创建接力段）</li>
+ *   <li>POST /api/shipments/{no}/relay-points 设置安全接力点（创建接力段，可启用人员管控）</li>
  *   <li>POST /api/shipments/{no}/relay-checkins 接力双人打卡（交班/接班）</li>
+ *   <li>POST /api/escort-qualifications 新增接班员合成资格（版本从 1 起）</li>
+ *   <li>POST /api/escort-qualifications/{id}/revoke 撤销资格（expectedVersion 乐观锁）</li>
+ *   <li>GET  /api/escort-qualifications/{id} 资格详情（版本证据）</li>
+ *   <li>POST /api/shipments/{no}/relay-segments/{segmentId}/reservations 人员资格预约（班段占用）</li>
+ *   <li>POST /api/shipments/{no}/relay-segments/{segmentId}/reservations/{reservationId}/revoke 撤销预约</li>
  *   <li>POST /api/shipments/{no}/reroute 紧急改线申请</li>
  *   <li>POST /api/shipments/{no}/approvals/{id}/approve 改线核准（原子切换）</li>
  *   <li>POST /api/shipments/{no}/complete 到达核销（结案终态）</li>
@@ -81,6 +90,38 @@ public class HazmatController {
     public ResponseEntity<Map<String, Object>> relayCheckin(@PathVariable String shipmentNo,
                                                             @Valid @RequestBody RelayCheckinRequest request) {
         return toEntity(service.relayCheckin(shipmentNo, request));
+    }
+
+    @PostMapping("/api/escort-qualifications")
+    public ResponseEntity<Map<String, Object>> createQualification(
+            @Valid @RequestBody QualificationCreateRequest request) {
+        return toEntity(service.createQualification(request));
+    }
+
+    @PostMapping("/api/escort-qualifications/{qualificationId}/revoke")
+    public ResponseEntity<Map<String, Object>> revokeQualification(
+            @PathVariable long qualificationId,
+            @Valid @RequestBody QualificationRevokeRequest request) {
+        return toEntity(service.revokeQualification(qualificationId, request));
+    }
+
+    @GetMapping("/api/escort-qualifications/{qualificationId}")
+    public ResponseEntity<Map<String, Object>> getQualification(@PathVariable long qualificationId) {
+        return toEntity(service.getQualification(qualificationId));
+    }
+
+    @PostMapping("/api/shipments/{shipmentNo}/relay-segments/{segmentId}/reservations")
+    public ResponseEntity<Map<String, Object>> createReservation(
+            @PathVariable String shipmentNo, @PathVariable long segmentId,
+            @Valid @RequestBody ReservationCreateRequest request) {
+        return toEntity(service.createReservation(shipmentNo, segmentId, request));
+    }
+
+    @PostMapping("/api/shipments/{shipmentNo}/relay-segments/{segmentId}/reservations/{reservationId}/revoke")
+    public ResponseEntity<Map<String, Object>> revokeReservation(
+            @PathVariable String shipmentNo, @PathVariable long segmentId, @PathVariable long reservationId,
+            @Valid @RequestBody ReservationRevokeRequest request) {
+        return toEntity(service.revokeReservation(shipmentNo, segmentId, reservationId, request));
     }
 
     @PostMapping("/api/shipments/{shipmentNo}/reroute")

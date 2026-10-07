@@ -46,6 +46,12 @@ class HazmatControllerHttpTest {
     void clean() {
         base = "http://localhost:" + port;
         jdbc.execute("DELETE FROM idempotent_record");
+        jdbc.execute("DELETE FROM escort_reservation");
+        jdbc.execute("DELETE FROM escort_qualification");
+        jdbc.execute("DELETE FROM relay_checkin");
+        jdbc.execute("DELETE FROM shipment_active_relay");
+        jdbc.execute("DELETE FROM relay_segment");
+        jdbc.execute("DELETE FROM disposal_record");
         jdbc.execute("DELETE FROM checkin_record");
         jdbc.execute("DELETE FROM approval_waypoint");
         jdbc.execute("DELETE FROM route_approval");
@@ -169,5 +175,105 @@ class HazmatControllerHttpTest {
                 json(changed), Map.class);
         assertThat(conflict.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(body(conflict).get("code")).isEqualTo("IDEMPOTENT_FINGERPRINT_MISMATCH");
+    }
+
+    /**
+     * 两张合成运单都打算在 23:45（Asia/Shanghai）由 ESC-B 接班：
+     * 第一张预约成功，第二张同员重叠班段 409，且无人员占用不得记录换班完成。
+     */
+    @Test
+    void personnelReservationOverHttp() {
+        clock.setTime(LocalDateTime.parse("2026-10-02T22:30:00"));
+        // 1) 新增 ESC-B 合成资格（UTC 有效区间），版本从 1 起。
+        ResponseEntity<Map> qual = rest.postForEntity(base + "/api/escort-qualifications",
+                json(Map.of("requestId", "http-qual-1", "escortId", "ESC-B",
+                        "goodsCategory", "FLAMMABLE",
+                        "validFromUtc", "2026-10-02T14:00:00", "validToUtc", "2026-10-03T03:00:00")),
+                Map.class);
+        assertThat(qual.getStatusCode()).isEqualTo(HttpStatus.OK);
+        Number qualId = (Number) body(qual).get("qualificationId");
+        assertThat(body(qual).get("versionNo")).isEqualTo(1);
+        assertThat(rest.getForEntity(base + "/api/escort-qualifications/" + qualId.longValue(), Map.class)
+                .getStatusCode()).isEqualTo(HttpStatus.OK);
+
+        // 2) 两张运单（不同车辆）同路线同时刻发运，均启用人员管控的接力点 p1。
+        String[] nos = new String[2];
+        long[] segs = new long[2];
+        String[] plates = {"沪A-1001", "沪A-1002"};
+        for (int i = 0; i < 2; i++) {
+            ResponseEntity<Map> applied = rest.postForEntity(base + "/api/shipments/apply",
+                    json(Map.of("requestId", "http-pr-apply-" + i, "vehiclePlate", plates[i],
+                            "goodsCategory", "FLAMMABLE", "routeCode", "R-G3",
+                            "plannedDeparture", "2026-10-02T22:30:00")), Map.class);
+            nos[i] = (String) body(applied).get("shipmentNo");
+            rest.postForEntity(base + "/api/shipments/" + nos[i] + "/approvals/decide?approved=true",
+                    new HttpEntity<>("", new HttpHeaders()), Map.class);
+            rest.postForEntity(base + "/api/shipments/" + nos[i] + "/dispatch",
+                    json(Map.of("requestId", "http-pr-disp-" + i)), Map.class);
+            ResponseEntity<Map> rp = rest.postForEntity(
+                    base + "/api/shipments/" + nos[i] + "/relay-points",
+                    json(Map.of("requestId", "http-pr-rp-" + i, "waypointSeq", 1,
+                            "personnelControl", true)), Map.class);
+            assertThat(rp.getStatusCode()).isEqualTo(HttpStatus.OK);
+            segs[i] = ((Number) body(rp).get("relaySegmentId")).longValue();
+        }
+
+        // 3) 第一张预约 ESC-B 班段 [15:30,16:00) UTC（=[23:30,24:00) CST）成功；第二张同人同段 409。
+        ResponseEntity<Map> resA = rest.postForEntity(
+                base + "/api/shipments/" + nos[0] + "/relay-segments/" + segs[0] + "/reservations",
+                json(Map.of("requestId", "http-pr-res-a", "escortId", "ESC-B",
+                        "shiftStartUtc", "2026-10-02T15:30:00", "shiftEndUtc", "2026-10-02T16:00:00")),
+                Map.class);
+        assertThat(resA.getStatusCode()).isEqualTo(HttpStatus.OK);
+        ResponseEntity<Map> resB = rest.postForEntity(
+                base + "/api/shipments/" + nos[1] + "/relay-segments/" + segs[1] + "/reservations",
+                json(Map.of("requestId", "http-pr-res-b", "escortId", "ESC-B",
+                        "shiftStartUtc", "2026-10-02T15:30:00", "shiftEndUtc", "2026-10-02T16:00:00")),
+                Map.class);
+        assertThat(resB.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(body(resB).get("code")).isEqualTo("ESCORT_SHIFT_OVERLAP");
+
+        // 4) 冲突那张仍由原押运员负责：OUT 可离岗，IN 无预约被拒绝，换班不生效。
+        rest.postForEntity(base + "/api/shipments/" + nos[1] + "/relay-checkins",
+                json(Map.of("requestId", "http-pr-out-b", "escortId", "ESC-01", "role", "OUT",
+                        "checkTime", "2026-10-02T23:40:00")), Map.class);
+        ResponseEntity<Map> inB = rest.postForEntity(
+                base + "/api/shipments/" + nos[1] + "/relay-checkins",
+                json(Map.of("requestId", "http-pr-in-b", "escortId", "ESC-B", "role", "IN",
+                        "checkTime", "2026-10-02T23:45:00")), Map.class);
+        assertThat(inB.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(body(inB).get("code")).isEqualTo("RESERVATION_REQUIRED");
+
+        // 5) 第一张 23:45 由预约人员接班，换班完成，预约核销。
+        rest.postForEntity(base + "/api/shipments/" + nos[0] + "/relay-checkins",
+                json(Map.of("requestId", "http-pr-out-a", "escortId", "ESC-01", "role", "OUT",
+                        "checkTime", "2026-10-02T23:40:00")), Map.class);
+        ResponseEntity<Map> inA = rest.postForEntity(
+                base + "/api/shipments/" + nos[0] + "/relay-checkins",
+                json(Map.of("requestId", "http-pr-in-a", "escortId", "ESC-B", "role", "IN",
+                        "checkTime", "2026-10-02T23:45:00")), Map.class);
+        assertThat(inA.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(body(inA).get("handoverCompleted")).isEqualTo(true);
+        ResponseEntity<Map> detailA = rest.getForEntity(base + "/api/shipments/" + nos[0], Map.class);
+        @SuppressWarnings("unchecked")
+        java.util.List<Map<String, Object>> resvs =
+                (java.util.List<Map<String, Object>>) body(detailA).get("reservations");
+        assertThat(resvs).hasSize(1);
+        assertThat(resvs.get(0).get("status")).isEqualTo("CONSUMED");
+        assertThat(resvs.get(0).get("qualificationVersion")).isEqualTo(1);
+
+        // 6) 换班完成后撤销资格：不回滚，留风险证据，版本加 1。
+        ResponseEntity<Map> revoked = rest.postForEntity(
+                base + "/api/escort-qualifications/" + qualId.longValue() + "/revoke",
+                json(Map.of("requestId", "http-pr-rvk", "expectedVersion", 1)), Map.class);
+        assertThat(revoked.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(body(revoked).get("revoked")).isEqualTo(true);
+        assertThat(body(revoked).get("versionNo")).isEqualTo(2);
+        ResponseEntity<Map> detailAfter = rest.getForEntity(base + "/api/shipments/" + nos[0], Map.class);
+        @SuppressWarnings("unchecked")
+        java.util.List<Map<String, Object>> events =
+                (java.util.List<Map<String, Object>>) body(detailAfter).get("events");
+        assertThat(events.stream().anyMatch(e -> "QUALIFICATION_REVOKED_RISK".equals(e.get("eventType"))))
+                .isTrue();
     }
 }

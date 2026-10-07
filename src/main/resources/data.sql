@@ -43,3 +43,10 @@ MERGE INTO vehicle (plate, frozen, frozen_shipment_id, frozen_at) KEY (plate) VA
  ('沪A-1001', 0, NULL, NULL),
  ('沪A-1002', 0, NULL, NULL),
  ('沪B-2001', 0, NULL, NULL);
+
+-- 合成接班员资格（不对接真实资格机构；有效区间为 UTC）
+-- ESC-A / ESC-B 可押运易燃液体，UTC 区间覆盖 2026-10-02 夜间班段（23:45 Asia/Shanghai = 15:45 UTC）
+MERGE INTO escort_qualification (id, escort_id, goods_category, valid_from_utc, valid_to_utc, revoked, version_no, request_id, created_at, updated_at) KEY (id) VALUES
+ (1, 'ESC-A', 'FLAMMABLE', TIMESTAMP '2026-10-02 14:00:00', TIMESTAMP '2026-10-03 03:00:00', 0, 1, 'seed-qual-esc-a', TIMESTAMP '2026-10-02 12:00:00', TIMESTAMP '2026-10-02 12:00:00'),
+ (2, 'ESC-B', 'FLAMMABLE', TIMESTAMP '2026-10-02 14:00:00', TIMESTAMP '2026-10-03 03:00:00', 0, 1, 'seed-qual-esc-b', TIMESTAMP '2026-10-02 12:00:00', TIMESTAMP '2026-10-02 12:00:00'),
+ (3, 'ESC-C', 'TOXIC',     TIMESTAMP '2026-10-02 14:00:00', TIMESTAMP '2026-10-03 03:00:00', 0, 1, 'seed-qual-esc-c', TIMESTAMP '2026-10-02 12:00:00', TIMESTAMP '2026-10-02 12:00:00');
