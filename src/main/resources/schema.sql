@@ -206,3 +206,47 @@ COMMENT ON COLUMN risk_change_event.sequence_no IS '事件关联清单序号（�
 COMMENT ON COLUMN risk_change_event.from_version IS '变更前风险版本，BIND 时为 0';
 COMMENT ON COLUMN risk_change_event.to_version IS '变更后风险版本';
 COMMENT ON COLUMN risk_change_event.created_at IS '事件记录时间（UTC ISO-8601）';
+
+-- ========== 分车出厂层（同一合成屠宰批次多车出厂，按头只预占与核销） ==========
+
+CREATE TABLE IF NOT EXISTS truck_manifest (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    truck_no VARCHAR(64) NOT NULL,
+    version INT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    head_count INT NOT NULL,
+    frozen_heads CLOB NOT NULL,
+    created_at VARCHAR(40) NOT NULL,
+    revoked_at VARCHAR(40) NULL,
+    dispatched_at VARCHAR(40) NULL,
+    CONSTRAINT uk_truck_manifest_no UNIQUE (batch_id, truck_no)
+);
+COMMENT ON TABLE truck_manifest IS '分车出厂清单：每车一行，创建即全量预占并冻结头只集合，版本自 1 起，撤销/发车成功加 1';
+COMMENT ON COLUMN truck_manifest.batch_id IS '所属屠宰批次主键';
+COMMENT ON COLUMN truck_manifest.truck_no IS '合成车号，批次内唯一（含已撤销车单，车号不可复用）';
+COMMENT ON COLUMN truck_manifest.version IS '车单乐观版本：创建为 1；撤销或发车成功加 1；expectedVersion 不符返回 409';
+COMMENT ON COLUMN truck_manifest.status IS '车单状态：RESERVED 已预占未发车（仅此态可撤销/发车）/ RELEASED 已发车核销（终态不可改）/ REVOKED 已整体撤销释放（终态不可改）';
+COMMENT ON COLUMN truck_manifest.head_count IS '冻结头只数，1 至 50，与 frozen_heads 数组长度一致';
+COMMENT ON COLUMN truck_manifest.frozen_heads IS '冻结合格头只标识集合（JSON 数组，创建时给定顺序），须全部属于本批 QUALIFIED 判定明细';
+COMMENT ON COLUMN truck_manifest.created_at IS '车单创建（清单冻结）业务时刻（UTC ISO-8601）';
+COMMENT ON COLUMN truck_manifest.revoked_at IS '整体撤销时刻（UTC ISO-8601），NULL 表示未撤销';
+COMMENT ON COLUMN truck_manifest.dispatched_at IS '发车核销时刻（UTC ISO-8601），NULL 表示未发车';
+
+CREATE TABLE IF NOT EXISTS truck_manifest_head (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    manifest_id BIGINT NOT NULL,
+    head_no VARCHAR(64) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    created_at VARCHAR(40) NOT NULL,
+    CONSTRAINT uk_truck_manifest_head UNIQUE (batch_id, head_no)
+);
+COMMENT ON TABLE truck_manifest_head IS '车单头只活跃占用：同一批次同一头只至多一行，未撤销车单争用同一头只时由唯一约束只放行一方；撤销删行释放，发车置 RELEASED 永久占用';
+COMMENT ON COLUMN truck_manifest_head.batch_id IS '所属屠宰批次主键';
+COMMENT ON COLUMN truck_manifest_head.manifest_id IS '占用所属车单主键（truck_manifest.id）';
+COMMENT ON COLUMN truck_manifest_head.head_no IS '头只编号，批次内唯一活跃占用，跨批占用由所属批次隔离';
+COMMENT ON COLUMN truck_manifest_head.status IS '占用状态：RESERVED 预占中（车单撤销时整行删除释放）/ RELEASED 随车核销已出厂（保留占用防止再次装车）';
+COMMENT ON COLUMN truck_manifest_head.created_at IS '占用建立时间（UTC ISO-8601）';
+
+CREATE INDEX IF NOT EXISTS idx_truck_head_manifest ON truck_manifest_head(manifest_id);

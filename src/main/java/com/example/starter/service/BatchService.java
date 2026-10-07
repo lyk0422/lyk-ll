@@ -24,6 +24,7 @@ import com.example.starter.repo.BatchRepository.HeadRow;
 import com.example.starter.repo.BatchRepository.IdempotencyRow;
 import com.example.starter.repo.BatchRepository.JudgmentRow;
 import com.example.starter.repo.BatchRepository.ReceiptRow;
+import com.example.starter.repo.TruckRepository;
 import com.example.starter.web.dto.BatchView;
 import com.example.starter.web.dto.DeclareRequest;
 import com.example.starter.web.dto.DeclareResponse;
@@ -65,15 +66,19 @@ public class BatchService {
     private final ObjectMapper objectMapper;
     /** 风险抽检门禁：受控批次全部样本阴性且抽检完成才允许出厂核销。 */
     private final RiskService riskService;
+    /** 分车出厂台账：用于在原整批核销入口识别已启用分车的批次并拒绝。 */
+    private final TruckRepository truckRepository;
     /** 漏检暂停独立事务：判定请求整体回滚时，暂停状态仍须落库。 */
     private final TransactionTemplate pauseTemplate;
 
     public BatchService(BatchRepository repo, Clock clock, ObjectMapper objectMapper,
-                        PlatformTransactionManager transactionManager, RiskService riskService) {
+                        PlatformTransactionManager transactionManager, RiskService riskService,
+                        TruckRepository truckRepository) {
         this.repo = repo;
         this.clock = clock;
         this.objectMapper = objectMapper;
         this.riskService = riskService;
+        this.truckRepository = truckRepository;
         this.pauseTemplate = new TransactionTemplate(transactionManager);
         this.pauseTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
@@ -336,6 +341,11 @@ public class BatchService {
         }
         if (!BatchStatus.JUDGED.name().equals(batch.status())) {
             throw ApiException.conflict("批次未达到可核销状态");
+        }
+        // 已启用分车模式（存在车单历史，含已撤销车单）的批次禁止走原整批出厂入口，
+        // 必须逐车核销，不能绕过车辆清单；从未建过车单的批次兼容原整批核销入口。
+        if (truckRepository.countManifests(batch.id()) > 0) {
+            throw ApiException.conflict("批次已启用分车出厂，原整批核销入口拒绝，请逐车发车核销");
         }
         List<ReconciliationEntry> reconciliation = reconciliation(batch.id());
         List<String> mismatched = reconciliation.stream()

@@ -101,6 +101,13 @@ public class BatchRepository {
         return rows.stream().findFirst();
     }
 
+    /** 按主键读取批次（事务内持锁后重读最新行）。 */
+    public Optional<BatchRow> findBatchById(long batchId) {
+        List<BatchRow> rows = jdbc.query(
+                "SELECT * FROM slaughter_batch WHERE id = ?", BATCH_MAPPER, batchId);
+        return rows.stream().findFirst();
+    }
+
     /**
      * 条件状态流转：仅当前状态在 expected 内时更新，返回受影响行数（0 表示状态不满足）。
      */

@@ -9,6 +9,8 @@ import com.example.starter.web.dto.DeclareRequest;
 import com.example.starter.web.dto.DeclareResponse;
 import com.example.starter.web.dto.InspectionRequest;
 import com.example.starter.web.dto.InspectionResponse;
+import com.example.starter.web.dto.JudgmentRequest;
+import com.example.starter.web.dto.JudgmentResponse;
 import com.example.starter.web.dto.PreQuarantineRequest;
 import com.example.starter.web.dto.PreQuarantineResponse;
 import com.example.starter.web.dto.RiskBindRequest;
@@ -17,6 +19,10 @@ import com.example.starter.web.dto.RiskChecklistResponse;
 import com.example.starter.web.dto.RiskResultRequest;
 import com.example.starter.web.dto.RiskResultResponse;
 import com.example.starter.web.dto.RiskSummaryView;
+import com.example.starter.web.dto.TruckCreateRequest;
+import com.example.starter.web.dto.TruckManifestActionRequest;
+import com.example.starter.web.dto.TruckManifestResponse;
+import com.example.starter.web.dto.TruckProgressView;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -56,6 +62,8 @@ abstract class BaseIntegrationTest {
     void resetState() {
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM late_event");
+        jdbc.update("DELETE FROM truck_manifest_head");
+        jdbc.update("DELETE FROM truck_manifest");
         jdbc.update("DELETE FROM harmless_receipt");
         jdbc.update("DELETE FROM judgment_detail");
         jdbc.update("DELETE FROM risk_sample");
@@ -151,5 +159,52 @@ abstract class BaseIntegrationTest {
                 .getResponse()
                 .getContentAsString();
         return om.readValue(json, RiskSummaryView.class);
+    }
+
+    // ---------- 判定/分车流程辅助 ----------
+
+    /** 申报→宰前检疫→逐头只同步检验→按给定判定分流，使批次到达 JUDGED。 */
+    protected JudgmentResponse judgeAll(String batchNo, String requestIdPrefix,
+                                        List<JudgmentRequest.JudgmentItem> items) throws Exception {
+        declareOk("d-" + requestIdPrefix, batchNo,
+                items.stream().map(JudgmentRequest.JudgmentItem::headNo).toList());
+        preQuarantineOk(batchNo, "pq-" + requestIdPrefix);
+        int i = 1;
+        for (JudgmentRequest.JudgmentItem item : items) {
+            inspectOk(batchNo, "i-" + requestIdPrefix + "-" + i, item.headNo());
+            i++;
+        }
+        return postOk("/api/batches/" + batchNo + "/judgments",
+                new JudgmentRequest("j-" + requestIdPrefix, items), JudgmentResponse.class);
+    }
+
+    protected TruckManifestResponse createTruck(String requestId, String batchNo, String truckNo,
+                                                List<String> heads) throws Exception {
+        return postOk("/api/batches/" + batchNo + "/trucks",
+                new TruckCreateRequest(requestId, truckNo, heads, clock.instant().toString()),
+                TruckManifestResponse.class);
+    }
+
+    protected TruckManifestResponse revokeTruck(String requestId, String batchNo, String truckNo,
+                                                int expectedVersion) throws Exception {
+        return postOk("/api/batches/" + batchNo + "/trucks/" + truckNo + "/revoke",
+                new TruckManifestActionRequest(requestId, expectedVersion, clock.instant().toString()),
+                TruckManifestResponse.class);
+    }
+
+    protected TruckManifestResponse dispatchTruck(String requestId, String batchNo, String truckNo,
+                                                  int expectedVersion) throws Exception {
+        return postOk("/api/batches/" + batchNo + "/trucks/" + truckNo + "/dispatch",
+                new TruckManifestActionRequest(requestId, expectedVersion, clock.instant().toString()),
+                TruckManifestResponse.class);
+    }
+
+    protected TruckProgressView getTrucks(String batchNo) throws Exception {
+        String json = mockMvc.perform(get("/api/batches/{batchNo}/trucks", batchNo))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        return om.readValue(json, TruckProgressView.class);
     }
 }
