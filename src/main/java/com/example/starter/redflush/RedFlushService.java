@@ -158,6 +158,11 @@ public class RedFlushService {
 
     private ConfirmResponse doConfirm(String requestNo, ConfirmRequest request) {
         RequestRow row = lockRequestByNo(requestNo);
+        if (row.batchId() != null) {
+            // 受控子单只能随整批原子确认，普通确认入口拒绝，防止绕过整批原子性
+            throw ApiException.conflict("BATCH_CONTROLLED",
+                    "受控子单须通过整批确认入口处理: " + requestNo);
+        }
         if ("ISSUED".equals(row.status())) {
             return new ConfirmResponse(requestNo, "ISSUED", row.redInvoiceNo(),
                     creditService.computeAvailable(sellerOf(row.blueInvoiceId())));
@@ -251,6 +256,24 @@ public class RedFlushService {
     }
 
     /**
+     * 整批生效时在批事务内为受控子单开具红票并同事务恢复额度（不开新事务、不校验双方确认，
+     * 整批原子性由批服务保证）。仅允许 PENDING 状态的受控子单；批状态机保证不会重复生效。
+     *
+     * @return 开具的红票号码
+     */
+    public String issueControlledRequest(String requestNo) {
+        RequestRow row = lockRequestByNo(requestNo);
+        if (row.batchId() == null) {
+            throw ApiException.conflict("NOT_BATCH_CONTROLLED", "非整批受控子单: " + requestNo);
+        }
+        if (!"PENDING".equals(row.status())) {
+            throw ApiException.conflict("INVALID_STATE",
+                    "受控子单状态 " + row.status() + " 不允许开具红票");
+        }
+        return issueRedInvoice(row, requestNo).redInvoiceNo();
+    }
+
+    /**
      * 查询红字信息表：状态、行项目与双方确认轨迹，重复查询结果稳定。
      */
     public RedFlushRequestView getRequest(String requestNo) {
@@ -292,7 +315,7 @@ public class RedFlushService {
         }
     }
 
-    private BlueInvoiceRow lockBlueByNo(String invoiceNo) {
+    BlueInvoiceRow lockBlueByNo(String invoiceNo) {
         return jdbc.query(
                         "SELECT id, invoice_no, seller_id, buyer_id, buyer_booked, total_amount,"
                                 + " red_flushed_amount, status FROM invoice"
@@ -323,7 +346,7 @@ public class RedFlushService {
     private RequestRow lockRequestByNo(String requestNo) {
         return jdbc.query(
                         "SELECT id, request_no, blue_invoice_id, blue_invoice_no, flush_type, total_amount,"
-                                + " status, seller_confirmed, buyer_confirmed, red_invoice_no"
+                                + " status, seller_confirmed, buyer_confirmed, red_invoice_no, batch_id"
                                 + " FROM red_flush_request WHERE request_no = ? FOR UPDATE",
                         (rs, rowNum) -> mapRequest(rs), requestNo)
                 .stream()
@@ -334,7 +357,7 @@ public class RedFlushService {
     private RequestRow findRequestByNo(String requestNo) {
         return jdbc.query(
                         "SELECT id, request_no, blue_invoice_id, blue_invoice_no, flush_type, total_amount,"
-                                + " status, seller_confirmed, buyer_confirmed, red_invoice_no"
+                                + " status, seller_confirmed, buyer_confirmed, red_invoice_no, batch_id"
                                 + " FROM red_flush_request WHERE request_no = ?",
                         (rs, rowNum) -> mapRequest(rs), requestNo)
                 .stream()
@@ -343,16 +366,18 @@ public class RedFlushService {
     }
 
     private RequestRow mapRequest(java.sql.ResultSet rs) throws java.sql.SQLException {
+        long batchId = rs.getLong("batch_id");
+        Long batchIdOrNull = rs.wasNull() ? null : batchId;
         return new RequestRow(rs.getLong("id"), rs.getString("request_no"), rs.getLong("blue_invoice_id"),
                 rs.getString("blue_invoice_no"), rs.getString("flush_type"), rs.getBigDecimal("total_amount"),
                 rs.getString("status"), rs.getBoolean("seller_confirmed"), rs.getBoolean("buyer_confirmed"),
-                rs.getString("red_invoice_no"));
+                rs.getString("red_invoice_no"), batchIdOrNull);
     }
 
     /**
      * 各行剩余可红冲余额（行金额−行累计已红冲）。
      */
-    private Map<Integer, BigDecimal> lineBalances(long blueInvoiceId) {
+    Map<Integer, BigDecimal> lineBalances(long blueInvoiceId) {
         Map<Integer, BigDecimal> balances = new HashMap<>();
         jdbc.query("SELECT line_no, amount, red_flushed_amount FROM invoice_line WHERE invoice_id = ?",
                 (org.springframework.jdbc.core.RowCallbackHandler) rs -> balances.put(rs.getInt("line_no"),
@@ -364,7 +389,7 @@ public class RedFlushService {
     /**
      * 在途（待确认）申请合计金额。
      */
-    private BigDecimal pendingAmount(long blueInvoiceId) {
+    BigDecimal pendingAmount(long blueInvoiceId) {
         BigDecimal pending = jdbc.queryForObject(
                 "SELECT COALESCE(SUM(total_amount), 0) FROM red_flush_request"
                         + " WHERE blue_invoice_id = ? AND status = 'PENDING'",
@@ -375,7 +400,7 @@ public class RedFlushService {
     /**
      * 在途申请按行合计金额。
      */
-    private Map<Integer, BigDecimal> pendingLineAmounts(long blueInvoiceId) {
+    Map<Integer, BigDecimal> pendingLineAmounts(long blueInvoiceId) {
         Map<Integer, BigDecimal> pending = new HashMap<>();
         jdbc.query(
                 "SELECT rl.line_no, COALESCE(SUM(rl.amount), 0) AS pending FROM red_flush_line rl"
@@ -399,11 +424,18 @@ public class RedFlushService {
     }
 
     private long insertRequest(BlueInvoiceRow blue, String flushType, BigDecimal amount) {
+        return insertRequest(blue, flushType, amount, null);
+    }
+
+    /**
+     * 插入红字信息表并回写正式编号；batchId 非空时登记为整批受控子单。
+     */
+    long insertRequest(BlueInvoiceRow blue, String flushType, BigDecimal amount, Long batchId) {
         String tempNo = "TMP-" + java.util.UUID.randomUUID();
         jdbc.update(
                 "INSERT INTO red_flush_request (request_no, blue_invoice_id, blue_invoice_no, flush_type,"
-                        + " total_amount, status) VALUES (?, ?, ?, ?, ?, 'PENDING')",
-                tempNo, blue.id(), blue.invoiceNo(), flushType, amount);
+                        + " total_amount, status, batch_id) VALUES (?, ?, ?, ?, ?, 'PENDING', ?)",
+                tempNo, blue.id(), blue.invoiceNo(), flushType, amount, batchId);
         Long id = jdbc.queryForObject("SELECT id FROM red_flush_request WHERE request_no = ?",
                 Long.class, tempNo);
         String requestNo = "RFR" + String.format("%08d", id);
@@ -469,11 +501,11 @@ public class RedFlushService {
     }
 
     /**
-     * 红字信息表内部行视图。
+     * 红字信息表内部行视图。batchId 非空时为整批受控子单。
      */
     record RequestRow(long id, String requestNo, long blueInvoiceId, String blueInvoiceNo, String flushType,
                       BigDecimal totalAmount, String status, boolean sellerConfirmed, boolean buyerConfirmed,
-                      String redInvoiceNo) {
+                      String redInvoiceNo, Long batchId) {
     }
 
     /**

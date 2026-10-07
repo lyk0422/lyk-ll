@@ -55,10 +55,11 @@ CREATE TABLE IF NOT EXISTS red_flush_request (
     blue_invoice_no VARCHAR(64)  NOT NULL COMMENT '被红冲蓝票号码（红冲链引用）',
     flush_type      VARCHAR(8)   NOT NULL COMMENT '红冲类型：FULL全额/PARTIAL部分（按行项目）',
     total_amount    DECIMAL(19,2) NOT NULL COMMENT '本次申请红冲金额，单位元',
-    status          VARCHAR(16)  NOT NULL COMMENT '状态：PENDING待双方确认/SUSPENDED意见不一致挂起/ISSUED已开红票',
+    status          VARCHAR(16)  NOT NULL COMMENT '状态：PENDING待双方确认/SUSPENDED意见不一致挂起/ISSUED已开红票/CANCELLED整批终止或撤回时释放',
     seller_confirmed BOOLEAN     NOT NULL DEFAULT FALSE COMMENT '销方是否已确认',
     buyer_confirmed  BOOLEAN     NOT NULL DEFAULT FALSE COMMENT '购方是否已确认',
     red_invoice_no  VARCHAR(64)  NULL COMMENT '开具的红票号码；未开具为NULL',
+    batch_id        BIGINT       NULL COMMENT '所属整批红冲ID（受控子单）；普通申请为NULL',
     created_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最近更新时间',
     PRIMARY KEY (id),
@@ -127,5 +128,33 @@ CREATE TABLE IF NOT EXISTS discrepancy_conflict (
     evidence_ref    VARCHAR(128)  NOT NULL COMMENT '合成凭据标识',
     reason          VARCHAR(32)   NOT NULL COMMENT '冲突原因：RED_FLUSH_IN_PROGRESS红冲在途/RED_FLUSH_COMPLETED红冲已完成',
     created_at      TIMESTAMP     NOT NULL COMMENT '记录时间（UTC）',
+    PRIMARY KEY (id)
+);
+
+-- 整批红冲：同一销购双方 2~10 张蓝票一批受理，批内每票生成受控子单（red_flush_request.batch_id），
+-- 子单 PENDING 即预占对应行可红冲余额，与普通红冲、差异登记共享行互斥；
+-- 双方均同意才在一个事务开具全部红票并恢复额度，任一方拒绝或撤回则整批终止并释放全部预占。
+CREATE TABLE IF NOT EXISTS red_flush_batch (
+    id               BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+    batch_no         VARCHAR(64)  NOT NULL COMMENT '整批编号，全局唯一',
+    seller_id        VARCHAR(64)  NOT NULL COMMENT '开票方ID（批内各票一致）',
+    buyer_id         VARCHAR(64)  NOT NULL COMMENT '购方ID（批内各票一致）',
+    total_amount     DECIMAL(19,2) NOT NULL COMMENT '整批红冲金额合计，单位元',
+    status           VARCHAR(16)  NOT NULL COMMENT '状态：PENDING待双方确认/ISSUED已生效/TERMINATED意见拒绝终止/WITHDRAWN已撤回',
+    version          INT          NOT NULL DEFAULT 1 COMMENT '乐观锁版本，从1起，每次成功修改加1',
+    seller_confirmed BOOLEAN      NOT NULL DEFAULT FALSE COMMENT '销方是否已同意',
+    buyer_confirmed  BOOLEAN      NOT NULL DEFAULT FALSE COMMENT '购方是否已同意',
+    created_at       TIMESTAMP    NOT NULL COMMENT '创建时间（UTC）',
+    updated_at       TIMESTAMP    NOT NULL COMMENT '最近更新时间（UTC）',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_red_batch_no (batch_no)
+);
+
+CREATE TABLE IF NOT EXISTS red_flush_batch_confirmation (
+    id         BIGINT      NOT NULL AUTO_INCREMENT COMMENT '主键',
+    batch_id   BIGINT      NOT NULL COMMENT '所属整批ID',
+    side       VARCHAR(8)  NOT NULL COMMENT '确认方：SELLER销方/BUYER购方',
+    opinion    VARCHAR(8)  NOT NULL COMMENT '意见：AGREE同意/REJECT拒绝',
+    created_at TIMESTAMP   NOT NULL COMMENT '确认时间（UTC）',
     PRIMARY KEY (id)
 );
