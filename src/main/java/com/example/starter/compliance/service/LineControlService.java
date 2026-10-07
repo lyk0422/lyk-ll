@@ -9,6 +9,9 @@ import com.example.starter.compliance.repo.FormulaRow;
 import com.example.starter.compliance.repo.LineControlRepository;
 import com.example.starter.compliance.repo.ProductionLineRow;
 import com.example.starter.compliance.repo.ProductionRecordRow;
+import com.example.starter.compliance.repo.ReworkConsumptionRow;
+import com.example.starter.compliance.repo.ReworkMaterialRow;
+import com.example.starter.compliance.repo.ReworkRepository;
 import com.example.starter.compliance.time.ComplianceClock;
 import com.example.starter.compliance.web.Requests.ConfirmCertificateRequest;
 import com.example.starter.compliance.web.Requests.ControlledProductionRequest;
@@ -36,6 +39,11 @@ import org.springframework.transaction.annotation.Transactional;
  * 配方、核销并作废旧凭证；任一校验失败整体回滚，不消耗凭证。两笔量产并发时同一线路版本至多一笔
  * 成功（行锁 + (line_code, occupied_version) 唯一约束双重保证）。
  *
+ * <p>受控量产可投用 1~10 个不同返工料：全部数为正且最多三位小数，返工合计不得超过总量 20%
+ * （恰等允许）；全部来源过敏原并集必须被目标配方版本声明，清线凭证只证明线路清洁，不能替代
+ * 物料过敏原声明。受理时在同一事务内原子扣减全部返工额度并写消费流水，任一不足或备案失效整笔
+ * 零扣；两批争同料由料账行锁 + 条件扣减保证不得超用。不投返工料的旧量产行为不变。
+ *
  * <p>全部新增写操作以 requestId 幂等：完整参数含版本、集合与精确时刻，同键同参重放首次冻结结果，
  * 异参 409，失败不占键。参数非法 400、对象不存在 404、业务拒绝 422。
  */
@@ -47,15 +55,20 @@ public class LineControlService {
 
     private final LineControlRepository lineRepository;
     private final ComplianceRepository repository;
+    private final ReworkRepository reworkRepository;
+    private final ReworkService reworkService;
     private final ComplianceClock clock;
     private final IdempotentExecutor idempotency;
     private final FilingTransitions transitions;
 
     public LineControlService(LineControlRepository lineRepository,
-            ComplianceRepository repository, ComplianceClock clock,
+            ComplianceRepository repository, ReworkRepository reworkRepository,
+            ReworkService reworkService, ComplianceClock clock,
             IdempotentExecutor idempotency, FilingTransitions transitions) {
         this.lineRepository = lineRepository;
         this.repository = repository;
+        this.reworkRepository = reworkRepository;
+        this.reworkService = reworkService;
         this.clock = clock;
         this.idempotency = idempotency;
         this.transitions = transitions;
@@ -250,6 +263,12 @@ public class LineControlService {
                     if (request.reportedAt() == null || request.reportedAt() < 0) {
                         throw invalid("reportedAt 精确时刻不能为空");
                     }
+                    boolean hasRework = request.reworks() != null && !request.reworks().isEmpty();
+                    if (hasRework) {
+                        // 投用返工料：1~10 个不同料号、全部数为正且最多三位小数、合计 ≤ 总量 20%。
+                        reworkService.validateReworkParams(request.reworks(),
+                                request.quantityKg());
+                    }
 
                     // 先锁线路再锁备案：同线路并发量产按唯一提交顺序串行；
                     // 暂停/注销与量产竞态时，后提交者基于行锁内最新状态裁决，历史记录不被改写。
@@ -292,6 +311,14 @@ public class LineControlService {
                         usedCertificateId = certificate.id();
                     }
 
+                    // 返工料门禁：清线凭证只证明线路清洁，不能替代物料过敏原声明；
+                    // 按料号排序锁定料账，并集须被目标配方版本声明且逐料余额充足。
+                    List<ReworkMaterialRow> lockedReworks = List.of();
+                    if (hasRework) {
+                        lockedReworks = reworkService.lockAndCheck(request.reworks(),
+                                newAllergens);
+                    }
+
                     long recordId;
                     try {
                         recordId = repository.insertControlledProductionRecord(filing.id(),
@@ -301,6 +328,12 @@ public class LineControlService {
                         // 唯一约束兜底：并发同线路同占用版本仅一笔成功，败者不写任何记录。
                         throw new ApiException(HttpStatus.CONFLICT, "LINE_VERSION_CONFLICT",
                                 "同一线路版本已有量产提交，占用版本：" + request.occupiedVersion());
+                    }
+                    // 一次受理原子扣全部返工额度并写消费流水；任一不足整笔回滚零扣。
+                    List<LineControlResults.ReworkUseView> reworkViews = List.of();
+                    if (hasRework) {
+                        reworkViews = reworkService.deduct(lockedReworks, request.reworks(),
+                                recordId, request.reportedAt());
                     }
                     if (!lineRepository.occupyLine(lineCode, request.occupiedVersion(),
                             formula.productCode(), formula.version(), request.reportedAt())) {
@@ -322,7 +355,7 @@ public class LineControlService {
                             new LineControlResults.ControlledProductionView(recordId, filing.id(),
                                     lineCode, request.occupiedVersion(), request.batchNo(),
                                     request.quantityKg().stripTrailingZeros().toPlainString(),
-                                    request.reportedAt(), usedCertificateId, false),
+                                    request.reportedAt(), usedCertificateId, reworkViews, false),
                             HttpStatus.OK.value());
                 });
     }
@@ -510,6 +543,22 @@ public class LineControlService {
         return new LineControlResults.ControlledProductionView(row.id(), row.filingId(),
                 row.lineCode(), row.occupiedVersion(), row.batchNo(),
                 row.quantityKg().stripTrailingZeros().toPlainString(), row.reportedAt(),
-                row.clearanceCertificateId(), false);
+                row.clearanceCertificateId(), buildReworkUseViews(row.id()), false);
+    }
+
+    /** 勾稽某量产记录的返工料投用明细（无投用返回空表）。 */
+    private List<LineControlResults.ReworkUseView> buildReworkUseViews(long productionRecordId) {
+        List<ReworkConsumptionRow> consumptions =
+                reworkRepository.findConsumptionsByProductionRecordId(productionRecordId);
+        List<LineControlResults.ReworkUseView> views = new ArrayList<>(consumptions.size());
+        for (ReworkConsumptionRow consumption : consumptions) {
+            String materialCode = reworkRepository.findMaterialById(consumption.materialId())
+                    .orElseThrow(() -> new IllegalStateException(
+                            "返工料消费流水缺失料账：" + consumption.materialId()))
+                    .materialCode();
+            views.add(new LineControlResults.ReworkUseView(materialCode,
+                    consumption.weightKg().stripTrailingZeros().toPlainString()));
+        }
+        return views;
     }
 }

@@ -10,6 +10,8 @@ import com.example.starter.compliance.web.Requests.FormulaAllergenRequest;
 import com.example.starter.compliance.web.Requests.IngredientDto;
 import com.example.starter.compliance.web.Requests.ProductionReportRequest;
 import com.example.starter.compliance.web.Requests.RegisterLineRequest;
+import com.example.starter.compliance.web.Requests.RegisterReworkRequest;
+import com.example.starter.compliance.web.Requests.ReworkUseDto;
 import com.example.starter.compliance.web.Requests.StandardUpdateRequest;
 import com.example.starter.compliance.web.Requests.SubmitFormulaRequest;
 import java.math.BigDecimal;
@@ -103,6 +105,23 @@ public final class Fixtures {
             String lineCode, int occupiedVersion, String batchNo, String quantityKg,
             Long certificateId, long reportedAt) {
         return new ControlledProductionRequest(requestId, filingId, lineCode, occupiedVersion,
-                batchNo, new BigDecimal(quantityKg), certificateId, reportedAt);
+                batchNo, new BigDecimal(quantityKg), certificateId, reportedAt, null);
+    }
+
+    public static ControlledProductionRequest controlledWithRework(String requestId, long filingId,
+            String lineCode, int occupiedVersion, String batchNo, String quantityKg,
+            Long certificateId, long reportedAt, List<ReworkUseDto> reworks) {
+        return new ControlledProductionRequest(requestId, filingId, lineCode, occupiedVersion,
+                batchNo, new BigDecimal(quantityKg), certificateId, reportedAt, reworks);
+    }
+
+    public static ReworkUseDto reworkUse(String materialCode, String weightKg) {
+        return new ReworkUseDto(materialCode, new BigDecimal(weightKg));
+    }
+
+    public static RegisterReworkRequest rework(String requestId, String materialCode,
+            Long productionRecordId, String availableKg, int expectedVersion, long registeredAt) {
+        return new RegisterReworkRequest(requestId, materialCode, productionRecordId,
+                new BigDecimal(availableKg), expectedVersion, registeredAt);
     }
 }

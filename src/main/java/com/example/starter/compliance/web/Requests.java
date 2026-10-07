@@ -96,6 +96,8 @@ public final class Requests {
     /**
      * 受控量产：声明线路与当前占用版本；当前批含有上一批遗留过敏原时必须携带有效凭证。
      * reportedAt 为业务精确时刻（UTC epoch 毫秒）。
+     * reworks 为空/null 表示不投返工料（旧行为不变）；非空时 1~10 个不同料号，
+     * 全部数为正且最多三位小数，返工合计不得超过总量 20%（恰等允许）。
      */
     public record ControlledProductionRequest(
             String requestId,
@@ -105,6 +107,28 @@ public final class Requests {
             String batchNo,
             BigDecimal quantityKg,
             Long certificateId,
-            Long reportedAt) {
+            Long reportedAt,
+            List<ReworkUseDto> reworks) {
+    }
+
+    /** 返工料投用项：materialCode 料号，weightKg 投用重量（公斤，正数，最多三位小数）。 */
+    public record ReworkUseDto(String materialCode, BigDecimal weightKg) {
+    }
+
+    /**
+     * 返工料登记（新增/修改）。
+     * 新增 expectedVersion=0：引用一条已成功量产记录冻结来源配方版本及过敏原集合，
+     * 同来源只登记一次；availableKg 为正数、最多三位小数，作为独立合成额度。
+     * 修改 expectedVersion=当前料账版本：仅可修正 availableKg（不得低于已消费量），
+     * 不得换来源（productionRecordId 留空或与原值一致）、不可清空过敏原；成功版本加 1。
+     * registeredAt 为业务精确时刻（UTC epoch 毫秒）。
+     */
+    public record RegisterReworkRequest(
+            String requestId,
+            String materialCode,
+            Long productionRecordId,
+            BigDecimal availableKg,
+            Integer expectedVersion,
+            Long registeredAt) {
     }
 }

@@ -49,7 +49,7 @@ public final class LineControlResults {
             boolean replayed) {
     }
 
-    /** 受控量产结果：occupiedVersion 为该笔量产占用的线路版本。 */
+    /** 受控量产结果：occupiedVersion 为该笔量产占用的线路版本；reworks 为返工料投用明细（无投用为空表）。 */
     public record ControlledProductionView(
             Long productionRecordId,
             Long filingId,
@@ -59,7 +59,12 @@ public final class LineControlResults {
             String quantityKg,
             Long reportedAt,
             Long certificateId,
+            List<ReworkUseView> reworks,
             boolean replayed) {
+    }
+
+    /** 返工料投用明细：materialCode 料号，weightKg 投用重量（公斤，保留原始精度文本）。 */
+    public record ReworkUseView(String materialCode, String weightKg) {
     }
 
     /** 线路量产历史（按提交先后升序）。 */

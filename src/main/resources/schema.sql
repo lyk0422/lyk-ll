@@ -166,6 +166,35 @@ CREATE TABLE IF NOT EXISTS clearance_certificate (
     consumed_at BIGINT
 );
 
+-- 返工料登记：material_code 唯一料号；production_record_id 唯一（同一来源量产记录只登记一次）；
+-- 冻结来源配方版本及过敏原集合（登记后不可换来源、不可清空过敏原）；
+-- available_kg 为登记可用公斤数（原量，最多三位小数，独立合成额度，不声称旧记录已有产量）；
+-- consumed_kg 为累计已消费公斤数；version 为料账乐观版本，从 1 开始，成功修改/消费加 1
+CREATE TABLE IF NOT EXISTS rework_material (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    material_code VARCHAR(64) NOT NULL UNIQUE,
+    production_record_id BIGINT NOT NULL UNIQUE,
+    source_product_code VARCHAR(64) NOT NULL,
+    source_formula_version INT NOT NULL,
+    allergens CLOB NOT NULL,
+    available_kg DECIMAL(18,3) NOT NULL,
+    consumed_kg DECIMAL(18,3) NOT NULL DEFAULT 0,
+    version INT NOT NULL,
+    request_id VARCHAR(96),
+    registered_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+-- 返工料消费流水：历史消费不可改（只插入，无更新/删除入口）；
+-- production_record_id 为消费该返工料的新量产记录
+CREATE TABLE IF NOT EXISTS rework_consumption (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    material_id BIGINT NOT NULL,
+    production_record_id BIGINT NOT NULL,
+    weight_kg DECIMAL(18,3) NOT NULL,
+    consumed_at BIGINT NOT NULL
+);
+
 -- requestId 幂等记录：fingerprint 覆盖 requestId 与全部业务字段
 CREATE TABLE IF NOT EXISTS idempotent_request (
     request_id VARCHAR(96) PRIMARY KEY,
