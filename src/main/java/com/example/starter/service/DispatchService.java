@@ -5,6 +5,7 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +26,10 @@ import com.example.starter.domain.LateReportEvent;
 import com.example.starter.domain.OrderStatus;
 import com.example.starter.domain.PlanSegment;
 import com.example.starter.domain.PlanVersion;
+import com.example.starter.domain.StagedPlan;
+import com.example.starter.domain.StagedPlanStatus;
+import com.example.starter.domain.StagedPlanStep;
+import com.example.starter.domain.StagedPlanTurbine;
 import com.example.starter.domain.Turbine;
 import com.example.starter.dto.AllocationItem;
 import com.example.starter.dto.AlertView;
@@ -37,9 +42,14 @@ import com.example.starter.dto.PlanOrderReceiveResponse;
 import com.example.starter.dto.ReportRequest;
 import com.example.starter.dto.ReportResponse;
 import com.example.starter.dto.SettleResponse;
+import com.example.starter.dto.StagedOrderReceiveRequest;
+import com.example.starter.dto.StagedOrderReceiveResponse;
+import com.example.starter.dto.StagedTurbineInput;
+import com.example.starter.dto.StagedTurbineView;
 import com.example.starter.repo.DispatchRepository;
 import com.example.starter.repo.IdempotentRepository;
 import com.example.starter.repo.PlanRepository;
+import com.example.starter.repo.StagedPlanRepository;
 import com.example.starter.repo.TurbineRepository;
 import com.example.starter.support.Canonical;
 import com.example.starter.support.Fingerprints;
@@ -66,6 +76,7 @@ public class DispatchService {
     private final DispatchRepository dispatchRepository;
     private final IdempotentRepository idempotentRepository;
     private final PlanRepository planRepository;
+    private final StagedPlanRepository stagedPlanRepository;
     private final ObjectMapper objectMapper;
 
     public DispatchService(ServiceClock clock,
@@ -73,12 +84,14 @@ public class DispatchService {
                            DispatchRepository dispatchRepository,
                            IdempotentRepository idempotentRepository,
                            PlanRepository planRepository,
+                           StagedPlanRepository stagedPlanRepository,
                            ObjectMapper objectMapper) {
         this.clock = clock;
         this.turbineRepository = turbineRepository;
         this.dispatchRepository = dispatchRepository;
         this.idempotentRepository = idempotentRepository;
         this.planRepository = planRepository;
+        this.stagedPlanRepository = stagedPlanRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -149,6 +162,8 @@ public class DispatchService {
         if (active != null) {
             // 同一事务：旧指令作废（active 释放）→ 新指令生效，不存在双指令同时生效窗口。
             dispatchRepository.markSuperseded(active.getId(), newId);
+            // 旧指令的分段计划（若有）随之取消并释放机组占用。
+            cancelStagedPlanOfOrder(active.getId(), now);
         }
         dispatchRepository.insertCycle(buildCycle(newId, 1, now));
         dispatchRepository.insertAllocations(newId, 1, allocations);
@@ -263,6 +278,7 @@ public class DispatchService {
 
         if (active != null) {
             dispatchRepository.markSuperseded(active.getId(), newId);
+            cancelStagedPlanOfOrder(active.getId(), now);
         }
         dispatchRepository.insertCycle(buildCycle(newId, 1, now));
         dispatchRepository.insertAllocations(newId, 1, allocations);
@@ -386,6 +402,12 @@ public class DispatchService {
             throw new ApiNotFoundException("机组不存在：" + request.turbineCode());
         }
 
+        // 机组被受控分段计划占用中：普通旧回执入口不能绕过阶梯（取消/完成后释放占用）。
+        if (stagedPlanRepository.findOccupiedByTurbine(turbine.getId()) != null) {
+            throw new ApiConflictException(
+                    "机组处于受控分段执行中，普通回执不能绕过阶梯：" + request.turbineCode());
+        }
+
         // 优先归属执行中指令；无执行中指令时取最新指令用于判定封存后的迟到回报。
         CurtailOrder order = dispatchRepository.findActiveOrder(turbine.getFarmCode());
         if (order == null) {
@@ -495,9 +517,10 @@ public class DispatchService {
 
     /**
      * 达标判定与重分摊：当前轮次下发恰满 10 分钟，全场最新出力仍高于目标则告警，
-     * 并按各机组最新可用出力重分摊生成下一轮。
+     * 并按各机组最新可用出力重分摊生成下一轮；执行中的分段计划同步重排守斜率剩余阶梯。
+     * 供执行回报与分段分钟回执在持有指令行锁的事务内调用。
      */
-    private void maybeAlertAndReallocate(CurtailOrder order, Instant now) {
+    public void maybeAlertAndReallocate(CurtailOrder order, Instant now) {
         int cycleNo = order.getCurrentCycleNo();
         DispatchCycle cycle = dispatchRepository.findCycles(order.getId()).stream()
                 .filter(c -> c.getCycleNo() == cycleNo)
@@ -543,6 +566,8 @@ public class DispatchService {
             dispatchRepository.updateAlertReallocated(order.getId(), cycleNo, newCycleNo);
             dispatchRepository.updateCurrentCycle(order.getId(), newCycleNo);
             order.setCurrentCycleNo(newCycleNo);
+            // 原日前基数不换，仅按新分摊目标重排守斜率剩余阶梯。
+            reformStagedPlanAfterReallocation(order, reallocations, now);
             return;
         }
 
@@ -568,6 +593,7 @@ public class DispatchService {
         dispatchRepository.updateAlertReallocated(order.getId(), cycleNo, newCycleNo);
         dispatchRepository.updateCurrentCycle(order.getId(), newCycleNo);
         order.setCurrentCycleNo(newCycleNo);
+        reformStagedPlanAfterReallocation(order, reallocations, now);
     }
 
     /**
@@ -589,6 +615,7 @@ public class DispatchService {
             v.setRatedPowerKw(t.getRatedPowerKw());
             v.setTechnicalMinKw(t.getTechnicalMinKw());
             v.setUpdatedAt(t.getUpdatedAt());
+            v.setStatus(t.getStatus());
             v.setAvailablePowerKw(Math.min(t.getAvailablePowerKw(), planned));
             views.add(v);
         }
@@ -642,6 +669,8 @@ public class DispatchService {
             throw new ApiBadRequestException("指令已被新指令作废，不能日结封存：" + orderNo);
         }
         Instant now = clock.now();
+        // 封存前释放分段计划占用（若有）：不自动恢复机组原功率。
+        cancelStagedPlanOfOrder(order.getId(), now);
         dispatchRepository.markSettled(order.getId(), now);
         return new SettleResponse(order.getId(), order.getOrderNo(),
                 OrderStatus.SETTLED.name(), now, false);
@@ -765,5 +794,344 @@ public class DispatchService {
         } catch (JsonProcessingException ex) {
             throw new IllegalStateException("首次响应无法还原", ex);
         }
+    }
+
+    /**
+     * 受控分段执行模式登记（可选模式；旧未启用指令保持原行为）：
+     * 最终目标仍由原最低保留、日前基数（可选绑定）与分摊规则决定；登记冻结原计划基数、
+     * 最终分配与各机组斜率，按每分钟不超过升降上限生成完整阶梯、最后恰到各自目标；
+     * 起始值须在原最低保留与当时可用出力之间；任一机组期限内无法到达则全单拒绝（不先写部分计划）；
+     * 每机组同一时刻至多一份执行中分段计划（占用唯一索引兜底）。
+     */
+    @Transactional
+    public StagedOrderReceiveResponse receiveStagedOrder(StagedOrderReceiveRequest request) {
+        Instant now = clock.now();
+        String fingerprint = fingerprintStagedOrder(request);
+
+        IdempotentRecord existing = idempotentRepository.findByRequestId(request.requestId());
+        if (existing != null) {
+            return resolveStagedOrderIdempotent(existing, fingerprint);
+        }
+
+        if (request.planBindingPartial()) {
+            throw new ApiBadRequestException(
+                    "计划绑定字段 planDate/segmentIndex/planVersionNo 须同空或同非空");
+        }
+
+        if (!turbineRepository.lockFarmRow(request.farmCode())) {
+            throw new ApiBadRequestException("风场不存在：" + request.farmCode());
+        }
+
+        existing = idempotentRepository.findByRequestId(request.requestId());
+        if (existing != null) {
+            return resolveStagedOrderIdempotent(existing, fingerprint);
+        }
+
+        CurtailOrder active = dispatchRepository.findActiveOrder(request.farmCode());
+        if (active != null && !active.getReceivedAt().isBefore(now)) {
+            throw new ApiConflictException(
+                    "风场同一时刻已有执行中限电指令：" + active.getOrderNo());
+        }
+
+        List<Turbine> turbines = turbineRepository.findByFarm(request.farmCode());
+        Map<String, Turbine> byCode = new LinkedHashMap<>();
+        turbines.forEach(t -> byCode.put(t.getTurbineCode(), t));
+
+        // 参与机组登记项：机组须存在且不重复。
+        Map<String, StagedTurbineInput> inputs = new LinkedHashMap<>();
+        for (StagedTurbineInput in : request.turbines()) {
+            if (!byCode.containsKey(in.turbineCode())) {
+                throw new ApiBadRequestException("机组不存在：" + in.turbineCode());
+            }
+            if (inputs.put(in.turbineCode(), in) != null) {
+                throw new ApiBadRequestException("机组重复登记：" + in.turbineCode());
+            }
+        }
+
+        // 可选计划绑定：冻结当前版本与该段核定基数（与计划绑定旧入口同一校验）。
+        PlanVersion version = null;
+        Map<Long, Integer> plannedById = null;
+        List<Turbine> basis = turbines;
+        if (request.planBound()) {
+            version = planRepository.lockVersion(
+                    request.farmCode(), request.planDate(), request.planVersionNo());
+            if (version == null) {
+                throw new ApiNotFoundException(
+                        "计划版本不存在：" + request.farmCode() + " " + request.planDate()
+                                + " v" + request.planVersionNo());
+            }
+            if (!"Y".equals(version.getCurrentFlag())) {
+                throw new ApiUnprocessableException(
+                        "计划版本 v" + request.planVersionNo() + " 已过期，新指令只能绑定当前版本");
+            }
+            List<PlanSegment> segments =
+                    planRepository.findSegments(version.getId(), request.segmentIndex());
+            plannedById = segments.stream()
+                    .collect(Collectors.toMap(PlanSegment::getTurbineId, PlanSegment::getPowerKw));
+            if (segments.size() != turbines.size()
+                    || !plannedById.keySet().equals(
+                            turbines.stream().map(Turbine::getId).collect(Collectors.toSet()))) {
+                throw new ApiUnprocessableException(
+                        "计划第 " + request.segmentIndex() + " 段机组基数不完整，无法受理");
+            }
+            basis = applyPlanBasis(turbines, plannedById);
+        }
+
+        // 起始值校验：须在原最低保留（min(可用, 技术下限)）与当时可用出力之间。
+        for (StagedTurbineInput in : inputs.values()) {
+            Turbine t = byCode.get(in.turbineCode());
+            int lower = Math.min(t.getAvailablePowerKw(), t.getTechnicalMinKw());
+            int upper = t.getAvailablePowerKw();
+            if (in.startPowerKw() < lower || in.startPowerKw() > upper) {
+                throw new ApiUnprocessableException(
+                        "机组 " + in.turbineCode() + " 起始功率 " + in.startPowerKw()
+                                + " kW 须在原最低保留 " + lower + " kW 与当时可用出力 " + upper + " kW 之间");
+            }
+        }
+
+        // 最终分配仍由原规则决定；计划绑定时目标不可实现整单拒绝（422），旧模式维持 400 语义。
+        List<Allocation> allocations;
+        try {
+            allocations = AllocationEngine.allocate(basis, request.targetPowerKw(), 0L, 1);
+        } catch (ApiBadRequestException ex) {
+            if (request.planBound()) {
+                throw new ApiUnprocessableException(ex.getMessage());
+            }
+            throw ex;
+        }
+        Map<Long, Integer> targetById = allocations.stream()
+                .collect(Collectors.toMap(Allocation::getTurbineId, Allocation::getTargetPowerKw));
+
+        // 期限可行性：任一机组期限内无法到达则全单拒绝——此时尚未写任何业务数据与幂等占位。
+        for (StagedTurbineInput in : inputs.values()) {
+            Turbine t = byCode.get(in.turbineCode());
+            int needed = StaircaseEngine.neededMinutes(
+                    in.startPowerKw(), targetById.get(t.getId()), in.rampKwPerMin());
+            if (needed > in.deadlineMinutes()) {
+                throw new ApiUnprocessableException(
+                        "机组 " + in.turbineCode() + " 期限内无法到达目标：需 " + needed
+                                + " 分钟，超过期限 " + in.deadlineMinutes() + " 分钟，全单拒绝");
+            }
+        }
+
+        IdempotentRecord record = newIdempotent(request.requestId(), "STAGED_ORDER", fingerprint, now);
+        if (!idempotentRepository.tryInsert(record)) {
+            return resolveStagedOrderIdempotent(
+                    idempotentRepository.findByRequestId(request.requestId()), fingerprint);
+        }
+
+        CurtailOrder order = new CurtailOrder();
+        order.setOrderNo(generateOrderNo(now));
+        order.setFarmCode(request.farmCode());
+        order.setRequestId(request.requestId());
+        order.setFingerprint(fingerprint);
+        order.setTargetPowerKw(request.targetPowerKw());
+        order.setStatus(OrderStatus.DISPATCHED);
+        order.setCurrentCycleNo(1);
+        order.setReceivedAt(now);
+        if (request.planBound()) {
+            order.setPlanVersionId(version.getId());
+            order.setPlanVersionNo(version.getVersionNo());
+            order.setPlanDate(request.planDate());
+            order.setSegmentIndex(request.segmentIndex());
+        }
+        long newId = dispatchRepository.insertOrder(order);
+        allocations.forEach(a -> a.setOrderId(newId));
+
+        if (active != null) {
+            dispatchRepository.markSuperseded(active.getId(), newId);
+            cancelStagedPlanOfOrder(active.getId(), now);
+        }
+        dispatchRepository.insertCycle(buildCycle(newId, 1, now));
+        if (request.planBound()) {
+            freezePlanBasis(allocations, turbines, plannedById);
+        }
+        dispatchRepository.insertAllocations(newId, 1, allocations);
+        dispatchRepository.activateOrder(newId);
+
+        // 分段计划：版本 1、执行中、期限取各参与机组期限最大值；占用标记 + 完整冻结阶梯。
+        int duration = inputs.values().stream()
+                .mapToInt(StagedTurbineInput::deadlineMinutes)
+                .max()
+                .orElse(1);
+        StagedPlan plan = new StagedPlan();
+        plan.setOrderId(newId);
+        plan.setPlanVersion(1);
+        plan.setStatus(StagedPlanStatus.EXECUTING);
+        plan.setStartAt(now);
+        plan.setCurrentMinute(0);
+        plan.setDurationMinutes(duration);
+        plan.setCreatedAt(now);
+        plan.setUpdatedAt(now);
+        long planId = stagedPlanRepository.insertPlan(plan);
+
+        List<StagedPlanTurbine> planTurbines = new ArrayList<>();
+        for (StagedTurbineInput in : inputs.values()) {
+            Turbine t = byCode.get(in.turbineCode());
+            StagedPlanTurbine pt = new StagedPlanTurbine();
+            pt.setPlanId(planId);
+            pt.setTurbineId(t.getId());
+            pt.setStartPowerKw(in.startPowerKw());
+            pt.setTargetPowerKw(targetById.get(t.getId()));
+            pt.setRampKwPerMin(in.rampKwPerMin());
+            pt.setDeadlineMinutes(in.deadlineMinutes());
+            pt.setOccupiedFlag("Y");
+            planTurbines.add(pt);
+        }
+        stagedPlanRepository.insertTurbines(planTurbines);
+        stagedPlanRepository.insertSteps(buildSteps(planId, 1, duration, planTurbines));
+
+        int farmAvailable = turbines.stream().mapToInt(Turbine::getAvailablePowerKw).sum();
+        List<StagedTurbineView> turbineViews = planTurbines.stream()
+                .map(pt -> toStagedTurbineView(byCode, pt))
+                .toList();
+        Map<Long, Turbine> byId = new LinkedHashMap<>();
+        turbines.forEach(t -> byId.put(t.getId(), t));
+        List<AllocationItem> items = allocations.stream()
+                .map(a -> toItem(a, byId.get(a.getTurbineId())))
+                .toList();
+        StagedOrderReceiveResponse response = new StagedOrderReceiveResponse(newId,
+                order.getOrderNo(), request.requestId(), request.farmCode(),
+                request.targetPowerKw(), farmAvailable, farmAvailable - request.targetPowerKw(),
+                OrderStatus.DISPATCHED.name(), planId, 1, StagedPlanStatus.EXECUTING.name(),
+                now, duration, turbineViews, items, false);
+        idempotentRepository.updateRefAndResponse(request.requestId(), newId, toJson(response));
+        return response;
+    }
+
+    private StagedTurbineView toStagedTurbineView(Map<String, Turbine> byCode, StagedPlanTurbine pt) {
+        String code = byCode.values().stream()
+                .filter(t -> t.getId() == pt.getTurbineId())
+                .map(Turbine::getTurbineCode)
+                .findFirst()
+                .orElse(String.valueOf(pt.getTurbineId()));
+        return new StagedTurbineView(code, pt.getStartPowerKw(), pt.getTargetPowerKw(),
+                pt.getRampKwPerMin(), pt.getDeadlineMinutes(),
+                StaircaseEngine.neededMinutes(pt.getStartPowerKw(), pt.getTargetPowerKw(),
+                        pt.getRampKwPerMin()));
+    }
+
+    /** 指令作废/封存时取消其分段计划并释放机组占用；不改动任何机组实际功率。 */
+    private void cancelStagedPlanOfOrder(long orderId, Instant now) {
+        StagedPlan plan = stagedPlanRepository.findPlanByOrderId(orderId);
+        if (plan == null) {
+            return;
+        }
+        if (plan.getStatus() == StagedPlanStatus.EXECUTING
+                || plan.getStatus() == StagedPlanStatus.PAUSED) {
+            stagedPlanRepository.updateStatus(plan.getId(), StagedPlanStatus.CANCELED, now);
+            stagedPlanRepository.releaseOccupations(plan.getId());
+        }
+    }
+
+    /**
+     * 超时重分配后：执行中的分段计划按新分摊目标重排守斜率剩余阶梯（版本加 1、
+     * 起始功率取当前最新实际功率、斜率不变；原日前基数不换）。暂停/已取消计划不重排。
+     */
+    private void reformStagedPlanAfterReallocation(CurtailOrder order, List<Allocation> reallocations,
+                                                   Instant now) {
+        StagedPlan plan = stagedPlanRepository.findPlanByOrderId(order.getId());
+        if (plan == null || plan.getStatus() != StagedPlanStatus.EXECUTING) {
+            return;
+        }
+        Map<Long, Integer> targetById = reallocations.stream()
+                .collect(Collectors.toMap(Allocation::getTurbineId, Allocation::getTargetPowerKw));
+        Map<Long, Turbine> turbineById = turbineRepository.findByFarm(order.getFarmCode())
+                .stream()
+                .collect(Collectors.toMap(Turbine::getId, t -> t));
+        List<StagedPlanTurbine> planTurbines = stagedPlanRepository.findTurbines(plan.getId());
+
+        int duration = 1;
+        Map<Long, Integer> startById = new LinkedHashMap<>();
+        for (StagedPlanTurbine pt : planTurbines) {
+            Integer target = targetById.get(pt.getTurbineId());
+            Turbine t = turbineById.get(pt.getTurbineId());
+            if (target == null || t == null) {
+                // 不可达：分摊覆盖全场机组；保留防御。
+                continue;
+            }
+            int start = t.getAvailablePowerKw();
+            startById.put(pt.getTurbineId(), start);
+            duration = Math.max(duration,
+                    StaircaseEngine.neededMinutes(start, target, pt.getRampKwPerMin()));
+        }
+
+        int newVersion = plan.getPlanVersion() + 1;
+        stagedPlanRepository.reformPlan(plan.getId(), newVersion, now, duration, now);
+        List<StagedPlanTurbine> reformed = new ArrayList<>();
+        for (StagedPlanTurbine pt : planTurbines) {
+            Integer target = targetById.get(pt.getTurbineId());
+            if (target == null || !startById.containsKey(pt.getTurbineId())) {
+                continue;
+            }
+            stagedPlanRepository.updateTurbineSlope(plan.getId(), pt.getTurbineId(),
+                    startById.get(pt.getTurbineId()), target,
+                    pt.getRampKwPerMin(), pt.getDeadlineMinutes());
+            StagedPlanTurbine v = new StagedPlanTurbine();
+            v.setPlanId(plan.getId());
+            v.setTurbineId(pt.getTurbineId());
+            v.setStartPowerKw(startById.get(pt.getTurbineId()));
+            v.setTargetPowerKw(target);
+            v.setRampKwPerMin(pt.getRampKwPerMin());
+            v.setDeadlineMinutes(pt.getDeadlineMinutes());
+            reformed.add(v);
+        }
+        stagedPlanRepository.insertSteps(buildSteps(plan.getId(), newVersion, duration, reformed));
+    }
+
+    /** 生成某版本完整阶梯：每分钟向目标移动不超过上限，最后恰到目标，到达后保持。 */
+    private List<StagedPlanStep> buildSteps(long planId, int planVersion, int duration,
+                                            List<StagedPlanTurbine> planTurbines) {
+        List<StagedPlanStep> steps = new ArrayList<>();
+        for (StagedPlanTurbine pt : planTurbines) {
+            for (int m = 1; m <= duration; m++) {
+                StagedPlanStep s = new StagedPlanStep();
+                s.setPlanId(planId);
+                s.setPlanVersion(planVersion);
+                s.setMinuteNo(m);
+                s.setTurbineId(pt.getTurbineId());
+                s.setPowerKw(StaircaseEngine.powerAt(pt.getStartPowerKw(), pt.getTargetPowerKw(),
+                        pt.getRampKwPerMin(), m));
+                steps.add(s);
+            }
+        }
+        return steps;
+    }
+
+    /** 受控分段指令指纹：结构化 TLV，覆盖全部业务参数、可选计划绑定与精确受理时刻。 */
+    private String fingerprintStagedOrder(StagedOrderReceiveRequest request) {
+        List<String> turbineTokens = request.turbines().stream()
+                .sorted(Comparator.comparing(StagedTurbineInput::turbineCode))
+                .map(t -> Canonical.obj(
+                        "turbineCode", Canonical.str(t.turbineCode()),
+                        "startPowerKw", Canonical.integer(t.startPowerKw()),
+                        "rampKwPerMin", Canonical.integer(t.rampKwPerMin()),
+                        "deadlineMinutes", Canonical.integer(t.deadlineMinutes())))
+                .toList();
+        String canonical = Canonical.obj(
+                "bizType", Canonical.str("STAGED_ORDER"),
+                "requestId", Canonical.str(request.requestId()),
+                "farmCode", Canonical.str(request.farmCode()),
+                "targetPowerKw", Canonical.integer(request.targetPowerKw()),
+                "operateAt", Canonical.instant(request.operateAt()),
+                "planDate", request.planDate() == null
+                        ? Canonical.str("") : Canonical.date(request.planDate()),
+                "segmentIndex", request.segmentIndex() == null
+                        ? Canonical.str("") : Canonical.integer(request.segmentIndex()),
+                "planVersionNo", request.planVersionNo() == null
+                        ? Canonical.str("") : Canonical.integer(request.planVersionNo()),
+                "turbines", Canonical.list(turbineTokens));
+        return Canonical.sha256(canonical);
+    }
+
+    private StagedOrderReceiveResponse resolveStagedOrderIdempotent(
+            IdempotentRecord existing, String fingerprint) {
+        if (!existing.getFingerprint().equals(fingerprint)) {
+            throw new ApiConflictException("相同 requestId 的业务参数与首次请求不一致");
+        }
+        if (existing.getResponseBody() != null && !existing.getResponseBody().isBlank()) {
+            return fromJson(existing.getResponseBody(), StagedOrderReceiveResponse.class).asReplay();
+        }
+        throw new ApiConflictException("首次请求仍在处理中");
     }
 }

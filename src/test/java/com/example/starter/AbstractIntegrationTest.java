@@ -44,6 +44,10 @@ public abstract class AbstractIntegrationTest {
     }
 
     protected void resetDb() {
+        jdbc.update("DELETE FROM staged_minute_confirm");
+        jdbc.update("DELETE FROM staged_plan_step");
+        jdbc.update("DELETE FROM staged_plan_turbine");
+        jdbc.update("DELETE FROM staged_plan");
         jdbc.update("DELETE FROM late_report_event");
         jdbc.update("DELETE FROM alert_event");
         jdbc.update("DELETE FROM execution_report");

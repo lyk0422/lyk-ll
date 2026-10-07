@@ -5,7 +5,8 @@ import java.time.Instant;
 /**
  * 风电机组。
  * ratedPowerKw 装机容量（kW）；technicalMinKw 技术出力下限（kW，额定的 15%）；
- * availablePowerKw 最新可用出力（kW），随执行回报刷新。
+ * availablePowerKw 最新可用出力（kW），随执行回报刷新；
+ * status 可用状态（AVAILABLE/UNAVAILABLE），仅受控分段计划每分钟重查，旧入口不读取。
  */
 public class Turbine {
 
@@ -16,6 +17,7 @@ public class Turbine {
     private int technicalMinKw;
     private int availablePowerKw;
     private Instant updatedAt;
+    private String status;
 
     public Long getId() {
         return id;
@@ -71,5 +73,13 @@ public class Turbine {
 
     public void setUpdatedAt(Instant updatedAt) {
         this.updatedAt = updatedAt;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
     }
 }

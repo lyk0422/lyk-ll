@@ -260,6 +260,13 @@ public class DispatchRepository {
                 Timestamp.from(settledAt), orderId);
     }
 
+    /** 分段计划最后一分钟确认完成：指令置 COMPLETED（终态）并释放执行中标记。 */
+    public void markCompleted(long orderId) {
+        jdbc.update(
+                "UPDATE curtail_order SET status = 'COMPLETED', active_flag = NULL WHERE id = ?",
+                orderId);
+    }
+
     public void insertCycle(DispatchCycle cycle) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(connection -> {

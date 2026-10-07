@@ -32,6 +32,7 @@ public class TurbineRepository {
         t.setTechnicalMinKw(rs.getInt("technical_min_kw"));
         t.setAvailablePowerKw(rs.getInt("available_power_kw"));
         t.setUpdatedAt(rs.getTimestamp("updated_at").toInstant());
+        t.setStatus(rs.getString("status"));
         return t;
     };
 

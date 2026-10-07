@@ -146,3 +146,61 @@ ALTER TABLE curtail_order ADD COLUMN IF NOT EXISTS segment_index INT COMMENT '�
 -- base_available_kw 即参与出力 = min(实时可用, 核定计划)；超时重分摊仍引用原版本计划值，仅刷新实时值。
 ALTER TABLE allocation ADD COLUMN IF NOT EXISTS planned_power_kw INT COMMENT '该轮冻结的日前核定计划出力，单位 kW，NULL 表示未绑定计划的旧指令';
 ALTER TABLE allocation ADD COLUMN IF NOT EXISTS realtime_available_kw INT COMMENT '该轮时刻的机组实时可用出力，单位 kW，NULL 表示未绑定计划的旧指令';
+
+-- 机组可用状态列：受控分段计划每分钟事务内重查；任一机组 UNAVAILABLE 则该分钟不执行、计划暂停。
+ALTER TABLE wind_turbine ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'AVAILABLE'
+    COMMENT '机组可用状态：AVAILABLE/UNAVAILABLE；受控分段计划每分钟重查，旧入口不读取';
+
+-- 受控分段计划表：可选分段执行模式；每指令至多一份，旧未启用指令无此记录、行为不变。
+-- 版本从 1 起：调用方修改带 expectedVersion、成功加 1；超时重分配亦加 1 并重排守斜率剩余阶梯。
+CREATE TABLE IF NOT EXISTS staged_plan (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id         BIGINT NOT NULL COMMENT '所属限电指令 id（每指令至多一份分段计划）',
+    plan_version     INT NOT NULL COMMENT '计划版本，从 1 起，成功修改/超时重分配加 1',
+    status           VARCHAR(16) NOT NULL COMMENT '状态：EXECUTING/PAUSED/COMPLETED/CANCELED',
+    start_at         TIMESTAMP NOT NULL COMMENT '当前版本启动 UTC 时刻；回执分钟时刻=启动时刻+序号分钟',
+    current_minute   INT NOT NULL COMMENT '当前版本已确认分钟序号，0 表示尚未确认任何分钟',
+    duration_minutes INT NOT NULL COMMENT '当前版本期限分钟数（登记时取各参与机组期限最大值）',
+    created_at       TIMESTAMP NOT NULL COMMENT '创建时刻',
+    updated_at       TIMESTAMP NOT NULL COMMENT '最近状态/进度/版本变更时刻',
+    CONSTRAINT uk_staged_plan_order UNIQUE (order_id)
+);
+
+-- 分段计划参与机组表：冻结起始功率、最终目标与斜率；occupied_flag 仅占用中为 'Y'，
+-- 配合唯一索引保证每机组同一时刻至多一份执行中分段计划；完成/取消/指令作废时释放为 NULL。
+CREATE TABLE IF NOT EXISTS staged_plan_turbine (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    plan_id          BIGINT NOT NULL COMMENT '所属分段计划 id',
+    turbine_id       BIGINT NOT NULL COMMENT '机组 id',
+    start_power_kw   INT NOT NULL COMMENT '当前版本起始整数 kW 实际功率（登记值或重排时最新实际功率）',
+    target_power_kw  INT NOT NULL COMMENT '当前版本冻结的最终分摊目标，单位 kW',
+    ramp_kw_per_min  INT NOT NULL COMMENT '每分钟正整数升降上限，单位 kW',
+    deadline_minutes INT NOT NULL COMMENT '登记期限 1..15 分钟',
+    occupied_flag    CHAR(1) COMMENT '占用标记 Y；非占用为 NULL（唯一索引允许多个 NULL）',
+    CONSTRAINT uk_staged_plan_turbine UNIQUE (plan_id, turbine_id),
+    CONSTRAINT uk_staged_turbine_occupied UNIQUE (turbine_id, occupied_flag)
+);
+
+-- 阶梯明细表：每版本每分钟每机组一行冻结功率，每分钟向目标移动不超过升降上限、最后恰到目标；
+-- 历史版本阶梯保留可复算。
+CREATE TABLE IF NOT EXISTS staged_plan_step (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    plan_id      BIGINT NOT NULL COMMENT '所属分段计划 id',
+    plan_version INT NOT NULL COMMENT '所属计划版本',
+    minute_no    INT NOT NULL COMMENT '分钟序号，从 1 起',
+    turbine_id   BIGINT NOT NULL COMMENT '机组 id',
+    power_kw     INT NOT NULL COMMENT '该分钟冻结阶梯功率，单位 kW',
+    CONSTRAINT uk_staged_step UNIQUE (plan_id, plan_version, minute_no, turbine_id)
+);
+CREATE INDEX IF NOT EXISTS idx_staged_step_plan ON staged_plan_step(plan_id, plan_version, minute_no);
+
+-- 分钟确认表：整分钟一起确认后登记；缺一机组零更新（无任何记录与实际功率变更）。
+CREATE TABLE IF NOT EXISTS staged_minute_confirm (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    plan_id      BIGINT NOT NULL COMMENT '所属分段计划 id',
+    plan_version INT NOT NULL COMMENT '所属计划版本',
+    minute_no    INT NOT NULL COMMENT '确认的分钟序号',
+    request_id   VARCHAR(96) NOT NULL COMMENT '回执请求幂等键',
+    confirmed_at TIMESTAMP NOT NULL COMMENT '确认时刻（UTC 存储）',
+    CONSTRAINT uk_staged_confirm UNIQUE (plan_id, plan_version, minute_no)
+);
