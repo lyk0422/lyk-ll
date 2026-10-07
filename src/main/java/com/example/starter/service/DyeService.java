@@ -818,8 +818,14 @@ public class DyeService {
                     reference == null ? null : reference.get("id"), refDelta, diff, verdict.name(), now);
             int newRepairCount = ((Number) lot.get("repair_count")).intValue()
                     + (verdict == Verdict.REPAIR ? 1 : 0);
-            jdbc.update("UPDATE lot SET status = ?, repair_count = ?, updated_at = ? WHERE id = ?",
-                    nextStatus.name(), newRepairCount, now, lot.get("id"));
+            // 条件更新：与分缸竞争时只有一方成功——分缸先成则本更新命中 0 行，判色整单回滚。
+            int cas = jdbc.update("UPDATE lot SET status = ?, repair_count = ?, updated_at = ? "
+                    + "WHERE id = ? AND status = ?",
+                    nextStatus.name(), newRepairCount, now, lot.get("id"), status);
+            if (cas != 1) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "缸次 " + req.lotNo() + " 判色与分缸竞争：来源状态已变化，判定整单回滚");
+            }
 
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("requestId", req.requestId());
@@ -848,6 +854,10 @@ public class DyeService {
         String status = (String) lot.get("status");
         boolean replayed = LotStatus.ARCHIVED.name().equals(status);
         if (!replayed) {
+            if (LotStatus.SPLIT.name().equals(status)) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "缸次 " + lotNo + " 已分缸只读，仅可查谱系，不再归档");
+            }
             if (LotStatus.CREATED.name().equals(status) || LotStatus.FED.name().equals(status)
                     || LotStatus.REPAIRING.name().equals(status) || LotStatus.MERGED.name().equals(status)) {
                 throw new ApiException(HttpStatus.CONFLICT,

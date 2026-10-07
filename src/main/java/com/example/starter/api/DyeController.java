@@ -23,8 +23,10 @@ import com.example.starter.api.dto.RegisterBatchRequest;
 import com.example.starter.api.dto.ReviseBatchRequest;
 import com.example.starter.api.dto.ScheduleControlledRequest;
 import com.example.starter.api.dto.ScheduleLotRequest;
+import com.example.starter.api.dto.SplitLotRequest;
 import com.example.starter.service.BatchCompensationService;
 import com.example.starter.service.DyeService;
+import com.example.starter.service.LotSplitService;
 import com.example.starter.service.ServiceResult;
 
 /**
@@ -36,10 +38,13 @@ public class DyeController {
 
     private final DyeService dyeService;
     private final BatchCompensationService batchCompensationService;
+    private final LotSplitService lotSplitService;
 
-    public DyeController(DyeService dyeService, BatchCompensationService batchCompensationService) {
+    public DyeController(DyeService dyeService, BatchCompensationService batchCompensationService,
+                         LotSplitService lotSplitService) {
         this.dyeService = dyeService;
         this.batchCompensationService = batchCompensationService;
+        this.lotSplitService = lotSplitService;
     }
 
     /** 创建配方草稿（v1）。 */
@@ -115,6 +120,18 @@ public class DyeController {
     @PostMapping("/lots/merge")
     public ResponseEntity<Map<String, Object>> mergeLots(@Valid @RequestBody MergeLotsRequest req) {
         return toResponse(dyeService.mergeLots(req));
+    }
+
+    /** 分缸：已投料来源缸次拆成 2-4 个子缸（requestId 幂等 + expectedVersion=1，同源最多一次）。 */
+    @PostMapping("/lots/split")
+    public ResponseEntity<Map<String, Object>> splitLot(@Valid @RequestBody SplitLotRequest req) {
+        return toResponse(lotSplitService.splitLot(req));
+    }
+
+    /** 分缸谱系查询：来源缸次查子缸与分摊耗用，子缸查分缸来源与继承耗用。 */
+    @GetMapping("/lots/{lotNo}/split")
+    public ResponseEntity<Map<String, Object>> getSplitLineage(@PathVariable String lotNo) {
+        return toResponse(lotSplitService.getSplitLineage(lotNo));
     }
 
     /** 投料：称量偏差校验与库存扣减同事务原子完成（requestId 幂等）。 */

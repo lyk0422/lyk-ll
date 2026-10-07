@@ -42,6 +42,9 @@ public abstract class BaseIntegrationTest {
         jdbc.update("DELETE FROM lot_judgment");
         jdbc.update("DELETE FROM weighing");
         jdbc.update("DELETE FROM feeding");
+        jdbc.update("DELETE FROM lot_split_usage");
+        jdbc.update("DELETE FROM lot_split_child");
+        jdbc.update("DELETE FROM lot_split");
         jdbc.update("DELETE FROM compensation_item");
         jdbc.update("DELETE FROM compensation");
         jdbc.update("DELETE FROM lot");

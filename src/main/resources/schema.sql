@@ -93,7 +93,7 @@ COMMENT ON COLUMN lot.liquor_ratio IS '浴比L/kg,并缸须同配方同浴比';
 COMMENT ON COLUMN lot.fabric_weight_kg IS '本缸织物重量,单位kg';
 COMMENT ON COLUMN lot.merged_into_lot_id IS '并缸目标缸次;非空表示该缸已并入他缸,空为独立缸';
 COMMENT ON COLUMN lot.controlled IS '是否受控缸次;TRUE投料前须引用已发布配方版本并取得效价补偿批准,FALSE保持旧非受控投料语义';
-COMMENT ON COLUMN lot.status IS '状态:CREATED待投料/FED已投料/REPAIRING回修中/PASSED合格/DOWNGRADED降级/MERGED已并缸/ARCHIVED已归档终态';
+COMMENT ON COLUMN lot.status IS '状态:CREATED待投料/FED已投料/REPAIRING回修中/PASSED合格/DOWNGRADED降级/MERGED已并缸/SPLIT已分缸只读/ARCHIVED已归档终态';
 COMMENT ON COLUMN lot.repair_count IS '已回修次数,只允许回修一次';
 
 CREATE TABLE IF NOT EXISTS feeding (
@@ -218,6 +218,42 @@ COMMENT ON COLUMN compensation_item.factor_version IS '冻结的批次系数版�
 COMMENT ON COLUMN compensation_item.potency_factor IS '冻结时刻的效价系数快照,批次修订不影响已投料历史';
 COMMENT ON COLUMN compensation_item.base_target_g IS '补偿前原放大目标克重=浓度*浴比*布重,单位g';
 COMMENT ON COLUMN compensation_item.compensated_target_g IS '补偿目标克重=原目标/系数,十进制计算四舍五入到三位小数,单位g';
+
+-- 分缸：已投料缸次拆分为 2-4 个子缸；来源缸次只读，仅可查谱系
+CREATE TABLE IF NOT EXISTS lot_split (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id VARCHAR(64) NOT NULL UNIQUE,
+    source_lot_id BIGINT NOT NULL UNIQUE,
+    version INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+COMMENT ON COLUMN lot_split.request_id IS '分缸幂等键;同键同参重放首次响应,异参409,失败不占键';
+COMMENT ON COLUMN lot_split.source_lot_id IS '来源缸次主键;唯一约束保证两次拆同源最多一次成功';
+COMMENT ON COLUMN lot_split.version IS '分缸聚合乐观锁版本,新增从1开始,成功变更加1,旧版409';
+
+CREATE TABLE IF NOT EXISTS lot_split_child (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    split_id BIGINT NOT NULL,
+    child_lot_id BIGINT NOT NULL UNIQUE,
+    fabric_weight_kg DECIMAL(12, 3) NOT NULL
+);
+COMMENT ON COLUMN lot_split_child.split_id IS '所属分缸单';
+COMMENT ON COLUMN lot_split_child.child_lot_id IS '子缸缸次主键,一个缸次至多是一次分缸的子缸';
+COMMENT ON COLUMN lot_split_child.fabric_weight_kg IS '子缸织物重量,单位kg,最多三位小数;各子缸合计精确等于来源布重';
+
+CREATE TABLE IF NOT EXISTS lot_split_usage (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    split_id BIGINT NOT NULL,
+    child_lot_id BIGINT NOT NULL,
+    dye_code VARCHAR(64) NOT NULL,
+    allocated_g DECIMAL(14, 4) NOT NULL,
+    CONSTRAINT uk_split_usage UNIQUE (split_id, child_lot_id, dye_code)
+);
+COMMENT ON COLUMN lot_split_usage.split_id IS '所属分缸单';
+COMMENT ON COLUMN lot_split_usage.child_lot_id IS '子缸缸次主键';
+COMMENT ON COLUMN lot_split_usage.dye_code IS '染化料编码';
+COMMENT ON COLUMN lot_split_usage.allocated_g IS '子缸分摊实际耗用克重,单位g,精度0.0001g;按子缸布重比例向下截取,余量按子缸编号升序循环分配,同染料各子缸合计=来源实际耗用';
 
 -- 合成基础染化料库存（克）
 INSERT INTO dye (code, name, stock_g, created_at) VALUES
