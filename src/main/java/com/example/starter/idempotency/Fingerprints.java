@@ -30,6 +30,7 @@ public final class Fingerprints {
     public static final String CUSTOMS_REVOKE = "CUSTOMS_REVOKE";
     public static final String CUSTOMS_AMEND = "CUSTOMS_AMEND";
     public static final String SUBBATCH_WITHDRAW = "SUBBATCH_WITHDRAW";
+    public static final String COLDCHAIN_SUBMIT = "COLDCHAIN_SUBMIT";
 
     private Fingerprints() {
     }
@@ -127,6 +128,46 @@ public final class Fingerprints {
                 .number(request.expectedVersion())
                 .field(request.at() == null ? null : request.at().toString());
         return sha256(cb.build());
+    }
+
+    /**
+     * 冷链证据提交指纹：操作 + 批号 + 期望版本 + 提交精确时刻
+     * + 全片段（序号/起止精确时刻）+ 全读数（序号/精确时刻/温度）。
+     * 温度按去尾零明文归一化，保证 6.5 与 6.50 指纹一致。
+     */
+    public static String coldchainSubmit(String batchNo,
+                                         com.example.starter.dto.ColdChainSubmitRequest request) {
+        CanonicalBuilder cb = new CanonicalBuilder(COLDCHAIN_SUBMIT);
+        cb.field(request.requestId())
+                .field(batchNo == null ? null : batchNo.trim())
+                .number(request.expectedVersion())
+                .field(request.submittedAt() == null ? null : request.submittedAt().toString());
+        List<String> segments = request.segments() == null ? List.of() : request.segments().stream()
+                .map(Fingerprints::segment)
+                .toList();
+        cb.list(segments);
+        return sha256(cb.build());
+    }
+
+    private static String segment(com.example.starter.dto.SegmentInput segment) {
+        CanonicalBuilder cb = new CanonicalBuilder("SEG");
+        cb.field(segment.seq() == null ? null : segment.seq().toString())
+                .field(segment.start() == null ? null : segment.start().toString())
+                .field(segment.end() == null ? null : segment.end().toString());
+        List<String> readings = segment.readings() == null ? List.of() : segment.readings().stream()
+                .map(Fingerprints::reading)
+                .toList();
+        cb.list(readings);
+        return cb.build();
+    }
+
+    private static String reading(com.example.starter.dto.ReadingInput reading) {
+        CanonicalBuilder cb = new CanonicalBuilder("RDG");
+        cb.field(reading.seq() == null ? null : reading.seq().toString())
+                .field(reading.at() == null ? null : reading.at().toString())
+                .field(reading.tempCelsius() == null
+                        ? null : reading.tempCelsius().stripTrailingZeros().toPlainString());
+        return cb.build();
     }
 
     /**

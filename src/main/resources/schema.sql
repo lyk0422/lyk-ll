@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS enterprise_product_status (
 -- requestId 幂等记录
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id   VARCHAR(80)  NOT NULL COMMENT '业务请求幂等键 requestId',
-    operation    VARCHAR(32)  NOT NULL COMMENT '操作类型：DECLARE/CORRECT/ISSUE/CUSTOMS_REGISTER/CUSTOMS_BIND/CUSTOMS_REVOKE/CUSTOMS_AMEND/SUBBATCH_WITHDRAW',
+    operation    VARCHAR(32)  NOT NULL COMMENT '操作类型：DECLARE/CORRECT/ISSUE/CUSTOMS_REGISTER/CUSTOMS_BIND/CUSTOMS_REVOKE/CUSTOMS_AMEND/SUBBATCH_WITHDRAW/COLDCHAIN_SUBMIT',
     fingerprint  VARCHAR(96)  NOT NULL COMMENT '覆盖 requestId 与全部业务字段的 SHA-256 指纹',
     http_status  INT          NOT NULL COMMENT '首次请求返回的 HTTP 状态码',
     response_json CLOB        NOT NULL COMMENT '首次请求返回体 JSON，重放原样返回',
@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS idempotency_record (
 CREATE TABLE IF NOT EXISTS review_event (
     id         BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '事件主键',
     review_id  BIGINT       NOT NULL COMMENT '所属审查流程 ID',
-    event_type VARCHAR(48)  NOT NULL COMMENT '事件类型：DECLARED/CORRECTION_NOTICED/CORRECTION_ACCEPTED/WITHDRAWN/DOCUMENT_REVIEWED/INSPECTION_CHECKED/EVALUATION_PASSED/EVALUATION_FAILED/PUBLICITY_STARTED/OBJECTION_ACCEPTED/ISSUED_ARCHIVED/LATE_DOCUMENT/SUSPENSION_TRIGGERED',
+    event_type VARCHAR(48)  NOT NULL COMMENT '事件类型：DECLARED/CORRECTION_NOTICED/CORRECTION_ACCEPTED/WITHDRAWN/DOCUMENT_REVIEWED/INSPECTION_CHECKED/EVALUATION_PASSED/EVALUATION_FAILED/PUBLICITY_STARTED/OBJECTION_ACCEPTED/ISSUED_ARCHIVED/LATE_DOCUMENT/SUSPENSION_TRIGGERED/COLDCHAIN_EVIDENCE_SUBMITTED/COLDCHAIN_CERT_VERIFIED/COLDCHAIN_SUPPLEMENT_AFTER_ISSUE',
     payload    CLOB         NULL COMMENT '事件附加信息 JSON',
     event_at   TIMESTAMP    NOT NULL COMMENT '事件发生的业务时刻',
     created_at TIMESTAMP    NOT NULL COMMENT '事件落库时刻',
@@ -125,4 +125,64 @@ CREATE TABLE IF NOT EXISTS subbatch_binding (
     CONSTRAINT fk_binding_customs FOREIGN KEY (customs_declaration_id) REFERENCES customs_declaration (id),
     CONSTRAINT uk_binding_review UNIQUE (review_id),
     CONSTRAINT ck_binding_quantity_positive CHECK (declared_quantity > 0)
+);
+
+-- 冷链运输台账：受控包装子批的运输证据版本链（一子批一本台账，登记即启用冷链门禁）
+CREATE TABLE IF NOT EXISTS coldchain_ledger (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '冷链台账主键',
+    review_id        BIGINT      NOT NULL COMMENT '受控子批对应的审查流程 ID（一子批仅一本台账）',
+    batch_no         VARCHAR(64) NOT NULL COMMENT '子批评号（冗余，便于台账核对）',
+    status           VARCHAR(16) NOT NULL COMMENT '当前版本温证状态：QUALIFIED 合格冻结/UNQUALIFIED 存在缺口或越界',
+    version          INT         NOT NULL COMMENT '证据版本号：登记为 1，每次成功补录/更正加 1',
+    cert_version     INT         NULL COMMENT '最近一次合格冻结的证据版本；仅当等于 version 时温证有效，空值表示从未合格',
+    transport_start  TIMESTAMP   NOT NULL COMMENT '完整运输起点 UTC 精确时刻（首片段 start，随版本冻结）',
+    transport_end    TIMESTAMP   NOT NULL COMMENT '完整运输终点 UTC 精确时刻（末片段 end，随版本冻结）',
+    submitted_at     TIMESTAMP   NOT NULL COMMENT '当前版本证据提交精确时刻（UTC，读数不得晚于该时刻）',
+    qualified_at     TIMESTAMP   NULL COMMENT '当前版本合格冻结时刻，空值表示当前版本未合格',
+    created_at       TIMESTAMP   NOT NULL COMMENT '台账创建时刻',
+    updated_at       TIMESTAMP   NOT NULL COMMENT '最近变更时刻',
+    CONSTRAINT fk_coldchain_review FOREIGN KEY (review_id) REFERENCES batch_review (id),
+    CONSTRAINT uk_coldchain_review UNIQUE (review_id),
+    CONSTRAINT ck_coldchain_version_positive CHECK (version >= 1)
+);
+
+-- 冷链运输片段：按证据版本整体冻结，补录/更正写入新版本行，旧版本行不回改
+CREATE TABLE IF NOT EXISTS coldchain_segment (
+    id         BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '运输片段主键',
+    ledger_id  BIGINT      NOT NULL COMMENT '所属冷链台账 ID',
+    version    INT         NOT NULL COMMENT '所属证据版本号（与台账 version 对应）',
+    seq        INT         NOT NULL COMMENT '片段顺序号：从 1 起连续递增，相邻片段端点完全相接',
+    start_ts   TIMESTAMP   NOT NULL COMMENT '片段起点 UTC 精确时刻（半开区间 [start,end) 起点）',
+    end_ts     TIMESTAMP   NOT NULL COMMENT '片段终点 UTC 精确时刻（正长度，读数闭区间含该端点）',
+    created_at TIMESTAMP   NOT NULL COMMENT '该版本证据冻结时刻',
+    CONSTRAINT fk_segment_ledger FOREIGN KEY (ledger_id) REFERENCES coldchain_ledger (id),
+    CONSTRAINT uk_segment_version_seq UNIQUE (ledger_id, version, seq),
+    CONSTRAINT ck_segment_positive_length CHECK (start_ts < end_ts)
+);
+
+-- 冷链温度读数：随片段按版本冻结，缺样本只记缺口、绝不按零度补齐
+CREATE TABLE IF NOT EXISTS coldchain_reading (
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '温度读数主键',
+    segment_id   BIGINT       NOT NULL COMMENT '所属运输片段 ID',
+    seq          INT          NOT NULL COMMENT '读数顺序号：片内从 1 起连续递增',
+    at_ts        TIMESTAMP    NOT NULL COMMENT '读数精确时刻（UTC，须落在片段闭区间内且不晚于提交时刻）',
+    temp_celsius DECIMAL(6,2) NOT NULL COMMENT '合成温度读数（单位：摄氏度，合格闭区间 [2,8]，恰边界合格）',
+    created_at   TIMESTAMP    NOT NULL COMMENT '该版本证据冻结时刻',
+    CONSTRAINT fk_reading_segment FOREIGN KEY (segment_id) REFERENCES coldchain_segment (id),
+    CONSTRAINT uk_reading_segment_seq UNIQUE (segment_id, seq)
+);
+
+-- 冷链核验缺口/越界点明细：按证据版本记录，查询原样展示（缺口不是零度）
+CREATE TABLE IF NOT EXISTS coldchain_violation (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '核验缺口主键',
+    ledger_id   BIGINT       NOT NULL COMMENT '所属冷链台账 ID',
+    version     INT          NOT NULL COMMENT '所属证据版本号',
+    code        VARCHAR(48)  NOT NULL COMMENT '缺口代码：SEGMENT_SEQ_GAP/SEGMENT_NOT_POSITIVE/SEGMENT_NOT_CONTIGUOUS/READING_SEQ_GAP/READING_TIME_NOT_INCREASING/MISSING_START_SAMPLE/MISSING_END_SAMPLE/SAMPLE_INTERVAL_EXCEEDED/READING_OUT_OF_SEGMENT/READING_AFTER_SUBMISSION/TEMPERATURE_OUT_OF_RANGE',
+    segment_seq INT          NULL COMMENT '相关片段顺序号，空值表示与具体片段无关',
+    reading_seq INT          NULL COMMENT '相关读数顺序号，空值表示与具体读数无关',
+    at_ts       TIMESTAMP    NULL COMMENT '相关精确时刻（UTC），空值表示无对应时刻',
+    value_text  VARCHAR(48)  NULL COMMENT '相关数值（如越界温度、实际间隔秒数），空值表示无对应数值',
+    message     VARCHAR(256) NOT NULL COMMENT '缺口/越界的人读描述',
+    created_at  TIMESTAMP    NOT NULL COMMENT '记录创建时刻',
+    CONSTRAINT fk_violation_ledger FOREIGN KEY (ledger_id) REFERENCES coldchain_ledger (id)
 );

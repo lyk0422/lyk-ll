@@ -4,9 +4,12 @@ import com.example.starter.catalog.DocumentCatalog;
 import com.example.starter.catalog.InspectionCatalog;
 import com.example.starter.dto.DeclareRequest;
 import com.example.starter.dto.InspectionInput;
+import com.example.starter.dto.ReadingInput;
 import com.example.starter.dto.ReviewView;
+import com.example.starter.dto.SegmentInput;
 import com.example.starter.dto.ServiceResult;
 import com.example.starter.json.JsonSupport;
+import com.example.starter.service.ColdChainService;
 import com.example.starter.service.CustomsService;
 import com.example.starter.service.ReviewService;
 import com.example.starter.time.MutableBusinessClock;
@@ -16,6 +19,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -31,6 +36,8 @@ public abstract class AbstractIntegrationTest {
     @Autowired
     protected CustomsService customsService;
     @Autowired
+    protected ColdChainService coldChainService;
+    @Autowired
     protected MutableBusinessClock clock;
     @Autowired
     protected JdbcTemplate jdbc;
@@ -45,6 +52,11 @@ public abstract class AbstractIntegrationTest {
         jdbc.update("DELETE FROM inspection_record");
         // 子批绑定外键引用审查流程与通关单，须先于两者清理。
         jdbc.update("DELETE FROM subbatch_binding");
+        // 冷链缺口/读数/片段/台账逐级外键引用，须先于审查流程清理。
+        jdbc.update("DELETE FROM coldchain_violation");
+        jdbc.update("DELETE FROM coldchain_reading");
+        jdbc.update("DELETE FROM coldchain_segment");
+        jdbc.update("DELETE FROM coldchain_ledger");
         jdbc.update("DELETE FROM batch_review");
         jdbc.update("DELETE FROM customs_declaration");
         jdbc.update("DELETE FROM idempotency_record");
@@ -103,5 +115,32 @@ public abstract class AbstractIntegrationTest {
     protected void prepareIssueableImportBatch(String declareRequestId, String batchNo) {
         reviewService.declare(importDeclareRequest(declareRequestId, batchNo));
         reviewService.evaluate(batchNo);
+    }
+
+    // ============================ 冷链证据合成辅助 ============================
+
+    /**
+     * 构造单片段合格读数链：从 start 到 end 每 5 分钟一个样本（含两端），温度 5℃。
+     * 要求 (end-start) 为 5 分钟的整数倍。
+     */
+    protected static List<ReadingInput> readingsEvery5Min(Instant start, Instant end, String temp) {
+        List<ReadingInput> readings = new ArrayList<>();
+        int seq = 1;
+        for (Instant at = start; !at.isAfter(end); at = at.plusSeconds(300)) {
+            readings.add(new ReadingInput(seq++, at, new BigDecimal(temp)));
+        }
+        return readings;
+    }
+
+    /**
+     * 构造两片段完整合格的冷链证据：各 10 分钟、端点完全相接、5 分钟间隔采样、温度 5℃。
+     * 运输区间 [transportStart, transportStart+20min]。
+     */
+    protected static List<SegmentInput> qualifiedTwoSegments(Instant transportStart) {
+        Instant mid = transportStart.plusSeconds(600);
+        Instant end = transportStart.plusSeconds(1200);
+        return List.of(
+                new SegmentInput(1, transportStart, mid, readingsEvery5Min(transportStart, mid, "5.0")),
+                new SegmentInput(2, mid, end, readingsEvery5Min(mid, end, "5.0")));
     }
 }
