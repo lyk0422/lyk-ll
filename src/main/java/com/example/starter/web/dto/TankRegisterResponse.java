@@ -10,6 +10,7 @@ import java.math.BigDecimal;
  * @param tankId           储罐ID
  * @param stationCode      绑定门站编码
  * @param tankCode         储罐编码
+ * @param varietyNo        加臭剂品种号（不可变），未启用调拨为 null
  * @param capacityKg       罐容量 kg
  * @param safetyReserveKg  安全储备 kg
  * @param balanceKg        当前余额 kg
@@ -21,6 +22,7 @@ public record TankRegisterResponse(
         Long tankId,
         String stationCode,
         String tankCode,
+        String varietyNo,
         BigDecimal capacityKg,
         BigDecimal safetyReserveKg,
         BigDecimal balanceKg,
@@ -30,7 +32,7 @@ public record TankRegisterResponse(
 
     @Override
     public TankRegisterResponse withReplay(boolean replay) {
-        return new TankRegisterResponse(tankId, stationCode, tankCode, capacityKg, safetyReserveKg,
-                balanceKg, reservedKg, version, replay);
+        return new TankRegisterResponse(tankId, stationCode, tankCode, varietyNo, capacityKg,
+                safetyReserveKg, balanceKg, reservedKg, version, replay);
     }
 }

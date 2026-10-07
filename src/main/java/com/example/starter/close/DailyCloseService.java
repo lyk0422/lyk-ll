@@ -5,6 +5,9 @@ import com.example.starter.idempotent.ReplayResult;
 import com.example.starter.reading.OdorantReadingRepository;
 import com.example.starter.station.Station;
 import com.example.starter.station.StationRepository;
+import com.example.starter.tank.Tank;
+import com.example.starter.tank.TankLedgerRepository;
+import com.example.starter.tank.TankRepository;
 import com.example.starter.web.ResourceNotFoundException;
 import com.example.starter.web.dto.DailyCloseRequest;
 import com.example.starter.web.dto.DailyCloseResponse;
@@ -24,6 +27,8 @@ import java.time.LocalDate;
  *   <li>已封存（终态）：重复封存同参返回幂等成功，不重新计算、不改数据；
  *       同键异参 409（由幂等层保证）且不改阀门状态；</li>
  *   <li>MANUAL 状态下再次日结（不同 requestId、新数据）允许重新勾稽，达标后封存。</li>
+ *   <li>展示：响应附带当日调拨转入/转出 kg（由台账分录实时复算），
+ *       仅展示不改写 daily_close 封存行，旧日结快照保持不变。</li>
  * </ul>
  */
 @Service
@@ -35,15 +40,21 @@ public class DailyCloseService {
     private final StationRepository stationRepository;
     private final OdorantReadingRepository readingRepository;
     private final DailyCloseRepository dailyCloseRepository;
+    private final TankRepository tankRepository;
+    private final TankLedgerRepository tankLedgerRepository;
     private final IdempotencyService idempotencyService;
 
     public DailyCloseService(StationRepository stationRepository,
                              OdorantReadingRepository readingRepository,
                              DailyCloseRepository dailyCloseRepository,
+                             TankRepository tankRepository,
+                             TankLedgerRepository tankLedgerRepository,
                              IdempotencyService idempotencyService) {
         this.stationRepository = stationRepository;
         this.readingRepository = readingRepository;
         this.dailyCloseRepository = dailyCloseRepository;
+        this.tankRepository = tankRepository;
+        this.tankLedgerRepository = tankLedgerRepository;
         this.idempotencyService = idempotencyService;
     }
 
@@ -57,10 +68,28 @@ public class DailyCloseService {
         return retry.result();
     }
 
-    private DailyCloseResponse toResponse(DailyCloseRow row, boolean replay) {
+    private DailyCloseResponse toResponse(Station station, DailyCloseRow row, boolean replay) {
+        BigDecimal[] transfers = transferSums(station.id(), row.bizDate());
         return new DailyCloseResponse(row.bizDate(), row.status(), row.totalFlowM3(),
                 row.expectedOdorantMg(), row.reportedOdorantMg(), row.deviationPct(),
-                "SEALED".equals(row.status()), row.sealedAt(), replay);
+                "SEALED".equals(row.status()), row.sealedAt(), replay,
+                transfers[0], transfers[1]);
+    }
+
+    /**
+     * 当日调拨转入/转出 kg：由台账 TRANSFER_IN/TRANSFER_OUT 分录实时复算，
+     * 仅用于展示，不改写封存行；门站未绑定储罐时为 0。
+     */
+    private BigDecimal[] transferSums(Long stationId, LocalDate bizDate) {
+        Tank tank = tankRepository.findByStationId(stationId).orElse(null);
+        if (tank == null) {
+            return new BigDecimal[]{BigDecimal.ZERO, BigDecimal.ZERO};
+        }
+        BigDecimal in = tankLedgerRepository.sumBalanceDeltaByTypeAndBizAt(tank.id(),
+                "TRANSFER_IN", bizDate.atStartOfDay(), bizDate.plusDays(1).atStartOfDay());
+        BigDecimal out = tankLedgerRepository.sumBalanceDeltaByTypeAndBizAt(tank.id(),
+                "TRANSFER_OUT", bizDate.atStartOfDay(), bizDate.plusDays(1).atStartOfDay());
+        return new BigDecimal[]{in, out.negate()};
     }
 
     private DailyCloseResponse doClose(Station station, DailyCloseRequest request) {
@@ -69,7 +98,7 @@ public class DailyCloseService {
         DailyCloseRow existing = dailyCloseRepository.findForUpdate(station.id(), bizDate).orElse(null);
         if (existing != null && "SEALED".equals(existing.status())) {
             // 封存为终态：重复封存返回首次封存结果（新请求同参的重放由幂等层标记 replay）
-            return toResponse(existing, false);
+            return toResponse(station, existing, false);
         }
 
         BigDecimal totalFlow = readingRepository.sumFlowByDate(station.id(), bizDate);
@@ -99,7 +128,7 @@ public class DailyCloseService {
                 // 不同 requestId 并发日结同一日：唯一约束裁决，回查首个落库结果
                 DailyCloseRow winner = dailyCloseRepository.findForUpdate(station.id(), bizDate)
                         .orElseThrow();
-                return toResponse(winner, false);
+                return toResponse(station, winner, false);
             }
         } else {
             // MANUAL → 达标封存 / 仍超差保持转人工
@@ -108,6 +137,6 @@ public class DailyCloseService {
         }
 
         DailyCloseRow saved = dailyCloseRepository.findForUpdate(station.id(), bizDate).orElseThrow();
-        return toResponse(saved, false);
+        return toResponse(station, saved, false);
     }
 }

@@ -18,6 +18,8 @@ import java.time.LocalDateTime;
  * @param sealed            是否已封存（终态）
  * @param sealedAt          封存时刻
  * @param idempotentReplay  是否为同键同参重放
+ * @param transferInKg      当日调拨转入 kg（台账实时复算展示，不改旧封存快照）
+ * @param transferOutKg     当日调拨转出 kg（台账实时复算展示，不改旧封存快照）
  */
 public record DailyCloseResponse(
         LocalDate bizDate,
@@ -28,11 +30,25 @@ public record DailyCloseResponse(
         BigDecimal deviationPct,
         boolean sealed,
         LocalDateTime sealedAt,
-        boolean idempotentReplay) implements Replayable<DailyCloseResponse> {
+        boolean idempotentReplay,
+        BigDecimal transferInKg,
+        BigDecimal transferOutKg) implements Replayable<DailyCloseResponse> {
+
+    /**
+     * 兼容旧调用：无调拨转入/转出展示（按 0 处理）。
+     */
+    public DailyCloseResponse(LocalDate bizDate, String status, BigDecimal totalFlowM3,
+                              BigDecimal expectedOdorantMg, BigDecimal reportedOdorantMg,
+                              BigDecimal deviationPct, boolean sealed, LocalDateTime sealedAt,
+                              boolean idempotentReplay) {
+        this(bizDate, status, totalFlowM3, expectedOdorantMg, reportedOdorantMg, deviationPct,
+                sealed, sealedAt, idempotentReplay, BigDecimal.ZERO, BigDecimal.ZERO);
+    }
 
     @Override
     public DailyCloseResponse withReplay(boolean replay) {
-        return new DailyCloseResponse(bizDate, status, totalFlowM3, expectedOdorantMg, reportedOdorantMg,
-                deviationPct, sealed, sealedAt, replay);
+        return new DailyCloseResponse(bizDate, status, totalFlowM3, expectedOdorantMg,
+                reportedOdorantMg, deviationPct, sealed, sealedAt, replay,
+                transferInKg, transferOutKg);
     }
 }

@@ -164,10 +164,12 @@ CREATE TABLE IF NOT EXISTS tank (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     station_id BIGINT NOT NULL,
     tank_code VARCHAR(64) NOT NULL,
+    variety_no VARCHAR(64),
     capacity_kg DECIMAL(14,3) NOT NULL,
     safety_reserve_kg DECIMAL(14,3) NOT NULL,
     balance_kg DECIMAL(14,3) NOT NULL,
     reserved_kg DECIMAL(14,3) NOT NULL DEFAULT 0,
+    incoming_reserved_kg DECIMAL(14,3) NOT NULL DEFAULT 0,
     version INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uk_tank_code UNIQUE (tank_code),
@@ -175,10 +177,12 @@ CREATE TABLE IF NOT EXISTS tank (
 );
 COMMENT ON COLUMN tank.station_id IS '绑定门站ID，一个门站至多绑定一个储罐；未绑定储罐的旧门站行为不变';
 COMMENT ON COLUMN tank.tank_code IS '储罐唯一编码';
+COMMENT ON COLUMN tank.variety_no IS '加臭剂品种号，登记后不可变；NULL表示未启用跨罐调拨，调拨两罐须品种号相同';
 COMMENT ON COLUMN tank.capacity_kg IS '罐容量kg，三位小数';
 COMMENT ON COLUMN tank.safety_reserve_kg IS '安全储备kg，三位小数，0≤安全储备<容量；预占后可用量不得低于该值，恰等允许';
-COMMENT ON COLUMN tank.balance_kg IS '当前余额kg，三位小数；余额=期初+补液入账-实际消耗（守恒）';
-COMMENT ON COLUMN tank.reserved_kg IS '预占中数量kg=尚未执行/取消的加注计划预占合计';
+COMMENT ON COLUMN tank.balance_kg IS '当前余额kg，三位小数；余额=期初+补液入账+调拨入-调拨出-实际消耗（守恒）';
+COMMENT ON COLUMN tank.reserved_kg IS '预占中数量kg=尚未执行/取消的加注计划与调拨出预占合计';
+COMMENT ON COLUMN tank.incoming_reserved_kg IS '接收预占kg=未入账调拨入预占合计；余额+接收预占不得超容量，不计入可用量';
 COMMENT ON COLUMN tank.version IS '乐观锁版本，从1开始，每次成功变更加1，写操作须携带expectedVersion';
 
 CREATE TABLE IF NOT EXISTS tank_plan (
@@ -239,28 +243,68 @@ COMMENT ON COLUMN tank_refill_event.deficit_qty_kg IS '触发时缺口kg=所需�
 COMMENT ON COLUMN tank_refill_event.status IS 'OPEN待补液/CLOSED补液入账后已可满足；仅关闭事件，不自动重发旧加注命令';
 COMMENT ON COLUMN tank_refill_event.closed_by_refill_id IS '关闭该事件的补液单ID，未关闭为NULL';
 
+CREATE TABLE IF NOT EXISTS tank_transfer (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id VARCHAR(64) NOT NULL,
+    source_tank_id BIGINT NOT NULL,
+    target_tank_id BIGINT NOT NULL,
+    variety_no VARCHAR(64) NOT NULL,
+    quantity_kg DECIMAL(14,3) NOT NULL,
+    transport_batch_no VARCHAR(64) NOT NULL,
+    first_operator VARCHAR(64) NOT NULL,
+    second_operator VARCHAR(64) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    version INT NOT NULL DEFAULT 1,
+    actual_qty_kg DECIMAL(14,3),
+    credential_no VARCHAR(64),
+    applied_at TIMESTAMP NOT NULL,
+    executed_at TIMESTAMP,
+    cancelled_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_transfer_batch UNIQUE (transport_batch_no)
+);
+COMMENT ON COLUMN tank_transfer.request_id IS '申请调拨的幂等键';
+COMMENT ON COLUMN tank_transfer.source_tank_id IS '源罐ID，申请时预占其可用量，执行时扣余额';
+COMMENT ON COLUMN tank_transfer.target_tank_id IS '目标罐ID，申请时预占其剩余容量，执行时加余额；须与源罐不同';
+COMMENT ON COLUMN tank_transfer.variety_no IS '调拨品种号，须与两罐登记的不可变品种号一致';
+COMMENT ON COLUMN tank_transfer.quantity_kg IS '申请调拨量kg，正数至多三位小数，超精度拒绝而非舍入';
+COMMENT ON COLUMN tank_transfer.transport_batch_no IS '全局唯一运输批号，不能以另一个requestId再次入账';
+COMMENT ON COLUMN tank_transfer.first_operator IS '第一名交接人工号';
+COMMENT ON COLUMN tank_transfer.second_operator IS '第二名交接人工号，须与第一人不同';
+COMMENT ON COLUMN tank_transfer.status IS 'RESERVED已双侧预占/EXECUTED已执行/CANCELLED已撤销';
+COMMENT ON COLUMN tank_transfer.version IS '调拨单乐观锁版本，从1开始，确认/撤销成功加1，须携带expectedVersion';
+COMMENT ON COLUMN tank_transfer.actual_qty_kg IS '执行确认实际量kg，须等于申请量；未执行为NULL';
+COMMENT ON COLUMN tank_transfer.credential_no IS '执行确认的合成凭据号，未执行为NULL';
+COMMENT ON COLUMN tank_transfer.applied_at IS '申请时刻（UTC）';
+COMMENT ON COLUMN tank_transfer.executed_at IS '执行时刻（UTC），未执行为NULL';
+COMMENT ON COLUMN tank_transfer.cancelled_at IS '撤销时刻（UTC），未撤销为NULL';
+
 CREATE TABLE IF NOT EXISTS tank_ledger (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     tank_id BIGINT NOT NULL,
-    entry_type VARCHAR(16) NOT NULL,
+    entry_type VARCHAR(32) NOT NULL,
     balance_delta_kg DECIMAL(14,3) NOT NULL,
     reserved_delta_kg DECIMAL(14,3) NOT NULL,
+    incoming_reserved_delta_kg DECIMAL(14,3) NOT NULL DEFAULT 0,
     balance_after_kg DECIMAL(14,3) NOT NULL,
     reserved_after_kg DECIMAL(14,3) NOT NULL,
+    incoming_reserved_after_kg DECIMAL(14,3) NOT NULL DEFAULT 0,
     ref_type VARCHAR(16) NOT NULL,
     ref_id BIGINT,
     request_id VARCHAR(64) NOT NULL,
     biz_at TIMESTAMP NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-COMMENT ON COLUMN tank_ledger.entry_type IS 'REGISTER登记/RESERVE预占/RELEASE释放/CONSUME消耗/REFILL补液';
+COMMENT ON COLUMN tank_ledger.entry_type IS 'REGISTER登记/RESERVE预占/RELEASE释放/CONSUME消耗/REFILL补液/TRANSFER_RESERVE调拨出预占/TRANSFER_IN_RESERVE调拨入预占/TRANSFER_OUT调拨出执行/TRANSFER_IN调拨入执行/TRANSFER_RELEASE调拨出撤销/TRANSFER_IN_RELEASE调拨入撤销';
 COMMENT ON COLUMN tank_ledger.balance_delta_kg IS '余额变动kg，正增负减；罐余额=全部余额变动之和（守恒勾稽）';
 COMMENT ON COLUMN tank_ledger.reserved_delta_kg IS '预占变动kg，正增负减；预占=全部预占变动之和（守恒勾稽）';
+COMMENT ON COLUMN tank_ledger.incoming_reserved_delta_kg IS '接收预占变动kg，正增负减；接收预占=全部接收预占变动之和（守恒勾稽）';
 COMMENT ON COLUMN tank_ledger.balance_after_kg IS '入账后余额kg快照';
 COMMENT ON COLUMN tank_ledger.reserved_after_kg IS '入账后预占kg快照';
-COMMENT ON COLUMN tank_ledger.ref_type IS '来源单据：REGISTER/PLAN/RECEIPT/CANCEL/REFILL/PRESSURE';
-COMMENT ON COLUMN tank_ledger.ref_id IS '来源单据ID（计划/补液单/联动任务），登记为NULL';
-COMMENT ON COLUMN tank_ledger.biz_at IS '业务时刻（Asia/Shanghai）；日结只冻当日台账，后续补液不改旧勾稽';
+COMMENT ON COLUMN tank_ledger.incoming_reserved_after_kg IS '入账后接收预占kg快照';
+COMMENT ON COLUMN tank_ledger.ref_type IS '来源单据：REGISTER/PLAN/RECEIPT/CANCEL/REFILL/PRESSURE/TRANSFER';
+COMMENT ON COLUMN tank_ledger.ref_id IS '来源单据ID（计划/补液单/联动任务/调拨单），登记为NULL；调拨双侧分录共用同一调拨单ID';
+COMMENT ON COLUMN tank_ledger.biz_at IS '业务时刻（Asia/Shanghai；调拨分录为UTC）；日结只冻当日台账，后续补液不改旧勾稽';
 
 CREATE TABLE IF NOT EXISTS idempotent_record (
     request_id VARCHAR(64) PRIMARY KEY,

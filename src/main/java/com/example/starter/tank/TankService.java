@@ -101,7 +101,10 @@ public class TankService {
         }
         Long tankId;
         try {
-            tankId = tankRepository.insert(station.id(), request.tankCode(), capacity, safety, balance);
+            String varietyNo = request.varietyNo() == null || request.varietyNo().isBlank()
+                    ? null : request.varietyNo();
+            tankId = tankRepository.insert(station.id(), request.tankCode(), varietyNo,
+                    capacity, safety, balance);
         } catch (DuplicateKeyException duplicate) {
             throw new BusinessRejectedException(
                     "tank code already used or station already bound: " + request.tankCode());
@@ -110,8 +113,8 @@ public class TankService {
                 "REGISTER", null, request.requestId(), request.registeredAt());
         Tank tank = tankRepository.findById(tankId).orElseThrow();
         return new TankRegisterResponse(tank.id(), station.stationCode(), tank.tankCode(),
-                tank.capacityKg(), tank.safetyReserveKg(), tank.balanceKg(), tank.reservedKg(),
-                tank.version(), false);
+                tank.varietyNo(), tank.capacityKg(), tank.safetyReserveKg(), tank.balanceKg(),
+                tank.reservedKg(), tank.version(), false);
     }
 
     // ---------------------------------------------------------------- 加注计划
@@ -295,11 +298,13 @@ public class TankService {
         }
 
         BigDecimal balanceAfter = tank.balanceKg().add(quantity);
-        // 加入后不超容量，恰等容量允许
-        if (balanceAfter.compareTo(tank.capacityKg()) > 0) {
+        // 加入后不超容量（恰等允许）；已留给调拨的接收预占空间补液不得占用
+        BigDecimal occupiedAfter = balanceAfter.add(tank.incomingReservedKg());
+        if (occupiedAfter.compareTo(tank.capacityKg()) > 0) {
             throw new BusinessRejectedException(
-                    "refill would exceed tank capacity: " + balanceAfter.toPlainString()
-                            + " > " + tank.capacityKg().toPlainString());
+                    "refill would exceed tank capacity: " + occupiedAfter.toPlainString()
+                            + " (balance + refill + incoming reserved) > "
+                            + tank.capacityKg().toPlainString());
         }
 
         Long refillId;
@@ -366,9 +371,9 @@ public class TankService {
         Tank tank = tankRepository.findByCode(tankCode)
                 .orElseThrow(() -> new ResourceNotFoundException("tank not found: " + tankCode));
         Station station = stationRepository.findById(tank.stationId()).orElseThrow();
-        return new TankView(tank.id(), station.stationCode(), tank.tankCode(), tank.capacityKg(),
-                tank.safetyReserveKg(), tank.balanceKg(), tank.reservedKg(), tank.availableKg(),
-                tank.version());
+        return new TankView(tank.id(), station.stationCode(), tank.tankCode(), tank.varietyNo(),
+                tank.capacityKg(), tank.safetyReserveKg(), tank.balanceKg(), tank.reservedKg(),
+                tank.incomingReservedKg(), tank.availableKg(), tank.version());
     }
 
     /**
@@ -414,11 +419,12 @@ public class TankService {
 
     /**
      * 余额/预占变更并递增版本（成功变更加 1）；行锁内版本条件更新必中，否则为并发缺陷。
+     * 接收预占由调拨服务维护，此处原样保留。
      */
     private long bumpVersion(Tank tank, BigDecimal balanceAfter, BigDecimal reservedAfter) {
         long newVersion = tank.version() + 1;
         int updated = tankRepository.updateBalanceReservedVersion(tank.id(), balanceAfter,
-                reservedAfter, newVersion, tank.version());
+                reservedAfter, tank.incomingReservedKg(), newVersion, tank.version());
         if (updated != 1) {
             throw new VersionConflictException("tank " + tank.tankCode()
                     + " concurrent modification detected");

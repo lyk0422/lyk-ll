@@ -16,6 +16,7 @@ public class TestTableCleaner {
     }
 
     public void clean() {
+        jdbc.update("DELETE FROM tank_transfer");
         jdbc.update("DELETE FROM tank_ledger");
         jdbc.update("DELETE FROM tank_refill_event");
         jdbc.update("DELETE FROM tank_refill");
