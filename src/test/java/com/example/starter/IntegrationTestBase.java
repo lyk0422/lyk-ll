@@ -34,6 +34,10 @@ public abstract class IntegrationTestBase {
 
     @BeforeEach
     void resetDatabase() {
+        jdbc.update("DELETE FROM coupled_adjustment_item");
+        jdbc.update("DELETE FROM coupled_adjustment");
+        jdbc.update("DELETE FROM adjustment_group_member");
+        jdbc.update("DELETE FROM adjustment_group");
         jdbc.update("DELETE FROM unseal_quota_usage");
         jdbc.update("DELETE FROM unseal_order");
         jdbc.update("DELETE FROM valve_seal");
@@ -46,6 +50,10 @@ public abstract class IntegrationTestBase {
         jdbc.update("DELETE FROM heating_unit");
         jdbc.update("DELETE FROM heat_station");
         jdbc.update("ALTER TABLE adjustment_task ALTER COLUMN id RESTART WITH 1");
+        jdbc.update("ALTER TABLE adjustment_group ALTER COLUMN id RESTART WITH 1");
+        jdbc.update("ALTER TABLE adjustment_group_member ALTER COLUMN id RESTART WITH 1");
+        jdbc.update("ALTER TABLE coupled_adjustment ALTER COLUMN id RESTART WITH 1");
+        jdbc.update("ALTER TABLE coupled_adjustment_item ALTER COLUMN id RESTART WITH 1");
         jdbc.update("ALTER TABLE valve_opening_version ALTER COLUMN id RESTART WITH 1");
         jdbc.update("ALTER TABLE assessment ALTER COLUMN id RESTART WITH 1");
         jdbc.update("ALTER TABLE valve_seal ALTER COLUMN id RESTART WITH 1");
