@@ -57,6 +57,13 @@ public class TransitionRollRepository {
         return list.stream().findFirst();
     }
 
+    /** 行锁读取纸卷：与复议改判的纸卷更新互斥，保证回收登记与改判只形成一个一致次序。 */
+    public Optional<TransitionRoll> findByRollNoForUpdate(String rollNo) {
+        List<TransitionRoll> list = jdbc.query(
+                "SELECT * FROM transition_roll WHERE roll_no = ? FOR UPDATE", MAPPER, rollNo);
+        return list.stream().findFirst();
+    }
+
     public TransitionRoll getByRollNo(String rollNo) {
         return findByRollNo(rollNo).orElseThrow(() ->
                 new IllegalArgumentException("过渡纸卷不存在: " + rollNo));

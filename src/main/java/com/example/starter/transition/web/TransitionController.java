@@ -8,13 +8,19 @@ import com.example.starter.transition.dto.BlendRecomputeView;
 import com.example.starter.transition.dto.BlendVersionView;
 import com.example.starter.transition.dto.DisposeRollsRequest;
 import com.example.starter.transition.dto.ExecuteOrderRequest;
+import com.example.starter.transition.dto.FeedRequest;
+import com.example.starter.transition.dto.FeedView;
 import com.example.starter.transition.dto.IdempotentResult;
 import com.example.starter.transition.dto.InspectionRequest;
 import com.example.starter.transition.dto.OrderView;
+import com.example.starter.transition.dto.RecycleQuotaView;
+import com.example.starter.transition.dto.ReduceRecycleQuotaRequest;
 import com.example.starter.transition.dto.ReexamRequest;
+import com.example.starter.transition.dto.RegisterRecycleQuotaRequest;
 import com.example.starter.transition.dto.ResumeExecutionRequest;
 import com.example.starter.transition.dto.RollView;
 import com.example.starter.transition.dto.TransitionRecomputeView;
+import com.example.starter.transition.service.RecycleService;
 import com.example.starter.transition.service.TransitionService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -36,9 +42,11 @@ import java.util.List;
 public class TransitionController {
 
     private final TransitionService service;
+    private final RecycleService recycleService;
 
-    public TransitionController(TransitionService service) {
+    public TransitionController(TransitionService service, RecycleService recycleService) {
         this.service = service;
+        this.recycleService = recycleService;
     }
 
     @PostMapping("/orders")
@@ -128,5 +136,30 @@ public class TransitionController {
     @GetMapping("/orders/{orderNo}/blend-recompute")
     public BlendRecomputeView recomputeBlend(@PathVariable String orderNo) {
         return service.recomputeBlend(orderNo);
+    }
+
+    @PostMapping("/recycle-quotas")
+    public ResponseEntity<IdempotentResult<RecycleQuotaView>> registerQuota(
+            @Valid @RequestBody RegisterRecycleQuotaRequest request) {
+        IdempotentResult<RecycleQuotaView> result = recycleService.registerQuota(request);
+        return ResponseEntity.status(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED).body(result);
+    }
+
+    @PostMapping("/recycle-quotas/{rollNo}/reduce")
+    public IdempotentResult<RecycleQuotaView> reduceQuota(@PathVariable String rollNo,
+                                                          @Valid @RequestBody ReduceRecycleQuotaRequest request) {
+        return recycleService.reduceQuota(rollNo, request);
+    }
+
+    @GetMapping("/recycle-quotas/{rollNo}")
+    public RecycleQuotaView getQuota(@PathVariable String rollNo) {
+        return recycleService.getQuota(rollNo);
+    }
+
+    @PostMapping("/feeds")
+    public ResponseEntity<IdempotentResult<FeedView>> submitFeed(
+            @Valid @RequestBody FeedRequest request) {
+        IdempotentResult<FeedView> result = recycleService.submitFeed(request);
+        return ResponseEntity.status(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED).body(result);
     }
 }

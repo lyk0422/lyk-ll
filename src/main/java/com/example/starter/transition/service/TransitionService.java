@@ -22,6 +22,7 @@ import com.example.starter.transition.model.BlendRatioVersion;
 import com.example.starter.transition.model.BlendReading;
 import com.example.starter.transition.model.Grade;
 import com.example.starter.transition.model.IdempotentRequest;
+import com.example.starter.transition.model.RecycleQuota;
 import com.example.starter.transition.model.RollInspection;
 import com.example.starter.transition.model.TransitionOrder;
 import com.example.starter.transition.model.TransitionRoll;
@@ -30,29 +31,26 @@ import com.example.starter.transition.repo.BlendRatioVersionRepository;
 import com.example.starter.transition.repo.BlendReadingRepository;
 import com.example.starter.transition.repo.CleaningWindowRepository;
 import com.example.starter.transition.repo.GradeRepository;
-import com.example.starter.transition.repo.IdempotentRequestRepository;
 import com.example.starter.transition.repo.LateEventRepository;
 import com.example.starter.transition.repo.MachineSlotRepository;
+import com.example.starter.transition.repo.RecycleQuotaRepository;
 import com.example.starter.transition.repo.RollInspectionRepository;
 import com.example.starter.transition.repo.TransitionOrderRepository;
 import com.example.starter.transition.repo.TransitionRollRepository;
 import com.example.starter.transition.repo.VerdictEventRepository;
 import com.example.starter.transition.support.FingerprintUtil;
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.Optional;
 
 /**
  * 造纸机改品种过渡料控制服务。
@@ -87,12 +85,12 @@ public class TransitionService {
     private final TransitionRollRepository rollRepository;
     private final RollInspectionRepository inspectionRepository;
     private final VerdictEventRepository verdictEventRepository;
-    private final IdempotentRequestRepository idempotentRequestRepository;
     private final LateEventRepository lateEventRepository;
     private final BlendRatioVersionRepository blendRatioVersionRepository;
     private final BlendReadingRepository blendReadingRepository;
     private final BlendControlEventRepository blendControlEventRepository;
-    private final ObjectMapper objectMapper;
+    private final RecycleQuotaRepository recycleQuotaRepository;
+    private final IdempotencySupport idempotency;
     private final Clock clock;
 
     public TransitionService(GradeRepository gradeRepository,
@@ -102,12 +100,12 @@ public class TransitionService {
                              TransitionRollRepository rollRepository,
                              RollInspectionRepository inspectionRepository,
                              VerdictEventRepository verdictEventRepository,
-                             IdempotentRequestRepository idempotentRequestRepository,
                              LateEventRepository lateEventRepository,
                              BlendRatioVersionRepository blendRatioVersionRepository,
                              BlendReadingRepository blendReadingRepository,
                              BlendControlEventRepository blendControlEventRepository,
-                             ObjectMapper objectMapper,
+                             RecycleQuotaRepository recycleQuotaRepository,
+                             IdempotencySupport idempotency,
                              Clock clock) {
         this.gradeRepository = gradeRepository;
         this.orderRepository = orderRepository;
@@ -116,12 +114,12 @@ public class TransitionService {
         this.rollRepository = rollRepository;
         this.inspectionRepository = inspectionRepository;
         this.verdictEventRepository = verdictEventRepository;
-        this.idempotentRequestRepository = idempotentRequestRepository;
         this.lateEventRepository = lateEventRepository;
         this.blendRatioVersionRepository = blendRatioVersionRepository;
         this.blendReadingRepository = blendReadingRepository;
         this.blendControlEventRepository = blendControlEventRepository;
-        this.objectMapper = objectMapper;
+        this.recycleQuotaRepository = recycleQuotaRepository;
+        this.idempotency = idempotency;
         this.clock = clock;
     }
 
@@ -129,9 +127,9 @@ public class TransitionService {
     @Transactional
     public IdempotentResult<OrderView> apply(ApplyOrderRequest request) {
         String fingerprint = FingerprintUtil.sha256(request.requestId(), request);
-        IdempotentRequest existing = lookupIdempotent(request.requestId(), BIZ_APPLY, fingerprint);
+        IdempotentRequest existing = idempotency.begin(request.requestId(), BIZ_APPLY, fingerprint);
         if (existing != null) {
-            return replay(existing, new TypeReference<OrderView>() {
+            return idempotency.replay(existing, new TypeReference<OrderView>() {
             });
         }
 
@@ -183,7 +181,7 @@ public class TransitionService {
             order.setCurrentBlendVersion(1);
         }
 
-        registerIdempotent(request.requestId(), BIZ_APPLY, fingerprint, orderNo, toView(order));
+        idempotency.complete(request.requestId(), orderNo, toView(order));
         return new IdempotentResult<>(request.requestId(), false, toView(order));
     }
 
@@ -331,9 +329,9 @@ public class TransitionService {
     @Transactional
     public IdempotentResult<RollView> submitInspection(InspectionRequest request) {
         String fingerprint = FingerprintUtil.sha256(request.requestId(), request);
-        IdempotentRequest existing = lookupIdempotent(request.requestId(), BIZ_INSPECTION, fingerprint);
+        IdempotentRequest existing = idempotency.begin(request.requestId(), BIZ_INSPECTION, fingerprint);
         if (existing != null) {
-            return replay(existing, new TypeReference<RollView>() {
+            return idempotency.replay(existing, new TypeReference<RollView>() {
             });
         }
 
@@ -343,10 +341,9 @@ public class TransitionService {
         // 归档终态后迟到：只记迟到事件，不改任何判定与入库状态；重放不重复登记事件。
         if (TransitionStatus.ARCHIVED.equals(order.getStatus())) {
             lateEventRepository.insert(order.getOrderNo(), roll.getRollNo(), "LATE_INSPECTION",
-                    writeJson(request), now());
+                    idempotency.writeJson(request), now());
             RollView view = toRollView(roll);
-            registerIdempotent(request.requestId(), BIZ_INSPECTION, fingerprint,
-                    roll.getRollNo(), view);
+            idempotency.complete(request.requestId(), roll.getRollNo(), view);
             return new IdempotentResult<>(request.requestId(), false, view);
         }
 
@@ -370,8 +367,7 @@ public class TransitionService {
         rollRepository.updateInitialEligibility(roll.getRollNo(), meets);
 
         TransitionRoll refreshed = rollRepository.getByRollNo(roll.getRollNo());
-        registerIdempotent(request.requestId(), BIZ_INSPECTION, fingerprint,
-                roll.getRollNo(), toRollView(refreshed));
+        idempotency.complete(request.requestId(), roll.getRollNo(), toRollView(refreshed));
         return new IdempotentResult<>(request.requestId(), false, toRollView(refreshed));
     }
 
@@ -379,9 +375,9 @@ public class TransitionService {
     @Transactional
     public IdempotentResult<RollView> submitReexam(ReexamRequest request) {
         String fingerprint = FingerprintUtil.sha256(request.requestId(), request);
-        IdempotentRequest existing = lookupIdempotent(request.requestId(), BIZ_REEXAM, fingerprint);
+        IdempotentRequest existing = idempotency.begin(request.requestId(), BIZ_REEXAM, fingerprint);
         if (existing != null) {
-            return replay(existing, new TypeReference<RollView>() {
+            return idempotency.replay(existing, new TypeReference<RollView>() {
             });
         }
 
@@ -391,10 +387,9 @@ public class TransitionService {
         // 归档终态后迟到的复议：只记迟到事件，终态不变；重放不重复登记事件。
         if (TransitionStatus.ARCHIVED.equals(order.getStatus())) {
             lateEventRepository.insert(order.getOrderNo(), roll.getRollNo(), "LATE_REEXAM",
-                    writeJson(request), now());
+                    idempotency.writeJson(request), now());
             RollView view = toRollView(roll);
-            registerIdempotent(request.requestId(), BIZ_REEXAM, fingerprint,
-                    roll.getRollNo(), view);
+            idempotency.complete(request.requestId(), roll.getRollNo(), view);
             return new IdempotentResult<>(request.requestId(), false, view);
         }
 
@@ -433,6 +428,9 @@ public class TransitionService {
             }
             verdictEventRepository.insert(roll.getRollNo(), "REEXAM_UPGRADED",
                     "DOWNGRADED", "UPGRADED", request.requestId(), eventTime);
+            // 改判正品：未消费回收额度同步失效（同事务），已消费凭据保留。
+            recycleQuotaRepository.invalidateOnUpgrade(roll.getRollNo(),
+                    RecycleQuota.REASON_REEXAM_UPGRADED, eventTime);
         } else {
             int updated = rollRepository.applyReexamReject(roll.getRollNo());
             if (updated == 0) {
@@ -443,8 +441,7 @@ public class TransitionService {
         }
 
         TransitionRoll refreshed = rollRepository.getByRollNo(roll.getRollNo());
-        registerIdempotent(request.requestId(), BIZ_REEXAM, fingerprint,
-                roll.getRollNo(), toRollView(refreshed));
+        idempotency.complete(request.requestId(), roll.getRollNo(), toRollView(refreshed));
         return new IdempotentResult<>(request.requestId(), false, toRollView(refreshed));
     }
 
@@ -479,9 +476,9 @@ public class TransitionService {
     public IdempotentResult<BlendVersionView> adjustBlendRatio(String orderNo,
                                                                AdjustBlendRatioRequest request) {
         String fingerprint = FingerprintUtil.sha256(request.requestId(), request);
-        IdempotentRequest existing = lookupIdempotent(request.requestId(), BIZ_ADJUST_BLEND, fingerprint);
+        IdempotentRequest existing = idempotency.begin(request.requestId(), BIZ_ADJUST_BLEND, fingerprint);
         if (existing != null) {
-            return replay(existing, new TypeReference<BlendVersionView>() {
+            return idempotency.replay(existing, new TypeReference<BlendVersionView>() {
             });
         }
 
@@ -511,7 +508,7 @@ public class TransitionService {
         }
 
         BlendVersionView view = toVersionView(version);
-        registerIdempotent(request.requestId(), BIZ_ADJUST_BLEND, fingerprint, orderNo, view);
+        idempotency.complete(request.requestId(), orderNo, view);
         return new IdempotentResult<>(request.requestId(), false, view);
     }
 
@@ -523,9 +520,9 @@ public class TransitionService {
     @Transactional
     public IdempotentResult<BlendReadingView> submitBlendReading(BlendReadingRequest request) {
         String fingerprint = FingerprintUtil.sha256(request.requestId(), request);
-        IdempotentRequest existing = lookupIdempotent(request.requestId(), BIZ_BLEND_READING, fingerprint);
+        IdempotentRequest existing = idempotency.begin(request.requestId(), BIZ_BLEND_READING, fingerprint);
         if (existing != null) {
-            return replay(existing, new TypeReference<BlendReadingView>() {
+            return idempotency.replay(existing, new TypeReference<BlendReadingView>() {
             });
         }
 
@@ -572,8 +569,7 @@ public class TransitionService {
         }
 
         BlendReadingView view = toReadingView(reading);
-        registerIdempotent(request.requestId(), BIZ_BLEND_READING, fingerprint,
-                request.orderNo(), view);
+        idempotency.complete(request.requestId(), request.orderNo(), view);
         return new IdempotentResult<>(request.requestId(), false, view);
     }
 
@@ -581,9 +577,9 @@ public class TransitionService {
     @Transactional
     public IdempotentResult<OrderView> resumeExecution(String orderNo, ResumeExecutionRequest request) {
         String fingerprint = FingerprintUtil.sha256(request.requestId(), request);
-        IdempotentRequest existing = lookupIdempotent(request.requestId(), BIZ_RESUME, fingerprint);
+        IdempotentRequest existing = idempotency.begin(request.requestId(), BIZ_RESUME, fingerprint);
         if (existing != null) {
-            return replay(existing, new TypeReference<OrderView>() {
+            return idempotency.replay(existing, new TypeReference<OrderView>() {
             });
         }
 
@@ -601,7 +597,7 @@ public class TransitionService {
                 request.requestId(), request.reviewedBy(), "复核确认恢复执行", resumedAt);
 
         OrderView view = getOrder(orderNo);
-        registerIdempotent(request.requestId(), BIZ_RESUME, fingerprint, orderNo, view);
+        idempotency.complete(request.requestId(), orderNo, view);
         return new IdempotentResult<>(request.requestId(), false, view);
     }
 
@@ -656,77 +652,6 @@ public class TransitionService {
         if (!expected.equals(order.getStatus())) {
             throw ApiException.conflict("改品种单状态为 " + order.getStatus()
                     + "，不允许该操作，期望状态 " + expected);
-        }
-    }
-
-    /**
-     * 幂等记录查询：同键同参返回已完成的首次记录（调用方重放）；同键异参抛 409。
-     * 读到未完成占位（首次事务尚未提交结果）时等待重试；查无记录则尝试插入占位，
-     * 占位插入成功表示当前请求获得受理权，唯一索引冲突时重新查询。
-     */
-    private IdempotentRequest lookupIdempotent(String requestId, String bizType, String fingerprint) {
-        for (int i = 0; i < 25; i++) {
-            Optional<IdempotentRequest> found = idempotentRequestRepository.find(requestId);
-            if (found.isPresent()) {
-                IdempotentRequest record = found.get();
-                if (!bizType.equals(record.getBizType()) || !fingerprint.equals(record.getFingerprint())) {
-                    throw ApiException.conflict("requestId=" + requestId + " 已用于不同业务参数，冲突拒绝");
-                }
-                if (record.getResultJson() != null) {
-                    return record;
-                }
-                // 首次事务仍在进行，等待其提交后重放。
-                sleepBriefly();
-                continue;
-            }
-            try {
-                IdempotentRequest placeholder = new IdempotentRequest();
-                placeholder.setRequestId(requestId);
-                placeholder.setBizType(bizType);
-                placeholder.setFingerprint(fingerprint);
-                placeholder.setResultRef(null);
-                placeholder.setResultJson(null);
-                idempotentRequestRepository.insert(placeholder, now());
-                return null;
-            } catch (DuplicateKeyException e) {
-                // 并发请求已插入占位（可能未提交），等待后重新查询。
-                sleepBriefly();
-            }
-        }
-        throw ApiException.conflict("并发幂等请求处理中，请稍后重放: " + requestId);
-    }
-
-    private void sleepBriefly() {
-        try {
-            Thread.sleep(20);
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            throw ApiException.conflict("并发幂等请求处理中断");
-        }
-    }
-
-    private void registerIdempotent(String requestId, String bizType, String fingerprint,
-                                    String resultRef, Object resultView) {
-        idempotentRequestRepository.updateResult(requestId, resultRef, writeJson(resultView));
-    }
-
-    private <T> IdempotentResult<T> replay(IdempotentRequest record, TypeReference<T> type) {
-        T data;
-        try {
-            byte[] bytes = record.getResultJson() == null
-                    ? new byte[0] : record.getResultJson().getBytes(StandardCharsets.UTF_8);
-            data = objectMapper.readValue(bytes, type);
-        } catch (Exception e) {
-            throw new IllegalStateException("幂等首次结果反序列化失败", e);
-        }
-        return new IdempotentResult<>(record.getRequestId(), true, data);
-    }
-
-    private String writeJson(Object value) {
-        try {
-            return objectMapper.writeValueAsString(value);
-        } catch (Exception e) {
-            throw new IllegalStateException("JSON 序列化失败", e);
         }
     }
 

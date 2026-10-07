@@ -151,10 +151,49 @@ CREATE TABLE IF NOT EXISTS blend_control_event (
     event_time  TIMESTAMP    NOT NULL COMMENT '事件时间'
 );
 
+-- 回收额度：每个未改判正品的已登记过渡卷至多登记一次；扣量、版本与失效全程留痕
+CREATE TABLE IF NOT EXISTS recycle_quota (
+    id                 BIGINT        NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    roll_no            VARCHAR(40)   NOT NULL COMMENT '过渡纸卷卷号，全局唯一（每卷至多登记一次回收额度）',
+    registered_kg      DECIMAL(12,3) NOT NULL COMMENT '登记可回收公斤数（原额度），单位 kg，正数最多三位小数',
+    current_kg         DECIMAL(12,3) NOT NULL COMMENT '当前额度（含已消费部分），单位 kg；调减时不得低于累计消费',
+    consumed_kg        DECIMAL(12,3) NOT NULL DEFAULT 0 COMMENT '累计已消费公斤数，单位 kg，只增不减',
+    version            INT           NOT NULL DEFAULT 1 COMMENT '额度版本号：1 起，每次成功调减/消费/失效加 1',
+    status             VARCHAR(16)   NOT NULL COMMENT '额度状态：ACTIVE=有效，INVALIDATED=已失效（复议改判正品）',
+    invalidated_reason VARCHAR(32)   NULL COMMENT '失效原因：REEXAM_UPGRADED=复议改判正品，NULL=未失效',
+    request_id         VARCHAR(64)   NOT NULL COMMENT '登记幂等 requestId',
+    created_at         TIMESTAMP     NOT NULL COMMENT '登记时间（UTC）',
+    updated_at         TIMESTAMP     NOT NULL COMMENT '最近一次额度变更时间（UTC）',
+    CONSTRAINT uk_recycle_quota_roll UNIQUE (roll_no)
+);
+
+-- 投料申请单头：一次投料引用同一执行中订单、当前掺配版本与总浆量
+CREATE TABLE IF NOT EXISTS feed_application (
+    id                  BIGINT        NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    feed_no             VARCHAR(48)   NOT NULL COMMENT '投料单号，业务唯一键',
+    order_no            VARCHAR(40)   NOT NULL COMMENT '执行中改品种单号',
+    blend_version_no    INT           NOT NULL COMMENT '投料时生效的掺配比例版本号',
+    total_pulp_kg       DECIMAL(12,3) NOT NULL COMMENT '总浆量，单位 kg，正数最多三位小数',
+    required_recycle_kg DECIMAL(12,3) NOT NULL COMMENT '应投回收量=总浆量×目标比例/100，单位 kg，精确计算不做展示舍入',
+    actual_recycle_kg   DECIMAL(12,3) NOT NULL COMMENT '实际回收合计=各卷公斤数之和，单位 kg，须精确等于应投量',
+    request_id          VARCHAR(64)   NOT NULL COMMENT '投料幂等 requestId',
+    created_at          TIMESTAMP     NOT NULL COMMENT '投料时间（UTC）',
+    CONSTRAINT uk_feed_application_no UNIQUE (feed_no)
+);
+
+-- 投料消耗明细：每卷扣量凭据，改判失效后已消费凭据仍保留
+CREATE TABLE IF NOT EXISTS feed_consumption (
+    id         BIGINT        NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    feed_no    VARCHAR(48)   NOT NULL COMMENT '投料单号',
+    roll_no    VARCHAR(40)   NOT NULL COMMENT '回收卷号',
+    kg         DECIMAL(12,3) NOT NULL COMMENT '本卷消费公斤数，单位 kg，正数最多三位小数',
+    created_at TIMESTAMP     NOT NULL COMMENT '消费时间（UTC）'
+);
+
 -- 幂等请求记录：指纹覆盖 requestId 与全部业务字段
 CREATE TABLE IF NOT EXISTS idempotent_request (
     request_id   VARCHAR(64) NOT NULL PRIMARY KEY COMMENT '幂等键 requestId',
-    biz_type     VARCHAR(24) NOT NULL COMMENT '业务类型：APPLY_ORDER/SUBMIT_INSPECTION/SUBMIT_REEXAM/ADJUST_BLEND_RATIO/SUBMIT_BLEND_READING/RESUME_EXECUTION',
+    biz_type     VARCHAR(24) NOT NULL COMMENT '业务类型：APPLY_ORDER/SUBMIT_INSPECTION/SUBMIT_REEXAM/ADJUST_BLEND_RATIO/SUBMIT_BLEND_READING/RESUME_EXECUTION/REGISTER_RECYCLE_QUOTA/REDUCE_RECYCLE_QUOTA/SUBMIT_FEED',
     fingerprint  VARCHAR(64) NOT NULL COMMENT 'SHA-256 指纹，覆盖 requestId 与全部业务字段',
     result_ref   VARCHAR(40) NULL COMMENT '首次结果引用（单号/卷号）',
     result_json  TEXT        NULL COMMENT '首次响应 JSON 原文，重放原样返回',

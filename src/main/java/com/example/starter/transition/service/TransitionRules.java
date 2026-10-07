@@ -70,6 +70,23 @@ public final class TransitionRules {
         return deviationPct.compareTo(QualityThresholds.BLEND_DEVIATION_TOLERANCE_PCT) > 0;
     }
 
+    /** 数值最多三位小数（忽略末尾零）：10.000 合法，10.0005 越界。 */
+    public static boolean withinThreeDecimals(BigDecimal value) {
+        return value.stripTrailingZeros().scale() <= 3;
+    }
+
+    /**
+     * 应投回收量(kg) = 总浆量(kg) × 目标比例(%) / 100，按百分数精确计算，不做展示舍入。
+     *
+     * @return 精确结果；结果超过三位小数精度时返回 empty，调用方须拒绝该组合
+     */
+    public static java.util.Optional<BigDecimal> requiredRecycleKg(BigDecimal totalPulpKg,
+                                                                   BigDecimal targetRatioPct) {
+        BigDecimal required = totalPulpKg.multiply(targetRatioPct).movePointLeft(2);
+        return withinThreeDecimals(required) ? java.util.Optional.of(required)
+                : java.util.Optional.empty();
+    }
+
     /**
      * 合成正品门槛（恰达边界合格）：灰分 ≤18%，水分 ∈ [4%,8%]，
      * 抗张指数 ≥45 Nm/g，定量与标称克重偏差 ≤3%。
