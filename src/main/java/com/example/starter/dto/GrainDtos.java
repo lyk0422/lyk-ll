@@ -11,8 +11,11 @@ import com.example.starter.model.RecheckDecision;
 import com.example.starter.model.SiloStatus;
 import com.example.starter.model.VentilationPurpose;
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 
 /**
  * 粮情测控服务请求/响应对象集合。
@@ -186,12 +189,96 @@ public final class GrainDtos {
             @NotNull Instant measuredAt) {
     }
 
-    /** 解除锁仓请求：两名不同复核人共同确认，须携带期望版本，确认时重查最新读数与版本。 */
+    /** 解除锁仓请求：两名不同复核人共同确认，须携带期望版本，确认时重查最新读数/帧与版本。 */
     public record ReleaseFumigationRequest(
             @NotBlank String requestId,
             @NotNull Integer expectedVersion,
             @NotNull @jakarta.validation.constraints.Size(min = 2, max = 2)
             List<@NotBlank String> reviewers) {
+    }
+
+    /**
+     * 多测点名单初始登记请求：散气前登记 2~10 个互不相同测点并冻结名单版本（版本 1）。
+     * 测点编码顺序参与幂等指纹，但业务上视为集合（重复编码拒绝）。
+     */
+    public record RegisterPointListRequest(
+            @NotBlank String requestId,
+            @NotNull Integer expectedVersion,
+            @NotEmpty @Size(min = 2, max = 10) List<@NotBlank String> points) {
+    }
+
+    /**
+     * 散气中增补测点请求：只能增加当前名单之外的新测点（1~10 个），不得删除既有测点；
+     * 增补成功名单版本加 1，已形成的待解除连续帧确认失效，必须从新版首个完整帧重新累计。
+     */
+    public record AddPointsRequest(
+            @NotBlank String requestId,
+            @NotNull Integer expectedVersion,
+            @NotEmpty @Size(min = 1, max = 10) List<@NotBlank String> points) {
+    }
+
+    /**
+     * 单个测点浓度。pointCode 必须在采样时的在册名单内；concentration 单位 ppm，有限非负小数。
+     */
+    public record FramePointReading(
+            @NotBlank String pointCode,
+            @NotNull BigDecimal concentration) {
+    }
+
+    /**
+     * 多测点采样帧请求：seqNo 单号内严格递增（缺号打断连续帧计数）；measuredAt 为全帧共用的
+     * UTC 采样时刻，单号内严格递增；readings 必须恰好覆盖当前名单全部测点（缺点、重复点、未知点、
+     * 非递增时刻整帧拒绝，不写部分读数）。
+     */
+    public record GasFrameRequest(
+            @NotBlank String requestId,
+            @NotNull Integer expectedVersion,
+            @NotNull Integer seqNo,
+            @NotNull Instant measuredAt,
+            @NotEmpty @Valid List<@NotNull FramePointReading> readings) {
+    }
+
+    /** 测点名单视图。 */
+    public record PointListView(
+            int listVersion,
+            List<String> points,
+            boolean replayed) {
+    }
+
+    /** 帧内测点读数视图。 */
+    public record FrameReadingView(
+            String pointCode,
+            BigDecimal concentration) {
+    }
+
+    /** 采样帧视图：worstConcentration 为本帧全点最大浓度，safe 为全点是否均不越限。 */
+    public record GasFrameView(
+            long id,
+            long fumigationId,
+            int seqNo,
+            Instant measuredAt,
+            int listVersion,
+            BigDecimal worstConcentration,
+            boolean safe,
+            boolean late,
+            List<FrameReadingView> readings,
+            boolean replayed) {
+    }
+
+    /**
+     * 有效连续安全帧段复算视图：仅统计当前名单版本下、序号连续且全部安全的最新一段帧
+     * （增点后的旧版帧、越限帧、序号缺口都会打断该段）。releasable 表示该段最后三帧
+     * 首末间隔 ≥30 分钟，已满足解除的读数条件；first/last 为最后三帧的首末帧，不足三帧为 null。
+     */
+    public record FrameChainView(
+            int listVersion,
+            int runLength,
+            boolean releasable,
+            Integer firstSeqNo,
+            Integer lastSeqNo,
+            Instant firstMeasuredAt,
+            Instant lastMeasuredAt,
+            List<GasFrameView> runFrames) {
     }
 
     /** 熏蒸单视图；时间均为 UTC。 */
@@ -212,6 +299,8 @@ public final class GrainDtos {
             Instant releasedAt,
             int version,
             List<String> approvers,
+            boolean multiPoint,
+            Integer pointListVersion,
             boolean replayed) {
     }
 
@@ -226,13 +315,14 @@ public final class GrainDtos {
             boolean replayed) {
     }
 
-    /** 解除双复核视图。 */
+    /** 解除双复核视图；listVersion 非空表示多测点单按该名单版本的三帧解除，旧单点单为 null。 */
     public record ReleaseView(
             long id,
             long fumigationId,
             int checkedVersion,
             int lastSeqNo,
             int firstSeqNo,
+            Integer listVersion,
             List<String> reviewers,
             Instant releasedAt,
             boolean replayed) {

@@ -46,6 +46,10 @@ public abstract class AbstractIntegrationTest {
     @BeforeEach
     void cleanDatabase() {
         jdbc.update("DELETE FROM fumigation_release");
+        jdbc.update("DELETE FROM gas_frame_reading");
+        jdbc.update("DELETE FROM gas_frame");
+        jdbc.update("DELETE FROM gas_point_op");
+        jdbc.update("DELETE FROM gas_point");
         jdbc.update("DELETE FROM gas_reading");
         jdbc.update("DELETE FROM fumigation_approval");
         jdbc.update("DELETE FROM fumigation_order");
@@ -148,5 +152,66 @@ public abstract class AbstractIntegrationTest {
         return fumigationService.release(orderId,
                 new com.example.starter.dto.GrainDtos.ReleaseFumigationRequest(
                         requestId, version, java.util.List.of("carol", "dave")));
+    }
+
+    /** 散气前登记 P1、P2 两个测点并冻结名单版本 1。 */
+    protected com.example.starter.dto.GrainDtos.PointListView registerP1P2(long orderId, int version,
+                                                                           String requestId) {
+        return fumigationService.registerPointList(orderId,
+                new com.example.starter.dto.GrainDtos.RegisterPointListRequest(
+                        requestId, version, java.util.List.of("P1", "P2")));
+    }
+
+    /**
+     * 建仓建风机、申请、双审批、开始、登记 P1/P2、转散气，返回散气中受控多测点单上下文
+     * （单据版本 6，名单版本 1，在册测点 P1、P2）。
+     */
+    protected MultiPointContext multiPointAeratingContext(String siloCode, String fanCode, String prefix) {
+        var silo = newSilo(siloCode);
+        var fan = newFan(fanCode);
+        var order = applyFumigation(silo.id(), prefix + "-apply");
+        approveTwice(order.id(), prefix);
+        var started = startFumigation(order.id(), 3, prefix + "-start");
+        registerP1P2(started.id(), 4, prefix + "-points");
+        var aerating = beginAeration(started.id(), 5, fan.id(), prefix + "-aer");
+        return new MultiPointContext(aerating.id(), silo.id(), fan.id(), 6,
+                java.util.List.of("P1", "P2"));
+    }
+
+    /** 提交一帧覆盖全部在册测点的完整帧；各测点浓度由 concentrations 按测点顺序给出。 */
+    protected com.example.starter.dto.GrainDtos.GasFrameView submitFrame(
+            long orderId, int version, int seq, java.time.Instant measuredAt, String requestId,
+            java.util.List<String> points, String... concentrations) {
+        java.util.List<com.example.starter.dto.GrainDtos.FramePointReading> readings = new java.util.ArrayList<>();
+        for (int i = 0; i < points.size(); i++) {
+            readings.add(new com.example.starter.dto.GrainDtos.FramePointReading(
+                    points.get(i), new BigDecimal(concentrations[i])));
+        }
+        return fumigationService.ingestGasFrame(orderId,
+                new com.example.starter.dto.GrainDtos.GasFrameRequest(
+                        requestId, version, seq, measuredAt, readings));
+    }
+
+    /**
+     * 上报连续三帧全点安全读数（4.000ppm），帧时刻 01:00Z/01:15Z/01:30Z，首末恰 30 分钟。
+     * 入参 version 为第一帧前的单据版本，返回第三帧后的单据版本。
+     */
+    protected int safeThreeFrames(long orderId, int version, java.util.List<String> points, String prefix) {
+        submitFrame(orderId, version, 1, U0.plusSeconds(3600), prefix + "-f1", points,
+                concentrations(points, "4.000"));
+        submitFrame(orderId, version + 1, 2, U0.plusSeconds(4500), prefix + "-f2", points,
+                concentrations(points, "4.000"));
+        submitFrame(orderId, version + 2, 3, U0.plusSeconds(5400), prefix + "-f3", points,
+                concentrations(points, "4.000"));
+        return version + 3;
+    }
+
+    private static String[] concentrations(java.util.List<String> points, String value) {
+        return points.stream().map(p -> value).toArray(String[]::new);
+    }
+
+    /** 受控多测点单散气中上下文。 */
+    protected record MultiPointContext(long orderId, long siloId, long fanId, int version,
+                                       java.util.List<String> points) {
     }
 }
