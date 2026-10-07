@@ -15,9 +15,11 @@ import com.example.starter.cosmetic.port.FilingPort;
 import com.example.starter.cosmetic.port.CatalogPort;
 import com.example.starter.cosmetic.port.IdempotencyPort;
 import com.example.starter.cosmetic.port.IdempotencyRow;
+import com.example.starter.cosmetic.port.LabelPrintPort;
 import com.example.starter.cosmetic.port.ReportPort;
 import com.example.starter.cosmetic.support.FingerprintSupport;
 import com.example.starter.cosmetic.support.JsonSupport;
+import com.example.starter.cosmetic.support.LabelDigestSupport;
 import com.example.starter.cosmetic.web.dto.AgeRuleResponse;
 import com.example.starter.cosmetic.web.dto.ChangeFilingRequest;
 import com.example.starter.cosmetic.web.dto.ChildBandDossierRequest;
@@ -69,6 +71,7 @@ public class FilingServiceImpl implements FilingService {
     private final CatalogPort catalogPort;
     private final ReportPort reportPort;
     private final IdempotencyPort idempotencyPort;
+    private final LabelPrintPort labelPrintPort;
     private final PublicNoticeEffector publicNoticeEffector;
     private final Clock clock;
     private final FormReviewEvaluator formReviewEvaluator;
@@ -78,12 +81,14 @@ public class FilingServiceImpl implements FilingService {
                              CatalogPort catalogPort,
                              ReportPort reportPort,
                              IdempotencyPort idempotencyPort,
+                             LabelPrintPort labelPrintPort,
                              PublicNoticeEffector publicNoticeEffector,
                              Clock clock) {
         this.filingPort = filingPort;
         this.catalogPort = catalogPort;
         this.reportPort = reportPort;
         this.idempotencyPort = idempotencyPort;
+        this.labelPrintPort = labelPrintPort;
         this.publicNoticeEffector = publicNoticeEffector;
         this.clock = clock;
         this.formReviewEvaluator = new FormReviewEvaluator(catalogPort);
@@ -651,6 +656,11 @@ public class FilingServiceImpl implements FilingService {
 
         filingPort.markWithdrawn(record.id(), now, reason);
         filingPort.releaseSlot(record.productCode());
+        // 备案注销：同事务原子禁用其印次剩余标签，已领凭据仅追加风险关联，不抹历史
+        labelPrintPort.disableActiveRunsByFiling(filingNo,
+                "备案注销终态，旧印次剩余标签原子禁用", now);
+        labelPrintPort.flagRiskByFiling(filingNo,
+                "备案 " + filingNo + " 已注销，已领标签追加风险关联", now);
         ReviewDetail detail = new ReviewDetail(null, filingNo, record.versionNo(), "FORM",
                 "WITHDRAWN_TERMINAL", true,
                 "备案注销终态，注销时刻(UTC)=" + now + "，原因=" + reason
@@ -831,19 +841,10 @@ public class FilingServiceImpl implements FilingService {
 
     /**
      * 标识文本摘要：结构化（分龄档+文本逐项）规范化后取 SHA-256，
-     * 合法文本含分隔符亦能被无歧义区分。
+     * 合法文本含分隔符亦能被无歧义区分。口径与印次台账登记校验共用。
      */
     private String labelDigestOf(List<ChildBandDossier> dossiers) {
-        Map<String, Object> fields = new LinkedHashMap<>();
-        fields.put("kind", "CHILD_AGE_LABELS");
-        fields.put("labels", (dossiers == null ? List.<ChildBandDossier>of() : dossiers).stream()
-                .map(d -> {
-                    Map<String, Object> entry = new LinkedHashMap<String, Object>();
-                    entry.put("bandCode", d.bandCode());
-                    entry.put("labelText", d.labelText());
-                    return entry;
-                }).toList());
-        return FingerprintSupport.sha256(fields);
+        return LabelDigestSupport.childGlobalDigest(dossiers);
     }
 
     private boolean hasInFlightFiling(String productCode) {

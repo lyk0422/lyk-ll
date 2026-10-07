@@ -29,6 +29,10 @@ public abstract class AbstractCosmeticIntegrationTest {
     @BeforeEach
     void cleanDatabase() {
         jdbc.update("DELETE FROM idempotency_record");
+        jdbc.update("DELETE FROM label_destruction");
+        jdbc.update("DELETE FROM label_issue");
+        jdbc.update("DELETE FROM packaging_batch");
+        jdbc.update("DELETE FROM label_print_run");
         jdbc.update("DELETE FROM review_detail");
         jdbc.update("DELETE FROM product_active_filing");
         jdbc.update("DELETE FROM filing_record");

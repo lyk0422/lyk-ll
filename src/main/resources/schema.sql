@@ -127,3 +127,61 @@ CREATE TABLE IF NOT EXISTS child_safety_report (
     conclusion_text      VARCHAR(500) NULL COMMENT '报告结论文本',
     created_at_utc       TIMESTAMP    NOT NULL COMMENT '入库时间(UTC)'
 );
+
+-- 包装标签印次台账：领用绑定到已生效备案的具体修订；备案标识修订后旧印次不得继续领用
+CREATE TABLE IF NOT EXISTS label_print_run (
+    id                 BIGINT AUTO_INCREMENT NOT NULL PRIMARY KEY,
+    print_run_no       VARCHAR(40)  NOT NULL COMMENT '印次号，全局唯一',
+    product_code       VARCHAR(64)  NOT NULL COMMENT '所属产品编码',
+    filing_no          VARCHAR(40)  NOT NULL COMMENT '登记时引用的已生效备案编号',
+    filing_version_no  INT          NOT NULL COMMENT '登记时引用的备案修订号',
+    filing_category    VARCHAR(10)  NOT NULL COMMENT '备案类别快照：ADULT/CHILD',
+    label_digest       VARCHAR(128) NOT NULL COMMENT '登记时冻结的标签文本摘要(SHA-256)，须与备案一致',
+    band_digests_json  CLOB         NULL COMMENT '儿童印次冻结的各年龄档独立标识摘要JSON(bandCode->digest)；成人印次为NULL',
+    printed_count      INT          NOT NULL COMMENT '印刷总张数(正整数)',
+    issued_count       INT          NOT NULL DEFAULT 0 COMMENT '已领用张数',
+    destroyed_count    INT          NOT NULL DEFAULT 0 COMMENT '已登记销毁张数(仅未领部分)',
+    status             VARCHAR(20)  NOT NULL COMMENT '状态：ACTIVE=可领用，DISABLED=备案换版/注销后原子禁用，不允许复活',
+    version_no         INT          NOT NULL DEFAULT 1 COMMENT '印次台账版本号，1起，每次修改(领用/销毁/禁用)加1，修改须携带expectedVersion',
+    disabled_reason    VARCHAR(500) NULL COMMENT '禁用原因(备案实质变更生效/注销)；未禁用为NULL',
+    disabled_at_utc    TIMESTAMP    NULL COMMENT '禁用时刻(UTC)；未禁用为NULL',
+    request_id         VARCHAR(64)  NOT NULL COMMENT '登记幂等键',
+    created_at_utc     TIMESTAMP    NOT NULL COMMENT '登记时刻(UTC)',
+    updated_at_utc     TIMESTAMP    NOT NULL COMMENT '最近修改时刻(UTC)',
+    CONSTRAINT uk_print_run_no UNIQUE (print_run_no)
+);
+CREATE INDEX IF NOT EXISTS idx_print_run_filing ON label_print_run (filing_no);
+
+-- 合成包装批号：首次领用时登记所属产品，之后仅允许同产品印次领用，跨产品借用拒绝
+CREATE TABLE IF NOT EXISTS packaging_batch (
+    batch_no       VARCHAR(64) NOT NULL PRIMARY KEY COMMENT '合成包装批号',
+    product_code   VARCHAR(64) NOT NULL COMMENT '首次领用时登记所属产品编码，之后不可改',
+    created_at_utc TIMESTAMP   NOT NULL COMMENT '登记时刻(UTC)'
+);
+
+-- 标签领用凭据：每次领用一条，可追溯；备案换版/注销后仅追加风险关联，不抹历史
+CREATE TABLE IF NOT EXISTS label_issue (
+    id            BIGINT AUTO_INCREMENT NOT NULL PRIMARY KEY,
+    print_run_no  VARCHAR(40)  NOT NULL COMMENT '领用的印次号',
+    batch_no      VARCHAR(64)  NOT NULL COMMENT '合成包装批号',
+    product_code  VARCHAR(64)  NOT NULL COMMENT '产品编码(与印次一致)',
+    quantity      INT          NOT NULL COMMENT '领用张数(正整数)',
+    request_id    VARCHAR(64)  NOT NULL COMMENT '领用幂等键',
+    issued_at_utc TIMESTAMP    NOT NULL COMMENT '领用时刻(UTC)',
+    risk_flag     TINYINT      NOT NULL DEFAULT 0 COMMENT '风险关联标记：备案换版/注销后置1，仅追加不抹历史',
+    risk_note     VARCHAR(500) NULL COMMENT '风险关联说明；未关联为NULL',
+    risk_at_utc   TIMESTAMP    NULL COMMENT '风险关联时刻(UTC)；未关联为NULL'
+);
+CREATE INDEX IF NOT EXISTS idx_issue_run ON label_issue (print_run_no);
+CREATE INDEX IF NOT EXISTS idx_issue_batch ON label_issue (batch_no);
+
+-- 未领标签销毁登记：仅未领部分可销毁，留证；已领部分不能销毁退回余额
+CREATE TABLE IF NOT EXISTS label_destruction (
+    id               BIGINT AUTO_INCREMENT NOT NULL PRIMARY KEY,
+    print_run_no     VARCHAR(40)  NOT NULL COMMENT '销毁的印次号',
+    quantity         INT          NOT NULL COMMENT '销毁张数(正整数)',
+    reason           VARCHAR(500) NULL COMMENT '销毁原因',
+    request_id       VARCHAR(64)  NOT NULL COMMENT '销毁幂等键',
+    destroyed_at_utc TIMESTAMP    NOT NULL COMMENT '销毁登记时刻(UTC)'
+);
+CREATE INDEX IF NOT EXISTS idx_destruction_run ON label_destruction (print_run_no);

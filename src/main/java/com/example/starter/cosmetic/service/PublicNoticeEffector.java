@@ -4,6 +4,7 @@ import com.example.starter.cosmetic.domain.FilingRecord;
 import com.example.starter.cosmetic.domain.FilingStatus;
 import com.example.starter.cosmetic.port.ActiveSlot;
 import com.example.starter.cosmetic.port.FilingPort;
+import com.example.starter.cosmetic.port.LabelPrintPort;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -19,15 +20,19 @@ import java.util.Optional;
  *   <li>条件 UPDATE 仅把 PUBLIC 置为 EFFECTIVE；若异议分支已获胜，更新 0 行，本事务无效果。</li>
  *   <li>生效后在同一事务内把旧有效版本置 SUPERSEDED 并切换产品有效槽，
  *       保证“变更生效与旧备案失效同事务完成”。</li>
+ *   <li>实质变更新版本生效时，同事务原子禁用旧备案印次的剩余标签，
+ *       已领凭据仅追加风险关联，不抹历史。</li>
  * </ol>
  */
 @Component
 public class PublicNoticeEffector {
 
     private final FilingPort filingPort;
+    private final LabelPrintPort labelPrintPort;
 
-    public PublicNoticeEffector(FilingPort filingPort) {
+    public PublicNoticeEffector(FilingPort filingPort, LabelPrintPort labelPrintPort) {
         this.filingPort = filingPort;
+        this.labelPrintPort = labelPrintPort;
     }
 
     /**
@@ -57,6 +62,12 @@ public class PublicNoticeEffector {
             }
             filingPort.replaceSlot(publicRecord.productCode(), publicRecord.filingNo(),
                     publicRecord.versionNo(), now);
+            // 备案实质变更生效：同事务原子禁用旧备案印次剩余标签，已领凭据仅追加风险关联
+            labelPrintPort.disableActiveRunsByFiling(previous.filingNo(),
+                    "备案实质变更新版本 " + publicRecord.filingNo() + "#"
+                            + publicRecord.versionNo() + " 生效，旧印次剩余标签原子禁用", now);
+            labelPrintPort.flagRiskByFiling(previous.filingNo(),
+                    "备案 " + previous.filingNo() + " 已被新版本替代，已领标签追加风险关联", now);
         } else {
             // 首次备案生效：占用唯一有效槽（主键冲突时整个事务回滚）
             filingPort.occupySlot(publicRecord.productCode(), publicRecord.filingNo(),
