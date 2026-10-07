@@ -152,3 +152,64 @@ CREATE TABLE IF NOT EXISTS idempotent_record (
     response_body CLOB,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 合成物理辊登记：physical_no 为物理辊唯一编号；head_roll_no/head_generation_no 指向当前代次；
+-- rework_count 为累计成功返修次数（同一物理辊最多 2 次）；version 为返修聚合乐观版本（从 1 起）。
+CREATE TABLE IF NOT EXISTS physical_roll (
+    physical_no VARCHAR(32) NOT NULL PRIMARY KEY,
+    head_roll_no VARCHAR(32) NOT NULL,
+    head_generation_no INT NOT NULL,
+    rework_count INT NOT NULL DEFAULT 0,
+    version INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 物理辊代次登记：每个物理辊的每一代绑定一个辊号（roll_no 全局唯一）；
+-- generation_no 从 1 起；diameter_mm 为该代磨后直径（毫米，两位小数），
+-- 首代绑定已有辊号时为 NULL（无上一代直径可比）；
+-- successor_application_id 非空表示该代已有成功后继返修申请，每个旧代次最多一个成功后继。
+CREATE TABLE IF NOT EXISTS roll_generation (
+    id BIGINT NOT NULL PRIMARY KEY,
+    physical_no VARCHAR(32) NOT NULL,
+    generation_no INT NOT NULL,
+    roll_no VARCHAR(32) NOT NULL,
+    diameter_mm DECIMAL(10,2) NULL,
+    successor_application_id BIGINT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_rg_roll_no ON roll_generation(roll_no);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_rg_physical_generation ON roll_generation(physical_no, generation_no);
+
+-- 返修放行申请：status 取值 INSPECTING（检验中）/RELEASED（两名检验员均合格并已建立下一代）/
+-- TERMINATED（任一检验员判不合格即终止，不建新辊）；
+-- diameter_after_grind_mm 为磨后直径（毫米，两位小数，>=500 且不大于上一代直径）；
+-- cycle_limit_km 为新代周期上限（公里，正数且不超过上一代上限）；
+-- inspection_cert_no 为检验凭据；mounted_at 为新辊拟上机时刻（UTC）；
+-- 两名检验员必须不同；version 为申请聚合乐观版本（从 1 起，每次确认 +1，旧版本 409）；
+-- 所有时刻按 UTC 记录。
+CREATE TABLE IF NOT EXISTS rework_application (
+    id BIGINT NOT NULL PRIMARY KEY,
+    request_id VARCHAR(64) NOT NULL,
+    physical_no VARCHAR(32) NOT NULL,
+    old_roll_no VARCHAR(32) NOT NULL,
+    old_generation_no INT NOT NULL,
+    new_roll_no VARCHAR(32) NOT NULL,
+    diameter_after_grind_mm DECIMAL(10,2) NOT NULL,
+    cycle_limit_km DECIMAL(10,3) NOT NULL,
+    inspection_cert_no VARCHAR(64) NOT NULL,
+    mounted_at TIMESTAMP NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    first_inspector VARCHAR(32) NULL,
+    first_qualified TINYINT NULL,
+    first_confirmed_at TIMESTAMP NULL,
+    second_inspector VARCHAR(32) NULL,
+    second_qualified TINYINT NULL,
+    second_confirmed_at TIMESTAMP NULL,
+    released_at TIMESTAMP NULL,
+    terminated_at TIMESTAMP NULL,
+    version INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_rework_request ON rework_application(request_id);

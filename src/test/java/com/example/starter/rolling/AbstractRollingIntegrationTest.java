@@ -43,6 +43,9 @@ public abstract class AbstractRollingIntegrationTest {
         jdbc.update("DELETE FROM schedule_order");
         jdbc.update("DELETE FROM effective_version");
         jdbc.update("DELETE FROM idempotent_record");
+        jdbc.update("DELETE FROM rework_application");
+        jdbc.update("DELETE FROM roll_generation");
+        jdbc.update("DELETE FROM physical_roll");
         jdbc.update("UPDATE id_alloc SET next_val = 1 WHERE seq_name = 'global'");
         Integer gradeCount = jdbc.queryForObject("SELECT COUNT(1) FROM width_grade", Integer.class);
         if (gradeCount == null || gradeCount == 0) {
