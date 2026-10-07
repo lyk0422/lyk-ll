@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS slaughter_batch (
     pre_quarantined_at VARCHAR(40) NULL,
     judged_at VARCHAR(40) NULL,
     released_at VARCHAR(40) NULL,
+    split_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     created_at VARCHAR(40) NOT NULL,
     CONSTRAINT uk_slaughter_batch_no UNIQUE (batch_no)
 );
@@ -25,6 +26,7 @@ COMMENT ON COLUMN slaughter_batch.declared_at IS '最近一次申报时间（UTC
 COMMENT ON COLUMN slaughter_batch.pre_quarantined_at IS '宰前检疫通过时间（UTC ISO-8601），NULL 表示未检疫';
 COMMENT ON COLUMN slaughter_batch.judged_at IS '判定分流完成时间（UTC ISO-8601），NULL 表示未判定';
 COMMENT ON COLUMN slaughter_batch.released_at IS '出厂核销时间（UTC ISO-8601），NULL 表示未核销';
+COMMENT ON COLUMN slaughter_batch.split_enabled IS '是否已启用分车出厂：FALSE 走原整批出厂入口（未启用批兼容），TRUE 后受控批拒绝整批入口，只能逐车核销';
 COMMENT ON COLUMN slaughter_batch.created_at IS '记录创建时间（UTC ISO-8601）';
 
 CREATE TABLE IF NOT EXISTS head_ledger (
@@ -206,3 +208,47 @@ COMMENT ON COLUMN risk_change_event.sequence_no IS '事件关联清单序号（�
 COMMENT ON COLUMN risk_change_event.from_version IS '变更前风险版本，BIND 时为 0';
 COMMENT ON COLUMN risk_change_event.to_version IS '变更后风险版本';
 COMMENT ON COLUMN risk_change_event.created_at IS '事件记录时间（UTC ISO-8601）';
+
+-- ========== 分车出厂层（合成规则，不用于生产） ==========
+
+CREATE TABLE IF NOT EXISTS shipment_vehicle (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    vehicle_no VARCHAR(64) NOT NULL,
+    version INT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    head_count INT NOT NULL,
+    frozen_heads CLOB NOT NULL,
+    created_at VARCHAR(40) NOT NULL,
+    departed_at VARCHAR(40) NULL,
+    revoked_at VARCHAR(40) NULL,
+    CONSTRAINT uk_vehicle_no UNIQUE (batch_id, vehicle_no)
+);
+COMMENT ON TABLE shipment_vehicle IS '分车车单主表：合成车号 + 冻结头只清单，创建即全量预占，未发车可整体撤销，发车后不可改';
+COMMENT ON COLUMN shipment_vehicle.batch_id IS '所属屠宰批次主键';
+COMMENT ON COLUMN shipment_vehicle.vehicle_no IS '合成车号，批次内唯一';
+COMMENT ON COLUMN shipment_vehicle.version IS '车单乐观版本：新建为 1，车单冻结不可改单；撤销或逐车核销成功加 1，旧版本操作返回 409';
+COMMENT ON COLUMN shipment_vehicle.status IS '车单状态：RESERVED 已预占未发车 / DEPARTED 已发车出厂（终态）/ REVOKED 已撤销释放（终态）';
+COMMENT ON COLUMN shipment_vehicle.head_count IS '冻结头只数，1 至 50，与 frozen_heads 数组长度一致';
+COMMENT ON COLUMN shipment_vehicle.frozen_heads IS '冻结头只标识 JSON 数组（创建时原样快照，字典序），发车后不可改';
+COMMENT ON COLUMN shipment_vehicle.created_at IS '车单创建时间（UTC ISO-8601）';
+COMMENT ON COLUMN shipment_vehicle.departed_at IS '逐车核销发车时间（UTC ISO-8601），NULL 表示未发车';
+COMMENT ON COLUMN shipment_vehicle.revoked_at IS '车单撤销时间（UTC ISO-8601），NULL 表示未撤销';
+
+CREATE TABLE IF NOT EXISTS shipment_head (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    vehicle_id BIGINT NOT NULL,
+    head_no VARCHAR(64) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    created_at VARCHAR(40) NOT NULL,
+    departed_at VARCHAR(40) NULL,
+    CONSTRAINT uk_shipment_head UNIQUE (batch_id, head_no)
+);
+COMMENT ON TABLE shipment_head IS '分车头只预占台账：合格头只全局至多被一辆未撤销车占用，撤销删除行即释放，发车行保留为已出厂证据';
+COMMENT ON COLUMN shipment_head.batch_id IS '所属屠宰批次主键';
+COMMENT ON COLUMN shipment_head.vehicle_id IS '当前占用车单主键；撤销行删除后该头只可被其他车预占';
+COMMENT ON COLUMN shipment_head.head_no IS '头只标识，批次内全局唯一预占，同头只争车只一方成功';
+COMMENT ON COLUMN shipment_head.status IS '预占状态：RESERVED 已预占未出厂 / DEPARTED 已随该车出厂';
+COMMENT ON COLUMN shipment_head.created_at IS '预占创建时间（UTC ISO-8601）';
+COMMENT ON COLUMN shipment_head.departed_at IS '出厂时间（UTC ISO-8601），NULL 表示尚未出厂';

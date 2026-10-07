@@ -24,7 +24,7 @@ public class BatchRepository {
     /** 屠宰批次行。时间字段为 UTC ISO-8601 字符串，NULL 表示环节未发生。 */
     public record BatchRow(long id, String batchNo, String species, String farmOrigin, int headCount,
                            String status, String declaredAt, String preQuarantinedAt,
-                           String judgedAt, String releasedAt) {
+                           String judgedAt, String releasedAt, boolean splitEnabled) {
     }
 
     /** 头只台账行。 */
@@ -56,7 +56,7 @@ public class BatchRepository {
             rs.getLong("id"), rs.getString("batch_no"), rs.getString("species"),
             rs.getString("farm_origin"), rs.getInt("head_count"), rs.getString("status"),
             rs.getString("declared_at"), rs.getString("pre_quarantined_at"),
-            rs.getString("judged_at"), rs.getString("released_at"));
+            rs.getString("judged_at"), rs.getString("released_at"), rs.getBoolean("split_enabled"));
 
     private static final RowMapper<HeadRow> HEAD_MAPPER = (rs, n) -> new HeadRow(
             rs.getLong("id"), rs.getLong("batch_id"), rs.getString("head_no"), rs.getString("status"),
@@ -143,6 +143,34 @@ public class BatchRepository {
     public int markReleased(long batchId, String at) {
         return jdbc.update("UPDATE slaughter_batch SET status = 'RELEASED', released_at = ?"
                 + " WHERE id = ? AND status = 'JUDGED'", at, batchId);
+    }
+
+    /**
+     * 启用分车：仅未出厂（JUDGED/SPECIAL_QUARANTINE）批次可置位，返回受影响行数。
+     * 已启用或已出厂批次返回 0，由调用方按幂等/冲突处理。
+     */
+    public int enableSplit(long batchId) {
+        return jdbc.update("UPDATE slaughter_batch SET split_enabled = TRUE WHERE id = ?"
+                + " AND split_enabled = FALSE AND status <> 'RELEASED'", batchId);
+    }
+
+    /**
+     * 查询本批合格（QUALIFIED）头只标识，取自原判定明细，按头只号排序。
+     * 分车出厂集合只能取自该集合，病害处置（RENDERING/DESTRUCTION）头只不在其中。
+     */
+    public List<String> findQualifiedHeadNos(long batchId) {
+        return jdbc.queryForList(
+                "SELECT head_no FROM judgment_detail WHERE batch_id = ? AND category = 'QUALIFIED'"
+                        + " ORDER BY head_no",
+                String.class, batchId);
+    }
+
+    /** 统计本批合格（QUALIFIED）判定头只数。 */
+    public int countQualifiedHeads(long batchId) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM judgment_detail WHERE batch_id = ? AND category = 'QUALIFIED'",
+                Integer.class, batchId);
+        return count == null ? 0 : count;
     }
 
     // ---------- 头只台账 ----------

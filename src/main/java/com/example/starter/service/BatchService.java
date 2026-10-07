@@ -331,20 +331,17 @@ public class BatchService {
             return new ReleaseResponse(batchNo, BatchStatus.RELEASED.name(), batch.releasedAt(),
                     reconciliation(batch.id()));
         }
+        // 已启用分车的批次只能逐车核销，原整批出厂入口拒绝，不能绕过车辆清单；未启用批兼容。
+        if (batch.splitEnabled()) {
+            throw ApiException.conflict("批次已启用分车出厂，须逐车核销，原整批出厂入口拒绝");
+        }
         if (BatchStatus.SPECIAL_QUARANTINE.name().equals(batch.status())) {
             throw ApiException.conflict("批次处于专项隔离，四类判定保留但受控出厂拒绝");
         }
         if (!BatchStatus.JUDGED.name().equals(batch.status())) {
             throw ApiException.conflict("批次未达到可核销状态");
         }
-        List<ReconciliationEntry> reconciliation = reconciliation(batch.id());
-        List<String> mismatched = reconciliation.stream()
-                .filter(e -> !e.matched())
-                .map(e -> e.category() + "(判定 " + e.judgedCount() + " / 回执 " + e.receivedCount() + ")")
-                .toList();
-        if (!mismatched.isEmpty()) {
-            throw ApiException.conflict("回执头只数与判定数不一致，拒绝出厂：" + mismatched);
-        }
+        List<ReconciliationEntry> reconciliation = assertReceiptReconciled(batch.id());
         // 风险抽检门禁：受控批次全部清单完成且全部样本阴性才解除；未受控批次直接通过。
         riskService.assertReleaseGate(batch.id());
         String now = now();
@@ -401,6 +398,24 @@ public class BatchService {
             entries.add(new ReconciliationEntry(category.name(), judged, received, judged == received));
         }
         return entries;
+    }
+
+    /**
+     * 处置门禁：化制/销毁回执头只数与判定数须恰等，否则拒绝出厂。整批核销与逐车核销共用，
+     * 保证分车模式下原无害化回执门禁仍然生效。调用方须已持有批次行锁。
+     *
+     * @return 勾稽一致时的勾稽明细，供响应复用
+     */
+    public List<ReconciliationEntry> assertReceiptReconciled(long batchId) {
+        List<ReconciliationEntry> reconciliation = reconciliation(batchId);
+        List<String> mismatched = reconciliation.stream()
+                .filter(e -> !e.matched())
+                .map(e -> e.category() + "(判定 " + e.judgedCount() + " / 回执 " + e.receivedCount() + ")")
+                .toList();
+        if (!mismatched.isEmpty()) {
+            throw ApiException.conflict("回执头只数与判定数不一致，拒绝出厂：" + mismatched);
+        }
+        return reconciliation;
     }
 
     /**

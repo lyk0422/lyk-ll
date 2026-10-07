@@ -9,6 +9,8 @@ import com.example.starter.web.dto.DeclareRequest;
 import com.example.starter.web.dto.DeclareResponse;
 import com.example.starter.web.dto.InspectionRequest;
 import com.example.starter.web.dto.InspectionResponse;
+import com.example.starter.web.dto.JudgmentRequest;
+import com.example.starter.web.dto.JudgmentResponse;
 import com.example.starter.web.dto.PreQuarantineRequest;
 import com.example.starter.web.dto.PreQuarantineResponse;
 import com.example.starter.web.dto.RiskBindRequest;
@@ -17,6 +19,13 @@ import com.example.starter.web.dto.RiskChecklistResponse;
 import com.example.starter.web.dto.RiskResultRequest;
 import com.example.starter.web.dto.RiskResultResponse;
 import com.example.starter.web.dto.RiskSummaryView;
+import com.example.starter.web.dto.ShipmentProgressView;
+import com.example.starter.web.dto.SplitEnableRequest;
+import com.example.starter.web.dto.SplitEnableResponse;
+import com.example.starter.web.dto.VehicleCreateRequest;
+import com.example.starter.web.dto.VehicleDepartRequest;
+import com.example.starter.web.dto.VehicleRevokeRequest;
+import com.example.starter.web.dto.VehicleView;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -55,6 +64,8 @@ abstract class BaseIntegrationTest {
     @BeforeEach
     void resetState() {
         jdbc.update("DELETE FROM idempotency_record");
+        jdbc.update("DELETE FROM shipment_head");
+        jdbc.update("DELETE FROM shipment_vehicle");
         jdbc.update("DELETE FROM late_event");
         jdbc.update("DELETE FROM harmless_receipt");
         jdbc.update("DELETE FROM judgment_detail");
@@ -151,5 +162,64 @@ abstract class BaseIntegrationTest {
                 .getResponse()
                 .getContentAsString();
         return om.readValue(json, RiskSummaryView.class);
+    }
+
+    // ---------- 分车出厂流程辅助 ----------
+
+    protected SplitEnableResponse enableSplit(String requestId, String batchNo) throws Exception {
+        return postOk("/api/batches/" + batchNo + "/shipments/enable",
+                new SplitEnableRequest(requestId, "分车员甲", clock.instant().toString()),
+                SplitEnableResponse.class);
+    }
+
+    protected VehicleView createVehicle(String requestId, String batchNo, String vehicleNo,
+                                        List<String> headNos, int expectedVersion) throws Exception {
+        return postOk("/api/batches/" + batchNo + "/shipments/vehicles",
+                new VehicleCreateRequest(requestId, vehicleNo, headNos, expectedVersion,
+                        clock.instant().toString()),
+                VehicleView.class);
+    }
+
+    protected VehicleView revokeVehicle(String requestId, String batchNo, String vehicleNo,
+                                        int expectedVersion) throws Exception {
+        return postOk("/api/batches/" + batchNo + "/shipments/vehicles/" + vehicleNo + "/revoke",
+                new VehicleRevokeRequest(requestId, expectedVersion, clock.instant().toString()),
+                VehicleView.class);
+    }
+
+    protected VehicleView departVehicle(String requestId, String batchNo, String vehicleNo,
+                                        int expectedVersion) throws Exception {
+        return postOk("/api/batches/" + batchNo + "/shipments/vehicles/" + vehicleNo + "/depart",
+                new VehicleDepartRequest(requestId, expectedVersion, clock.instant().toString(), "核销员甲"),
+                VehicleView.class);
+    }
+
+    protected ShipmentProgressView getShipment(String batchNo) throws Exception {
+        String json = mockMvc.perform(get("/api/batches/{batchNo}/shipments", batchNo))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        return om.readValue(json, ShipmentProgressView.class);
+    }
+
+    /**
+     * 准备一个已判定分流完成的批次：全部头只同步检验后按给定类别逐头判定。
+     * 头只编号与类别按下标一一对应，返回该批头只编号列表。
+     */
+    protected List<String> readyJudgedBatch(String batchNo, List<String> headNos,
+                                            List<String> categories) throws Exception {
+        declareOk("d-" + batchNo, batchNo, headNos);
+        preQuarantineOk(batchNo, "pq-" + batchNo);
+        for (int i = 0; i < headNos.size(); i++) {
+            inspectOk(batchNo, "i-" + batchNo + "-" + i, headNos.get(i));
+        }
+        JudgmentRequest.JudgmentItem[] items = new JudgmentRequest.JudgmentItem[headNos.size()];
+        for (int i = 0; i < headNos.size(); i++) {
+            items[i] = new JudgmentRequest.JudgmentItem(headNos.get(i), categories.get(i), null, null);
+        }
+        postOk("/api/batches/" + batchNo + "/judgments",
+                new JudgmentRequest("j-" + batchNo, List.of(items)), JudgmentResponse.class);
+        return headNos;
     }
 }
