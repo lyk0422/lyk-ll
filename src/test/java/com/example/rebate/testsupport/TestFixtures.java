@@ -101,4 +101,22 @@ public final class TestFixtures {
                  "receivedCents":%d,"receivedAt":"%s"}
                 """.formatted(requestId, expectedVersion, serial, receivedCents, receivedAt);
     }
+
+    /**
+     * 汇总分配请求：一笔真实流水 totalCents 分按 items 分摊到多张已批准冲回单。
+     */
+    public static String masterAllocation(String requestId, String masterSerial, long totalCents,
+                                          String receivedAt, String... items) {
+        return """
+                {"requestId":"%s","masterSerial":"%s","totalCents":%d,"receivedAt":"%s",
+                 "allocations":[%s]}
+                """.formatted(requestId, masterSerial, totalCents, receivedAt,
+                String.join(",", items));
+    }
+
+    public static String allocItem(String correctionNo, long amountCents, int expectedVersion) {
+        return """
+                {"correctionNo":"%s","amountCents":%d,"expectedVersion":%d}
+                """.formatted(correctionNo, amountCents, expectedVersion);
+    }
 }

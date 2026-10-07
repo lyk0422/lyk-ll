@@ -8,7 +8,9 @@ import com.example.rebate.web.dto.ChargebackBalanceView;
 import com.example.rebate.web.dto.ChargebackReviewRequest;
 import com.example.rebate.web.dto.ChargebackSubmitRequest;
 import com.example.rebate.web.dto.ChargebackView;
+import com.example.rebate.web.dto.ClawbackAllocationRequest;
 import com.example.rebate.web.dto.ClawbackReceiptRequest;
+import com.example.rebate.web.dto.MasterAllocationView;
 import jakarta.validation.Valid;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -83,6 +85,26 @@ public class ChargebackController {
     public ChargebackView getOrder(@PathVariable String batchNo,
                                    @PathVariable String correctionNo) {
         return chargebackService.getOrder(batchNo, correctionNo);
+    }
+
+    /**
+     * 汇总分配：一笔真实到账分给同批次 1 至 10 张已批准冲回单，母凭证只记一次。
+     */
+    @PostMapping("/api/batches/{batchNo}/clawback-allocations")
+    public ResponseEntity<?> allocate(@PathVariable String batchNo,
+                                      @Valid @RequestBody ClawbackAllocationRequest req) {
+        Map<String, Object> payload = payload(req, "batchNo", batchNo);
+        return idempotent("CLAWBACK_MASTER_ALLOC", req.requestId(), payload,
+                () -> ServiceResult.ok(chargebackService.allocateMaster(batchNo, req)));
+    }
+
+    /**
+     * 查询汇总分配母凭证（含各分配行与目标单当前追缴余额）。
+     */
+    @GetMapping("/api/batches/{batchNo}/clawback-allocations/{masterSerial}")
+    public MasterAllocationView getMasterAllocation(@PathVariable String batchNo,
+                                                    @PathVariable String masterSerial) {
+        return chargebackService.getMasterAllocation(batchNo, masterSerial);
     }
 
     /**

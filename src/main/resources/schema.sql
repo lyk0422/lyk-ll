@@ -262,3 +262,53 @@ CREATE TABLE t_chargeback_request (
     created_at TIMESTAMP NOT NULL
 );
 COMMENT ON TABLE t_chargeback_request IS '冲回写操作 requestId 幂等记录：业务、版本与幂等结果同事务；失败回滚不占键，同键同参重放首次结果，异参 409';
+
+-- 真实银行流水全局互斥登记：单笔回执与汇总母流水共享同一命名空间，同一流水只能用于其中一种入口
+CREATE TABLE t_bank_serial (
+    serial VARCHAR(64) PRIMARY KEY,
+    kind VARCHAR(16) NOT NULL,
+    created_at TIMESTAMP NOT NULL
+);
+COMMENT ON TABLE t_bank_serial IS '真实银行流水全局互斥登记：主键保证同一流水只登记一次；SINGLE 单笔回执 / MASTER 汇总母流水，两种入口互斥';
+COMMENT ON COLUMN t_bank_serial.kind IS '流水用途：SINGLE 旧单笔追缴回执 / MASTER 汇总分配母流水';
+
+-- 汇总分配母凭证独立编号序列（分配行内部标识，不是银行流水）
+CREATE SEQUENCE IF NOT EXISTS seq_allocation_no START WITH 1;
+
+-- 汇总分配母凭证：一笔真实到账只记一次，引用原结案批次，分配行分摊到多张已批准冲回单
+CREATE TABLE t_clawback_master_receipt (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    master_serial VARCHAR(64) NOT NULL,
+    total_cents BIGINT NOT NULL,
+    received_at TIMESTAMP NOT NULL,
+    content_fingerprint VARCHAR(64) NOT NULL,
+    response_body CLOB,
+    version_no INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_master_serial UNIQUE (master_serial)
+);
+COMMENT ON TABLE t_clawback_master_receipt IS '汇总分配母凭证：一笔真实银行到账只记一次（不拆成多笔伪流水），同流水同内容重放首份分配，异内容 409';
+COMMENT ON COLUMN t_clawback_master_receipt.master_serial IS '唯一真实银行流水号（全局唯一，与单笔回执流水互斥）';
+COMMENT ON COLUMN t_clawback_master_receipt.total_cents IS '到账总额（正数整数分），精确等于各分配行合计';
+COMMENT ON COLUMN t_clawback_master_receipt.received_at IS '到账业务时刻(UTC，精确时刻，来自请求)';
+COMMENT ON COLUMN t_clawback_master_receipt.content_fingerprint IS '分配内容指纹（批次+流水+总额+时刻+分配对象与金额），用于同流水异内容 409 判定';
+COMMENT ON COLUMN t_clawback_master_receipt.response_body IS '首份分配结果快照（JSON），同流水同内容重放时原样返回';
+COMMENT ON COLUMN t_clawback_master_receipt.version_no IS '母凭证版本，恒为 1（母凭证只记一次，不可修改）';
+
+CREATE TABLE t_clawback_allocation (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    master_id BIGINT NOT NULL,
+    detail_id BIGINT NOT NULL,
+    order_id BIGINT NOT NULL,
+    allocation_no VARCHAR(64) NOT NULL,
+    amount_cents BIGINT NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_allocation_no UNIQUE (allocation_no)
+);
+COMMENT ON TABLE t_clawback_allocation IS '汇总分配行：母凭证分摊到各追缴明细的金额；内部标识仅作勾稽，不冒充银行流水';
+COMMENT ON COLUMN t_clawback_allocation.allocation_no IS '分配行独立内部标识（ALC- 开头序列，非银行流水号）';
+COMMENT ON COLUMN t_clawback_allocation.amount_cents IS '本分摊金额（正数整数分），不超过该单未收回金额';
+
+CREATE INDEX idx_allocation_master ON t_clawback_allocation (master_id);
+CREATE INDEX idx_allocation_detail ON t_clawback_allocation (detail_id);

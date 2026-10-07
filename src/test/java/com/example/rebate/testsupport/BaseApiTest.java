@@ -24,6 +24,9 @@ public abstract class BaseApiTest {
 
     private static final List<String> TABLES = List.of(
             "t_chargeback_request",
+            "t_clawback_allocation",
+            "t_clawback_master_receipt",
+            "t_bank_serial",
             "t_clawback_receipt",
             "t_clawback_detail",
             "t_chargeback_order",
