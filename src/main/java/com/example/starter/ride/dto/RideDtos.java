@@ -117,4 +117,35 @@ public final class RideDtos {
     /** 统一错误响应体。 */
     public record ErrorBody(String error, String message) {
     }
+
+    /** 检修单建档请求：绑定设备与1至20名不同挂牌人员，初始PREPARED。 */
+    public record MaintenanceCreateRequest(
+            @NotBlank(message = "requestId不能为空") @Size(max = 64) String requestId,
+            @NotEmpty(message = "挂牌人员清单不能为空")
+            @Size(max = 20, message = "挂牌人员最多20名")
+            List<@NotBlank(message = "挂牌人员姓名不能为空") @Size(max = 64) String> personnel) {
+    }
+
+    /** 检修启动请求：携带 expectedVersion 乐观锁，一个事务内整机停运并为每人建锁。 */
+    public record MaintenanceStartRequest(
+            @NotBlank(message = "requestId不能为空") @Size(max = 64) String requestId,
+            @NotNull(message = "expectedVersion不能为空") @Positive(message = "expectedVersion必须为正数")
+            Long expectedVersion) {
+    }
+
+    /** 撤锁请求：挂牌本人与一名不同监护员共同确认，单人或重复身份不生效。 */
+    public record LockRemovalRequest(
+            @NotBlank(message = "requestId不能为空") @Size(max = 64) String requestId,
+            @NotBlank(message = "挂牌本人不能为空") @Size(max = 64) String personName,
+            @NotBlank(message = "监护员不能为空") @Size(max = 64) String supervisorName,
+            @NotNull(message = "expectedVersion不能为空") @Positive(message = "expectedVersion必须为正数")
+            Long expectedVersion) {
+    }
+
+    /** 检修结束请求：全部锁撤除后方可结束，只清除挂牌阻断，不自动开放。 */
+    public record MaintenanceFinishRequest(
+            @NotBlank(message = "requestId不能为空") @Size(max = 64) String requestId,
+            @NotNull(message = "expectedVersion不能为空") @Positive(message = "expectedVersion必须为正数")
+            Long expectedVersion) {
+    }
 }

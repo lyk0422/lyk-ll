@@ -42,17 +42,20 @@ public class RideService {
     private final RideRecordRepository records;
     private final CertificateRepository certificates;
     private final SupervisionRepository supervisions;
+    private final MaintenanceRepository maintenance;
     private final Idempotency.Executor idempotency;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
     public RideService(RideRepository rides, RideRecordRepository records,
             CertificateRepository certificates, SupervisionRepository supervisions,
-            Idempotency.Executor idempotency, ObjectMapper objectMapper, Clock clock) {
+            MaintenanceRepository maintenance, Idempotency.Executor idempotency,
+            ObjectMapper objectMapper, Clock clock) {
         this.rides = rides;
         this.records = records;
         this.certificates = certificates;
         this.supervisions = supervisions;
+        this.maintenance = maintenance;
         this.idempotency = idempotency;
         this.objectMapper = objectMapper;
         this.clock = clock;
@@ -144,6 +147,7 @@ public class RideService {
             }
             requireStatus(ride, "当前状态不允许开放，须试运行恰3次合格",
                     RideStatus.READY);
+            requireNoMaintenanceBlock(rideId);
             requireInspectionEligibility(ride);
             update(ride, RideStatus.OPEN, ride.trialCount(), ride.reopenCount(),
                     ride.checkDate(), ride.reopenDate());
@@ -215,9 +219,9 @@ public class RideService {
                 throw ApiException.unprocessable(
                         "同日复开已达上限" + Ride.MAX_DAILY_REOPEN + "次，当日禁开");
             }
+            requireNoMaintenanceBlock(rideId);
             requireInspectionEligibility(ride);
-            int reopenCount = used + 1;
-            update(ride, RideStatus.OPEN, ride.trialCount(), reopenCount,
+            int reopenCount = used + 1;            update(ride, RideStatus.OPEN, ride.trialCount(), reopenCount,
                     ride.checkDate(), today);
             records.insertEvent(rideId, "REOPEN", "当日第" + reopenCount + "次复开");
             return ok(rideView(rideId));
@@ -565,6 +569,16 @@ public class RideService {
     private void requireInspectionRequired(Ride ride) {
         if (!ride.inspectionRequired()) {
             throw ApiException.unprocessable("设备未启用受检标志，不适用年度检验流程：" + ride.id());
+        }
+    }
+
+    /** 开放/复开入口挂牌门禁：存在未结束检修单或未撤锁时拒绝，不能靠跳过新接口绕行。 */
+    private void requireNoMaintenanceBlock(long rideId) {
+        if (maintenance.existsUnfinished(rideId)) {
+            throw ApiException.conflict("存在未结束检修单，挂牌阻断未解除，禁止开放或复开");
+        }
+        if (maintenance.existsUnremovedLock(rideId)) {
+            throw ApiException.conflict("存在未撤除的挂牌锁，禁止开放或复开");
         }
     }
 

@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS runtime_reading (
 CREATE TABLE IF NOT EXISTS ride_event (
     id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '事件主键',
     ride_id BIGINT NOT NULL COMMENT '设备ID，关联ride.id',
-    event_type VARCHAR(32) NOT NULL COMMENT '事件类型：DAILY_CHECK/TRIAL_RUN/OPEN/READING/SLOW_STOP/FAULT_STOP/RECHECK/REOPEN/ARCHIVE/LATE_READING/CERT_ISSUE/CERT_REVOKE/OVERHAUL/SUPERVISION/CERT_EXPIRED_ALARM',
+    event_type VARCHAR(32) NOT NULL COMMENT '事件类型：DAILY_CHECK/TRIAL_RUN/OPEN/READING/SLOW_STOP/FAULT_STOP/RECHECK/REOPEN/ARCHIVE/LATE_READING/CERT_ISSUE/CERT_REVOKE/OVERHAUL/SUPERVISION/CERT_EXPIRED_ALARM/MAINT_CREATE/MAINT_START/MAINT_UNLOCK/MAINT_FINISH',
     detail VARCHAR(512) NULL COMMENT '事件详情（合成描述），NULL表示无补充说明',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '事件时间（Asia/Shanghai）'
 ) COMMENT='设备启停链事件表，可复算';
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS ride_event (
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id VARCHAR(64) PRIMARY KEY COMMENT '幂等请求ID，全局唯一',
     ride_id BIGINT NOT NULL COMMENT '设备ID，关联ride.id',
-    operation VARCHAR(32) NOT NULL COMMENT '操作类型：DAILY_CHECK/TRIAL_RUN/OPEN/SAFETY_FAULT/RECHECK/REOPEN/ARCHIVE/CERT_ISSUE/CERT_REVOKE/OVERHAUL/SUPERVISION',
+    operation VARCHAR(32) NOT NULL COMMENT '操作类型：DAILY_CHECK/TRIAL_RUN/OPEN/SAFETY_FAULT/RECHECK/REOPEN/ARCHIVE/CERT_ISSUE/CERT_REVOKE/OVERHAUL/SUPERVISION/MAINT_CREATE/MAINT_START/MAINT_UNLOCK/MAINT_FINISH',
     fingerprint VARCHAR(64) NOT NULL COMMENT '请求指纹，覆盖requestId与全部业务字段的SHA-256',
     response_status INT NOT NULL COMMENT '首次执行的HTTP状态码',
     response_body CLOB NOT NULL COMMENT '首次执行的响应体JSON快照',
@@ -114,3 +114,53 @@ CREATE TABLE IF NOT EXISTS supervision_inspection_item (
     item_name VARCHAR(64) NOT NULL COMMENT '检验项名称（合成数据）',
     passed BOOLEAN NOT NULL COMMENT '该项是否合格'
 ) COMMENT='监督检验清单明细表，可复算';
+
+CREATE TABLE IF NOT EXISTS maintenance_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '检修单主键',
+    ride_id BIGINT NOT NULL COMMENT '设备ID，关联ride.id',
+    request_id VARCHAR(64) NOT NULL COMMENT '幂等请求ID',
+    status VARCHAR(16) NOT NULL COMMENT '检修单状态：PREPARED已建档/IN_PROGRESS进行中/FINISHED已结束',
+    version BIGINT NOT NULL DEFAULT 1 COMMENT '单据版本号，从1开始，每次成功修改加1，修改须携带expectedVersion，旧版本409',
+    active_ride_id BIGINT NULL COMMENT '进行中占用标记：进行中等于ride.id，其余为NULL；唯一索引保证同设备仅一张进行中检修单',
+    started_at TIMESTAMP NULL COMMENT '启动检修时刻（UTC），NULL表示未启动',
+    finished_at TIMESTAMP NULL COMMENT '结束检修时刻（UTC），NULL表示未结束',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '建档时间（Asia/Shanghai）'
+) COMMENT='检修挂牌单：绑定设备与1至20名不同人员，初始PREPARED，启动后清单冻结';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_maintenance_active_ride
+    ON maintenance_order (active_ride_id);
+
+CREATE TABLE IF NOT EXISTS maintenance_person (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '挂牌人员主键',
+    maintenance_id BIGINT NOT NULL COMMENT '检修单ID，关联maintenance_order.id',
+    person_name VARCHAR(64) NOT NULL COMMENT '挂牌人员姓名（合成检修人员）',
+    seq INT NOT NULL COMMENT '清单序号，从1开始，启动后清单冻结',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录时间（Asia/Shanghai）'
+) COMMENT='检修挂牌人员清单表：历史清单不可覆盖';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_maintenance_person
+    ON maintenance_person (maintenance_id, person_name);
+
+CREATE TABLE IF NOT EXISTS maintenance_lock (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '挂牌锁主键',
+    maintenance_id BIGINT NOT NULL COMMENT '检修单ID，关联maintenance_order.id',
+    person_name VARCHAR(64) NOT NULL COMMENT '锁归属人员姓名，与挂牌清单一一对应',
+    removed BOOLEAN NOT NULL DEFAULT FALSE COMMENT '锁是否已撤除，TRUE表示已归还撤锁',
+    removed_at TIMESTAMP NULL COMMENT '撤锁时刻（UTC），NULL表示未撤锁',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '建锁时间（Asia/Shanghai）'
+) COMMENT='检修挂牌锁表：启动检修时为每人建立唯一未撤锁';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_maintenance_lock_person
+    ON maintenance_lock (maintenance_id, person_name);
+
+CREATE TABLE IF NOT EXISTS maintenance_lock_removal (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '撤锁签认主键',
+    lock_id BIGINT NOT NULL COMMENT '挂牌锁ID，关联maintenance_lock.id，每锁最多一条签认',
+    person_name VARCHAR(64) NOT NULL COMMENT '挂牌本人确认，须等于锁归属人员，不能代签',
+    supervisor_name VARCHAR(64) NOT NULL COMMENT '监护员确认，须与本人不同',
+    removed_at TIMESTAMP NOT NULL COMMENT '撤锁时刻（UTC）',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录时间（Asia/Shanghai）'
+) COMMENT='撤锁双人签认表：本人与一名不同监护员共同确认，签认不可覆盖';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_maintenance_lock_removal
+    ON maintenance_lock_removal (lock_id);
