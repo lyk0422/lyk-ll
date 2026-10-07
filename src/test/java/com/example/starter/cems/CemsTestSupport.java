@@ -31,6 +31,14 @@ final class CemsTestSupport {
         jdbc.update("DELETE FROM overflow_hour");
         jdbc.update("DELETE FROM overflow_permit");
         jdbc.update("DELETE FROM overflow_counter");
+        jdbc.update("DELETE FROM effective_adjustment");
+        jdbc.update("DELETE FROM effective_freeze_item");
+        jdbc.update("DELETE FROM effective_freeze");
+        jdbc.update("DELETE FROM substitute_exceedance");
+        jdbc.update("DELETE FROM substitute_hour");
+        jdbc.update("DELETE FROM lab_report");
+        jdbc.update("DELETE FROM maintenance_permit_confirm");
+        jdbc.update("DELETE FROM maintenance_permit");
         jdbc.update("DELETE FROM discharge_outlet");
     }
 

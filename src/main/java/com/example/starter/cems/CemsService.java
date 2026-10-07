@@ -54,11 +54,14 @@ public class CemsService {
     private final CemsRepository repo;
     private final CemsClock clock;
     private final IdempotencySupport idem;
+    private final SubstituteService substituteService;
 
-    public CemsService(CemsRepository repo, CemsClock clock, IdempotencySupport idem) {
+    public CemsService(CemsRepository repo, CemsClock clock, IdempotencySupport idem,
+                       SubstituteService substituteService) {
         this.repo = repo;
         this.clock = clock;
         this.idem = idem;
+        this.substituteService = substituteService;
     }
 
     // ---------------- 许可登记 ----------------
@@ -183,6 +186,8 @@ public class CemsService {
                     occupying == null ? null : (String) occupying.get("status"));
         }
         repo.insertEvent(code, "READING", now, false, "HOUR " + hour + " avgValue=" + req.avgValue());
+        // 补机测联动（同事务）：封账前令该小时生效替代失效留证，日结冻结后只登记独立调差。
+        substituteService.onMachineReading(code, hour, req.avgValue());
 
         List<ChainPoint> chain = rebuildHourlyChain(code, hourlyLimit);
         ChainPoint current = chain.stream().filter(p -> p.hour().equals(hour)).findFirst().orElseThrow();
@@ -404,6 +409,10 @@ public class CemsService {
                     throw new IllegalArgumentException("复测时段必须晚于限排令下达时段");
                 }
                 boolean freshRetest = repo.insertHourlyReading(code, retestHour, req.retestValue(), now);
+                if (freshRetest) {
+                    // 复测读数同为合法机测：补机测联动（同事务），冻结后只登记独立调差。
+                    substituteService.onMachineReading(code, retestHour, req.retestValue());
+                }
                 if (!freshRetest) {
                     Map<String, Object> existing = repo.findHourlyReadings(code).stream()
                             .filter(r -> retestHour.equals(lt(r.get("period_start"))))
