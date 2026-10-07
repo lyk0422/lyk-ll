@@ -1,6 +1,8 @@
 package com.example.starter;
 
 import com.example.starter.service.ControlEventService;
+import com.example.starter.service.MaintenanceService;
+import com.example.starter.service.TimeProvider;
 import com.example.starter.service.WindIngestionService;
 import com.example.starter.web.dto.WindReadingRequest;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -29,6 +31,7 @@ public abstract class BaseIntegrationTest {
 
     /** 合成线路与站点 id（见 data.sql） */
     protected static final long LINE_ID = 1L;
+    protected static final long LINE_2_ID = 2L;
     protected static final long STATION_1 = 1L;
     protected static final long STATION_2 = 2L;
     protected static final long STATION_3 = 3L;
@@ -36,6 +39,8 @@ public abstract class BaseIntegrationTest {
     protected static final long SEGMENT_1 = 1L;
     protected static final long SEGMENT_2 = 2L;
     protected static final long SEGMENT_3 = 3L;
+    /** 属于线路 2 的分段（跨线路校验用） */
+    protected static final long SEGMENT_4_LINE2 = 4L;
 
     protected static final Instant T0 = Instant.parse("2026-10-06T00:00:00Z");
 
@@ -46,19 +51,28 @@ public abstract class BaseIntegrationTest {
     @Autowired
     protected ControlEventService controlEventService;
     @Autowired
+    protected MaintenanceService maintenanceService;
+    @Autowired
+    protected TimeProvider timeProvider;
+    @Autowired
     protected ObjectMapper objectMapper;
 
     @BeforeEach
     void cleanBusinessData() {
+        timeProvider.reset();
         jdbc.update("DELETE FROM boarding");
         jdbc.update("DELETE FROM late_data_event");
         jdbc.update("DELETE FROM cabin_release");
         jdbc.update("DELETE FROM segment_clearance");
         jdbc.update("DELETE FROM reopen_confirmation");
+        jdbc.update("DELETE FROM maintenance_acceptance");
+        jdbc.update("DELETE FROM maintenance_segment_clearance");
+        jdbc.update("DELETE FROM maintenance_order_segment");
+        jdbc.update("DELETE FROM maintenance_order");
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM wind_reading");
         jdbc.update("DELETE FROM control_event");
-        jdbc.update("UPDATE wind_line SET status = 'NORMAL' WHERE id = ?", LINE_ID);
+        jdbc.update("UPDATE wind_line SET status = 'NORMAL' WHERE id IN (?, ?)", LINE_ID, LINE_2_ID);
     }
 
     /**

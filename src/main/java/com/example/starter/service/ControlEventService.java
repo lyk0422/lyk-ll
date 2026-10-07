@@ -4,6 +4,7 @@ import com.example.starter.model.ControlEvent;
 import com.example.starter.model.ControlEventStatus;
 import com.example.starter.model.ControlEventType;
 import com.example.starter.model.LineStatus;
+import com.example.starter.model.MaintenanceOrder;
 import com.example.starter.model.ReopenRole;
 import com.example.starter.model.WindLine;
 import com.example.starter.model.WindSegment;
@@ -12,6 +13,7 @@ import com.example.starter.repo.BoardingRepository;
 import com.example.starter.repo.ConfirmationRepository;
 import com.example.starter.repo.ControlEventRepository;
 import com.example.starter.repo.LineRepository;
+import com.example.starter.repo.MaintenanceRepository;
 import com.example.starter.repo.SegmentRepository;
 import com.example.starter.repo.StationRepository;
 import com.example.starter.repo.WindReadingRepository;
@@ -52,7 +54,9 @@ public class ControlEventService {
     private final ControlEventRepository eventRepository;
     private final ConfirmationRepository confirmationRepository;
     private final BoardingRepository boardingRepository;
+    private final MaintenanceRepository maintenanceRepository;
     private final IdempotencyService idempotencyService;
+    private final TimeProvider timeProvider;
     private final JsonSupport json;
 
     public ControlEventService(LineRepository lineRepository, StationRepository stationRepository,
@@ -60,7 +64,9 @@ public class ControlEventService {
                                ControlEventRepository eventRepository,
                                ConfirmationRepository confirmationRepository,
                                BoardingRepository boardingRepository,
-                               IdempotencyService idempotencyService, JsonSupport json) {
+                               MaintenanceRepository maintenanceRepository,
+                               IdempotencyService idempotencyService, TimeProvider timeProvider,
+                               JsonSupport json) {
         this.lineRepository = lineRepository;
         this.stationRepository = stationRepository;
         this.segmentRepository = segmentRepository;
@@ -68,12 +74,15 @@ public class ControlEventService {
         this.eventRepository = eventRepository;
         this.confirmationRepository = confirmationRepository;
         this.boardingRepository = boardingRepository;
+        this.maintenanceRepository = maintenanceRepository;
         this.idempotencyService = idempotencyService;
+        this.timeProvider = timeProvider;
         this.json = json;
     }
 
     /**
-     * 上客：管制期间（缓停/紧急停车）禁止上客。
+     * 上客：管制期间（缓停/紧急停车）禁止上客；检修封锁生效期间同样禁止，
+     * 每次调用直接按当前时刻检查检修状态，两类阻断分别留证。
      */
     public ResponseEntity<String> board(long lineId, BoardingRequest request) {
         String fingerprint = IdempotencyService.fingerprint(
@@ -85,6 +94,7 @@ public class ControlEventService {
             if (line.status() != LineStatus.NORMAL) {
                 throw ApiException.conflict("线路管制中禁止上客: " + line.status());
             }
+            requireNoMaintenanceBlock(lineId);
             long boardingId = boardingRepository.insert(lineId, request.requestId(), request.passengerCount());
             return json.ok(new BoardingResponse(boardingId, lineId, true));
         });
@@ -172,7 +182,8 @@ public class ControlEventService {
     }
 
     /**
-     * 复开双岗确认：运营与机务各确认一次后事件归档复开，线路恢复运行。
+     * 复开双岗确认：运营与机务各确认一次后事件归档复开，线路恢复运行；
+     * 检修封锁生效期间禁止复开，每次调用直接按当前时刻检查检修状态。
      */
     public ResponseEntity<String> confirmReopen(long eventId, ReopenConfirmationRequest request) {
         String fingerprint = IdempotencyService.fingerprint(
@@ -184,6 +195,10 @@ public class ControlEventService {
             if (event.status() != ControlEventStatus.REOPEN_REQUESTED) {
                 throw ApiException.conflict("事件当前状态不允许复开确认: " + event.status());
             }
+            // 与上客、检修写操作按线路行锁串行化，保证封锁与复开形成一致次序
+            lineRepository.findByIdForUpdate(event.lineId())
+                    .orElseThrow(() -> ApiException.notFound("线路不存在: " + event.lineId()));
+            requireNoMaintenanceBlock(event.lineId());
             confirmationRepository.insertReopenConfirmation(eventId, request.role().name(), request.operatorId());
             List<String> roles = confirmationRepository.listReopenRoles(eventId);
             boolean operations = roles.contains(ReopenRole.OPERATIONS.name());
@@ -200,14 +215,17 @@ public class ControlEventService {
     }
 
     /**
-     * 查询线路视图（含进行中事件 id）。
+     * 查询线路视图（含进行中事件 id 与检修阻断状态，两类原因分别展示）。
      */
     public LineView lineView(long lineId) {
         WindLine line = lineRepository.findById(lineId)
                 .orElseThrow(() -> ApiException.notFound("线路不存在: " + lineId));
         Long activeEventId = eventRepository.findInProgressByLine(lineId)
                 .map(ControlEvent::id).orElse(null);
-        return new LineView(line.id(), line.code(), line.name(), line.status().name(), activeEventId);
+        Long maintenanceOrderId = maintenanceRepository.findBlockingOrder(lineId, timeProvider.now())
+                .map(MaintenanceOrder::id).orElse(null);
+        return new LineView(line.id(), line.code(), line.name(), line.status().name(), activeEventId,
+                maintenanceOrderId != null, maintenanceOrderId);
     }
 
     /**
@@ -236,5 +254,15 @@ public class ControlEventService {
             throw ApiException.unprocessable("分段不属于事件所在线路: segmentId=" + segmentId);
         }
         return segment;
+    }
+
+    /**
+     * 检修封锁检查：当前时刻存在已生效检修单即拒绝（到 end 未验收仍封锁，不自动放行）。
+     */
+    private void requireNoMaintenanceBlock(long lineId) {
+        maintenanceRepository.findBlockingOrder(lineId, timeProvider.now())
+                .ifPresent(order -> {
+                    throw ApiException.conflict("检修封锁中禁止上客或复开: maintenanceOrderId=" + order.id());
+                });
     }
 }
