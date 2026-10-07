@@ -13,12 +13,15 @@ import com.example.starter.radio.model.DispensingVersion;
 import com.example.starter.radio.model.MotherLiquor;
 import com.example.starter.radio.model.Prescription;
 import com.example.starter.radio.model.ReconciliationLedger;
+import com.example.starter.radio.model.WithdrawalItem;
+import com.example.starter.radio.model.WithdrawalOrder;
 import com.example.starter.radio.repository.DispensingRepository;
 import com.example.starter.radio.service.CalibratorService;
 import com.example.starter.radio.service.ChangeOrderService;
 import com.example.starter.radio.service.DispensingService;
 import com.example.starter.radio.service.NotFoundException;
 import com.example.starter.radio.service.RegistrationService;
+import com.example.starter.radio.service.WithdrawalService;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -39,17 +42,20 @@ public class RadioController {
     private final DispensingService dispensingService;
     private final RegistrationService registrationService;
     private final ChangeOrderService changeOrderService;
+    private final WithdrawalService withdrawalService;
     private final DispensingRepository dispensings;
 
     public RadioController(CalibratorService calibratorService,
                            DispensingService dispensingService,
                            RegistrationService registrationService,
                            ChangeOrderService changeOrderService,
+                           WithdrawalService withdrawalService,
                            DispensingRepository dispensings) {
         this.calibratorService = calibratorService;
         this.dispensingService = dispensingService;
         this.registrationService = registrationService;
         this.changeOrderService = changeOrderService;
+        this.withdrawalService = withdrawalService;
         this.dispensings = dispensings;
     }
 
@@ -214,6 +220,85 @@ public class RadioController {
     @GetMapping("/dispensings/{id}/reconciliation")
     public Map<String, Object> recomputeReconciliation(@PathVariable long id) {
         return ledgerView(dispensingService.recompute(id));
+    }
+
+    /**
+     * 提交未发药整批撤回申请：只冻结全清单并建立待批准状态，不立即作废。
+     */
+    @PostMapping("/withdrawals")
+    public Map<String, Object> submitWithdrawal(@Valid @RequestBody RadioApiDtos.WithdrawalSubmitRequest req) {
+        List<WithdrawalService.RequestItem> items = req.items().stream()
+                .map(i -> new WithdrawalService.RequestItem(i.dispensingId(), i.expectedVersion(), i.reason()))
+                .toList();
+        WithdrawalService.SubmitResult result = withdrawalService.submit(req.requestId(), req.reason(), items);
+        Map<String, Object> view = withdrawalView(result.order());
+        view.put("replayed", result.replayed());
+        view.put("items", result.items().stream().map(this::withdrawalItemView).toList());
+        return view;
+    }
+
+    /**
+     * 撤回单双人批准；第二名不同人员批准触发最终事务重查，全合法才一起 VOID。
+     */
+    @PostMapping("/withdrawals/{id}/approvals")
+    public Map<String, Object> approveWithdrawal(@PathVariable long id,
+                                                 @Valid @RequestBody RadioApiDtos.WithdrawalApproveRequest req) {
+        return withdrawalView(withdrawalService.approve(id, req.approver(), req.expectedVersion()));
+    }
+
+    /**
+     * 未批准撤回单整体撤销并释放占用；已批准不能撤销。
+     */
+    @PostMapping("/withdrawals/{id}/cancel")
+    public Map<String, Object> cancelWithdrawal(@PathVariable long id,
+                                                @Valid @RequestBody RadioApiDtos.WithdrawalCancelRequest req) {
+        return withdrawalView(withdrawalService.cancel(req.requestId(), id, req.expectedVersion()));
+    }
+
+    /**
+     * 撤回单证据查询：逐项冻结版本、撤回原因、双人批准链与被终结候选。
+     */
+    @GetMapping("/withdrawals/{id}")
+    public Map<String, Object> getWithdrawal(@PathVariable long id) {
+        WithdrawalService.WithdrawalEvidence evidence = withdrawalService.evidence(id);
+        Map<String, Object> view = withdrawalView(evidence.order());
+        view.put("items", evidence.items().stream().map(this::withdrawalItemView).toList());
+        view.put("approvalChain", evidence.approvals().stream().map(a -> Map.of(
+                "approver", (Object) a.approver(),
+                "approveSeq", a.approveSeq(),
+                "approvedAt", Instant.ofEpochSecond(a.approvedAtEpoch()).toString())).toList());
+        view.put("terminatedCandidates", evidence.terminatedCandidates().stream().map(c -> Map.of(
+                "changeOrderId", (Object) c.id(),
+                "dispensingId", c.dispensingId(),
+                "status", c.status().name(),
+                "terminatedByWithdrawalId",
+                (Object) (c.terminatedByWithdrawalId() == null ? null : c.terminatedByWithdrawalId()))).toList());
+        return view;
+    }
+
+    private Map<String, Object> withdrawalView(WithdrawalOrder w) {
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("id", w.id());
+        view.put("requestId", w.requestId());
+        view.put("motherLiquorId", w.motherLiquorId());
+        view.put("status", w.status().name());
+        view.put("reason", w.reason());
+        view.put("firstApprover", w.firstApprover());
+        view.put("secondApprover", w.secondApprover());
+        view.put("approvedAt",
+                w.approvedAtEpoch() == null ? null : Instant.ofEpochSecond(w.approvedAtEpoch()).toString());
+        view.put("cancelledAt",
+                w.cancelledAtEpoch() == null ? null : Instant.ofEpochSecond(w.cancelledAtEpoch()).toString());
+        view.put("versionNo", w.versionNo());
+        return view;
+    }
+
+    private Map<String, Object> withdrawalItemView(WithdrawalItem item) {
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("dispensingId", item.dispensingId());
+        view.put("frozenVersionNo", item.frozenVersionNo());
+        view.put("reason", item.reason());
+        return view;
     }
 
     private Map<String, Object> dispensingView(Dispensing d) {

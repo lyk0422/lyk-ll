@@ -33,11 +33,14 @@ public abstract class IntegrationTestBase {
     void resetState() {
         jdbc.update("DELETE FROM late_event");
         jdbc.update("DELETE FROM reconciliation_ledger");
+        jdbc.update("DELETE FROM withdrawal_approval");
+        jdbc.update("DELETE FROM withdrawal_item");
         jdbc.update("DELETE FROM dispensing_change_check");
         jdbc.update("DELETE FROM dispensing_change_order");
         jdbc.update("DELETE FROM dispensing_check");
         jdbc.update("DELETE FROM dispensing_version");
         jdbc.update("DELETE FROM dispensing");
+        jdbc.update("DELETE FROM withdrawal_order");
         jdbc.update("DELETE FROM calibrator_daily_check");
         jdbc.update("DELETE FROM mother_liquor");
         jdbc.update("DELETE FROM prescription");

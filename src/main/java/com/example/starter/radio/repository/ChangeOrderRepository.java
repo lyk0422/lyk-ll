@@ -105,6 +105,15 @@ public class ChangeOrderRepository {
                 this::map, dispensingId);
     }
 
+    /**
+     * 证据查询：某撤回单终结的全部时刻候选（状态 WITHDRAWN）。
+     */
+    public List<ChangeOrder> findByTerminatedWithdrawal(long withdrawalId) {
+        return jdbc.query(
+                "SELECT * FROM dispensing_change_order WHERE terminated_by_withdrawal_id = ? ORDER BY id",
+                this::map, withdrawalId);
+    }
+
     public int updateReviewer(long id, String reviewerColumn, String reviewer, long nowEpoch) {
         return jdbc.update("UPDATE dispensing_change_order SET " + reviewerColumn + " = ?, updated_at_epoch = ?"
                 + " WHERE id = ?", reviewer, nowEpoch, id);
@@ -131,6 +140,16 @@ public class ChangeOrderRepository {
         return jdbc.update(
                 "UPDATE dispensing_change_order SET status = 'SUPERSEDED', updated_at_epoch = ? WHERE id = ?",
                 nowEpoch, id);
+    }
+
+    /**
+     * 整批撤回批准最终事务：终结该分装全部未生效（PENDING）时刻候选，状态置 WITHDRAWN 并记录撤回单证据。
+     */
+    public int markWithdrawn(long id, long withdrawalId, long nowEpoch) {
+        return jdbc.update(
+                "UPDATE dispensing_change_order SET status = 'WITHDRAWN',"
+                        + " terminated_by_withdrawal_id = ?, updated_at_epoch = ? WHERE id = ?",
+                withdrawalId, nowEpoch, id);
     }
 
     public long insertCheck(long changeOrderId, String reviewer, int reviewSeq, long reviewedAtEpoch) {
@@ -185,6 +204,7 @@ public class ChangeOrderRepository {
                 (Long) rs.getObject("approved_at_epoch"),
                 (Long) rs.getObject("voided_at_epoch"),
                 rs.getString("void_request_id"),
+                (Long) rs.getObject("terminated_by_withdrawal_id"),
                 rs.getLong("created_at_epoch"),
                 rs.getLong("updated_at_epoch"));
     }

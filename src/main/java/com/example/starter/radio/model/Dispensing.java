@@ -7,6 +7,8 @@ import com.example.starter.radio.domain.DispensingStatus;
  * 可空字段为 NULL 时表示对应步骤尚未发生。
  * versionNo 为当前有效计算版本号（从 1 开始，变更生效加 1）；
  * activeChangeOrderId 非空表示存在挂起候选，非空期间原版本仍可合法发药。
+ * activeWithdrawalId 非空表示该分装已被一张待批准撤回单冻结占用（至多一张活动撤回单）；
+ * 占用不阻止原合法发药与候选批准，仅阻止加入其它撤回单；撤回单批准/撤销后释放。
  */
 public record Dispensing(
         long id,
@@ -24,5 +26,6 @@ public record Dispensing(
         String dispenseFingerprint,
         Long dispensedAtEpoch,
         int versionNo,
-        Long activeChangeOrderId) {
+        Long activeChangeOrderId,
+        Long activeWithdrawalId) {
 }

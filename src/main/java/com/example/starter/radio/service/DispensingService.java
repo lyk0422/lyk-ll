@@ -127,7 +127,8 @@ public class DispensingService {
         Dispensing dispensing = dispensings.findDispensingByIdForUpdate(dispensingId)
                 .orElseThrow(() -> new NotFoundException("分装批次不存在: " + dispensingId));
         if (dispensing.status() == DispensingStatus.REJECTED
-                || dispensing.status() == DispensingStatus.DISPENSED) {
+                || dispensing.status() == DispensingStatus.DISPENSED
+                || dispensing.status() == DispensingStatus.VOID) {
             throw new BusinessException("分装批次已处于终态，禁止核对: " + dispensing.status());
         }
         long now = clock.instant().getEpochSecond();
@@ -168,6 +169,9 @@ public class DispensingService {
             }
             // 终态重复完成：幂等成功，不重复扣减库存
             return new DispenseResult(dispensing, dispensings.findLedger(dispensingId).orElse(null), true);
+        }
+        if (dispensing.status() == DispensingStatus.VOID) {
+            throw new BusinessException("分装批次已撤回作废（VOID 终态），禁止发药且不得重新激活");
         }
         if (dispensing.status() != DispensingStatus.CHECKED) {
             throw new BusinessException("分装批次未完成双人核对或已拒绝，禁止发药: " + dispensing.status());

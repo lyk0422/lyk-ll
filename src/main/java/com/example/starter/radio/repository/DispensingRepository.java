@@ -82,10 +82,74 @@ public class DispensingRepository {
     }
 
     /**
-     * 同一母液批次下未拒绝的全部分装，用于勾稽分装总量复算。
+     * 撤回单事务内按主键升序对一批分装加行锁（FOR UPDATE），串行化撤回与发药/改版竞争。
+     * 调用方须保证 ids 已升序，统一锁顺序避免死锁。
+     */
+    public List<Dispensing> findByIdsForUpdateOrdered(List<Long> ids) {
+        if (ids.isEmpty()) {
+            return List.of();
+        }
+        String placeholders = String.join(",", ids.stream().map(x -> "?").toList());
+        Object[] args = ids.toArray();
+        return jdbc.query("SELECT * FROM dispensing WHERE id IN (" + placeholders + ") ORDER BY id FOR UPDATE",
+                this::mapDispensing, args);
+    }
+
+    /**
+     * 登记一批分装被同一张待批准撤回单占用（软引用，不加外键）；同事务与撤回单创建一起提交。
+     */
+    public int markActiveWithdrawal(List<Long> ids, long withdrawalId, long nowEpoch) {
+        if (ids.isEmpty()) {
+            return 0;
+        }
+        String placeholders = String.join(",", ids.stream().map(x -> "?").toList());
+        Object[] args = new Object[ids.size() + 2];
+        args[0] = withdrawalId;
+        args[1] = nowEpoch;
+        for (int i = 0; i < ids.size(); i++) {
+            args[i + 2] = ids.get(i);
+        }
+        return jdbc.update("UPDATE dispensing SET active_withdrawal_id = ?, updated_at_epoch = ? WHERE id IN ("
+                + placeholders + ")", args);
+    }
+
+    /**
+     * 未批准撤回单整体撤销：释放其全部分装占用。
+     */
+    public int clearActiveWithdrawal(List<Long> ids, long nowEpoch) {
+        if (ids.isEmpty()) {
+            return 0;
+        }
+        String placeholders = String.join(",", ids.stream().map(x -> "?").toList());
+        Object[] args = new Object[ids.size() + 1];
+        args[0] = nowEpoch;
+        for (int i = 0; i < ids.size(); i++) {
+            args[i + 1] = ids.get(i);
+        }
+        return jdbc.update(
+                "UPDATE dispensing SET active_withdrawal_id = NULL, updated_at_epoch = ? WHERE id IN ("
+                        + placeholders + ")", args);
+    }
+
+    /**
+     * 整批撤回批准最终事务：分装转 VOID 终态，释放撤回占用并清空挂起候选引用；
+     * 双人核对字段置空使核对不再有效；计算版本号、原计算版本行与签认行保留为证据。
+     */
+    public int markVoidForWithdrawal(long id, long nowEpoch) {
+        return jdbc.update(
+                "UPDATE dispensing SET status = 'VOID', first_checker = NULL, second_checker = NULL,"
+                        + " active_change_order_id = NULL, active_withdrawal_id = NULL, updated_at_epoch = ?"
+                        + " WHERE id = ?",
+                nowEpoch, id);
+    }
+
+    /**
+     * 同一母液批次下未拒绝、未撤回作废的全部分装，用于勾稽分装总量复算。
+     * REJECTED 从未占用库存；VOID 为未发药撤回（基线计算本就不扣母液），二者均不得计入分装总量。
      */
     public List<Dispensing> findActiveByMotherLiquor(long motherLiquorId) {
-        return jdbc.query("SELECT * FROM dispensing WHERE mother_liquor_id = ? AND status <> 'REJECTED'",
+        return jdbc.query(
+                "SELECT * FROM dispensing WHERE mother_liquor_id = ? AND status NOT IN ('REJECTED', 'VOID')",
                 this::mapDispensing, motherLiquorId);
     }
 
@@ -295,6 +359,7 @@ public class DispensingRepository {
         long dispensedAt = rs.getLong("dispensed_at_epoch");
         Long dispensedAtEpoch = rs.wasNull() ? null : dispensedAt;
         Long activeChangeOrderId = (Long) rs.getObject("active_change_order_id");
+        Long activeWithdrawalId = (Long) rs.getObject("active_withdrawal_id");
         return new Dispensing(
                 rs.getLong("id"),
                 rs.getString("request_id"),
@@ -311,6 +376,7 @@ public class DispensingRepository {
                 rs.getString("dispense_fingerprint"),
                 dispensedAtEpoch,
                 rs.getInt("version_no"),
-                activeChangeOrderId);
+                activeChangeOrderId,
+                activeWithdrawalId);
     }
 }
