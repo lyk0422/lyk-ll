@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS idempotency_record (
     PRIMARY KEY (scope, request_id)
 );
 COMMENT ON TABLE idempotency_record IS '幂等记录：同键同参返回首次结果，同键异参返回 409';
-COMMENT ON COLUMN idempotency_record.scope IS '操作类型：ENTRY/EXIT/ESTIMATE/SEAL/REFUND_APPLY/REFUND_CONFIRM/CARD_CLOSE/ADJ_BATCH_OPEN/ADJ_INCLUDE/ADJ_BATCH_SEAL';
+COMMENT ON COLUMN idempotency_record.scope IS '操作类型：ENTRY/EXIT/ESTIMATE/SEAL/REFUND_APPLY/REFUND_CONFIRM/CARD_CLOSE/ADJ_BATCH_OPEN/ADJ_INCLUDE/ADJ_BATCH_SEAL/REMIT_STATEMENT_OPEN/REMIT_RECEIPT';
 COMMENT ON COLUMN idempotency_record.request_id IS '请求幂等键';
 COMMENT ON COLUMN idempotency_record.fingerprint IS '请求指纹，覆盖 requestId 与全部业务字段';
 COMMENT ON COLUMN idempotency_record.response_body IS '首次成功响应快照（JSON）';
@@ -250,4 +250,87 @@ CREATE TABLE IF NOT EXISTS adjustment_detail (
 );
 COMMENT ON TABLE adjustment_detail IS '调账批次明细：调整单纳入时复制其负向明细，封存后只读';
 COMMENT ON COLUMN adjustment_detail.amount_cents IS '负向调整金额（分，负数）';
+
+-- 缴回对账域：封存调账批次后各线路实际缴回登记。原退款分摊、双人确认与
+-- 封账金额不重算，缴回只形成独立收款凭据；全部银行数据均为合成。
+CREATE TABLE IF NOT EXISTS remittance_statement (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    statement_no VARCHAR(64) NOT NULL,
+    batch_id BIGINT NOT NULL,
+    batch_no VARCHAR(64) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    due_total_cents BIGINT NOT NULL,
+    paid_total_cents BIGINT NOT NULL DEFAULT 0,
+    version INT NOT NULL DEFAULT 1,
+    open_request_id VARCHAR(64) NOT NULL,
+    created_at DATETIME NOT NULL,
+    completed_at DATETIME NULL,
+    CONSTRAINT uk_statement_no UNIQUE (statement_no),
+    CONSTRAINT uk_statement_batch UNIQUE (batch_id)
+);
+COMMENT ON TABLE remittance_statement IS '缴回对账单：仅非空已封存调账批次可建立，每批最多一单；金额单位分';
+COMMENT ON COLUMN remittance_statement.statement_no IS '对账单号，全局唯一';
+COMMENT ON COLUMN remittance_statement.batch_id IS '来源调账批次 ID，唯一约束保证每批最多一单，不同批次不得混用';
+COMMENT ON COLUMN remittance_statement.batch_no IS '来源调账批次号（冗余便于核对）';
+COMMENT ON COLUMN remittance_statement.status IS '状态：OPEN 缴款中 / COMPLETED 全部线路恰缴齐（终态，新流水拒绝）';
+COMMENT ON COLUMN remittance_statement.due_total_cents IS '应缴总额（分）：本批负向调整金额绝对值之和，建立时冻结';
+COMMENT ON COLUMN remittance_statement.paid_total_cents IS '已缴总额（分），随成功回执累加，永不超过应缴';
+COMMENT ON COLUMN remittance_statement.version IS '乐观锁版本，从 1 开始，每次成功回执加 1';
+COMMENT ON COLUMN remittance_statement.completed_at IS '全部线路恰缴齐时刻（Asia/Shanghai），NULL 表示未完成';
+
+CREATE TABLE IF NOT EXISTS remittance_statement_line (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    statement_id BIGINT NOT NULL,
+    line_code VARCHAR(16) NOT NULL,
+    due_cents BIGINT NOT NULL,
+    paid_cents BIGINT NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT uk_statement_line UNIQUE (statement_id, line_code)
+);
+COMMENT ON TABLE remittance_statement_line IS '对账单逐线路应缴/已缴：应缴为建立时冻结快照，已缴随回执条件累加不超应缴';
+COMMENT ON COLUMN remittance_statement_line.due_cents IS '该线路应缴额（分，正数）：本批该线路负向调整金额绝对值之和';
+COMMENT ON COLUMN remittance_statement_line.paid_cents IS '该线路已缴额（分），并发回执下不得超过 due_cents';
+
+CREATE TABLE IF NOT EXISTS remittance_source_detail (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    statement_id BIGINT NOT NULL,
+    adjustment_no VARCHAR(96) NOT NULL,
+    txn_no VARCHAR(64) NOT NULL,
+    line_code VARCHAR(16) NOT NULL,
+    amount_cents BIGINT NOT NULL,
+    created_at DATETIME NOT NULL
+);
+COMMENT ON TABLE remittance_source_detail IS '对账单冻结来源明细：建立时复制调账批次全部负向明细，查询可复算应缴额';
+COMMENT ON COLUMN remittance_source_detail.amount_cents IS '负向调整金额（分，负数），与来源调账明细一致，永不改写';
+
+CREATE TABLE IF NOT EXISTS remittance_receipt (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    statement_id BIGINT NOT NULL,
+    bank_flow_no VARCHAR(64) NOT NULL,
+    arrived_at DATETIME NOT NULL,
+    total_cents BIGINT NOT NULL,
+    content_fingerprint VARCHAR(128) NOT NULL,
+    response_body CLOB NOT NULL,
+    request_id VARCHAR(64) NOT NULL,
+    created_at DATETIME NOT NULL,
+    CONSTRAINT uk_bank_flow_no UNIQUE (bank_flow_no)
+);
+COMMENT ON TABLE remittance_receipt IS '缴回收款凭据：合成银行流水回执，整笔入账或整笔零入账；流水号全局唯一';
+COMMENT ON COLUMN remittance_receipt.bank_flow_no IS '合成银行流水号，全局唯一；同流水同内容重放首次结果，异内容 409';
+COMMENT ON COLUMN remittance_receipt.arrived_at IS '到账时刻（UTC）';
+COMMENT ON COLUMN remittance_receipt.total_cents IS '回执总额（分，正数），等于各线路分配合计';
+COMMENT ON COLUMN remittance_receipt.content_fingerprint IS '回执完整内容指纹（不含 requestId），用于同流水异内容判重';
+COMMENT ON COLUMN remittance_receipt.response_body IS '首次成功响应快照（JSON），同流水重放时原样返回';
+
+CREATE TABLE IF NOT EXISTS remittance_receipt_line (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    receipt_id BIGINT NOT NULL,
+    line_code VARCHAR(16) NOT NULL,
+    amount_cents BIGINT NOT NULL,
+    created_at DATETIME NOT NULL,
+    CONSTRAINT uk_receipt_line UNIQUE (receipt_id, line_code)
+);
+COMMENT ON TABLE remittance_receipt_line IS '回执逐线路分配：每笔 1 至 10 条不同线路，金额为正且不超该线路未缴余额';
+COMMENT ON COLUMN remittance_receipt_line.amount_cents IS '分配到该线路的金额（分，正数）';
 
