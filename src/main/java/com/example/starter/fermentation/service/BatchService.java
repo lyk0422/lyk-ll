@@ -22,6 +22,7 @@ import com.example.starter.fermentation.error.ApiException;
 import com.example.starter.fermentation.repository.BatchRepository;
 import com.example.starter.fermentation.repository.CurveRepository;
 import com.example.starter.fermentation.repository.ReadingRepository;
+import com.example.starter.fermentation.repository.ReceivingRepository;
 import com.example.starter.fermentation.service.IdempotencyService.ConcurrentReplayException;
 import com.example.starter.fermentation.service.IdempotencyService.StoredResponse;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -34,6 +35,7 @@ import org.springframework.transaction.interceptor.TransactionAspectSupport;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -66,15 +68,18 @@ public class BatchService {
     private final BatchRepository batchRepository;
     private final CurveRepository curveRepository;
     private final ReadingRepository readingRepository;
+    private final ReceivingRepository receivingRepository;
     private final IdempotencyService idempotencyService;
     private final ObjectMapper objectMapper;
 
     public BatchService(BatchRepository batchRepository, CurveRepository curveRepository,
-                        ReadingRepository readingRepository, IdempotencyService idempotencyService,
+                        ReadingRepository readingRepository, ReceivingRepository receivingRepository,
+                        IdempotencyService idempotencyService,
                         ObjectMapper objectMapper) {
         this.batchRepository = batchRepository;
         this.curveRepository = curveRepository;
         this.readingRepository = readingRepository;
+        this.receivingRepository = receivingRepository;
         this.idempotencyService = idempotencyService;
         this.objectMapper = objectMapper;
     }
@@ -297,6 +302,8 @@ public class BatchService {
 
     /**
      * 清酒转出：JUDGED → TRANSFERRED（终态）。重复转出返回幂等成功。
+     * 受控源旧单笔转出同样占用唯一核销（liquor_writeoff），与合批接收共享，
+     * 任一方已消费则另一方不得重复消费；核销与状态流转同事务提交。
      */
     @Transactional
     public StoredResponse transfer(long batchId, TransferRequest req) {
@@ -310,6 +317,14 @@ public class BatchService {
                 return new StoredResponse(200, toJson(toResponse(batch)));
             }
             requireStatus(batch, BatchStatus.JUDGED, "仅判定合格批次可清酒转出");
+            try {
+                receivingRepository.insertWriteoff(batchId, "SINGLE", null,
+                        LocalDateTime.now(ZoneOffset.UTC));
+            } catch (DuplicateKeyException e) {
+                // 唯一核销已被合批接收消费：单笔转出不得重复消费，整单回滚
+                throw ApiException.conflict(
+                        "批次清酒量已被合批接收核销，旧单笔转出不得重复消费: " + batchId);
+            }
             batchRepository.completeTransfer(batchId, req.transferredAt());
             return new StoredResponse(200, toJson(toResponse(mustFind(batchId))));
         });

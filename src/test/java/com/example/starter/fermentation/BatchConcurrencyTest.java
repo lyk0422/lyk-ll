@@ -45,6 +45,11 @@ class BatchConcurrencyTest {
         jdbc.update("DELETE FROM late_event");
         jdbc.update("DELETE FROM temperature_reading");
         jdbc.update("DELETE FROM diacetyl_test");
+        jdbc.update("DELETE FROM merge_receipt_item");
+        jdbc.update("DELETE FROM liquor_writeoff");
+        jdbc.update("DELETE FROM source_liquor_register");
+        jdbc.update("DELETE FROM merge_receipt");
+        jdbc.update("DELETE FROM receiving_tank");
         jdbc.update("DELETE FROM yeast_recovery");
         jdbc.update("DELETE FROM yeast_unit");
         jdbc.update("DELETE FROM idempotency_record");

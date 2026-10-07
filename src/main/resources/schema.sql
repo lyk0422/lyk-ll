@@ -118,3 +118,63 @@ CREATE TABLE IF NOT EXISTS late_event (
     created_at TIMESTAMP NOT NULL COMMENT '事件记录时间',
     CONSTRAINT fk_late_batch FOREIGN KEY (batch_id) REFERENCES fermentation_batch (id)
 ) COMMENT '批次终态后到达的迟到数据事件';
+
+-- 合批接收台账（清酒多批合入同一接收罐）
+-- 容量与升数均为正数、最多三位小数（单位升）；新台账版本号均从 1 起。
+
+CREATE TABLE IF NOT EXISTS receiving_tank (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    tank_code VARCHAR(64) NOT NULL COMMENT '接收罐编号，全局唯一（区别于发酵罐）',
+    capacity_liters DECIMAL(10,3) NOT NULL COMMENT '接收罐容量，单位升，正数最多三位小数；不得缩到已接收量以下',
+    received_liters DECIMAL(10,3) NOT NULL DEFAULT 0 COMMENT '累计已接收清酒量，单位升，仅由合批受理事务原子累加，恰满允许',
+    version INT NOT NULL DEFAULT 1 COMMENT '乐观版本号，从 1 起；容量调整或合批受理成功加 1，修改须携带 expectedVersion，旧版返回 409',
+    created_at TIMESTAMP NOT NULL COMMENT '登记时间（UTC 记时）',
+    updated_at TIMESTAMP NOT NULL COMMENT '最近变更时间（UTC 记时）',
+    CONSTRAINT uk_receiving_tank_code UNIQUE (tank_code),
+    CONSTRAINT ck_receiving_capacity_positive CHECK (capacity_liters > 0),
+    CONSTRAINT ck_receiving_not_overfilled CHECK (received_liters <= capacity_liters)
+) COMMENT '合成清酒接收罐：容量登记与累计接收量（合批接收新台账）';
+
+CREATE TABLE IF NOT EXISTS source_liquor_register (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL COMMENT '受控源批 ID；仅给未转出且原成熟度已合格（JUDGED）的批次登记，一批一条',
+    liters DECIMAL(10,3) NOT NULL COMMENT '实际清酒量，单位升，正数最多三位小数且不超过其发酵罐容量；登记后冻结不可改',
+    frozen TINYINT NOT NULL DEFAULT 1 COMMENT '是否冻结：登记即冻结为 1；冻结后源量只读，禁止重复登记或修改',
+    version INT NOT NULL DEFAULT 1 COMMENT '台账版本号，从 1 起（冻结台账不允许修改）',
+    created_at TIMESTAMP NOT NULL COMMENT '源量登记时间（UTC 记时）',
+    CONSTRAINT uk_source_liquor_batch UNIQUE (batch_id),
+    CONSTRAINT fk_source_liquor_batch FOREIGN KEY (batch_id) REFERENCES fermentation_batch (id),
+    CONSTRAINT ck_source_liquor_positive CHECK (liters > 0)
+) COMMENT '源批实际清酒量台账（新台账，登记后冻结，等待一次核销）';
+
+CREATE TABLE IF NOT EXISTS liquor_writeoff (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL COMMENT '被核销的源批 ID，全局唯一：旧单笔转出与合批接收共享同一核销，任一渠道消费后另一渠道不得重复消费',
+    channel VARCHAR(16) NOT NULL COMMENT '核销渠道：SINGLE 受控源旧单笔转出 / MERGE 合批接收',
+    receipt_id BIGINT NULL COMMENT '合批接收受理 ID（merge_receipt.id）；单笔转出为 NULL',
+    created_at TIMESTAMP NOT NULL COMMENT '核销时间（UTC 记时）',
+    CONSTRAINT uk_writeoff_batch UNIQUE (batch_id),
+    CONSTRAINT fk_writeoff_batch FOREIGN KEY (batch_id) REFERENCES fermentation_batch (id)
+) COMMENT '清酒量唯一核销记录（单笔转出/合批共享，并发由唯一约束裁决）';
+
+CREATE TABLE IF NOT EXISTS merge_receipt (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    receiving_tank_id BIGINT NOT NULL COMMENT '接收入罐 ID',
+    total_liters DECIMAL(10,3) NOT NULL COMMENT '本次合计接收升数，等于各来源登记量之和，不做部分转出',
+    received_at TIMESTAMP NOT NULL COMMENT '业务接收时间（调用方传入，本地时间，无时区）',
+    created_at TIMESTAMP NOT NULL COMMENT '受理时间（UTC 记时）',
+    CONSTRAINT fk_receipt_tank FOREIGN KEY (receiving_tank_id) REFERENCES receiving_tank (id)
+) COMMENT '合批接收受理单（一次引用 2 至 5 个同曲线版本受控源批与同一接收罐）';
+
+CREATE TABLE IF NOT EXISTS merge_receipt_item (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    receipt_id BIGINT NOT NULL COMMENT '所属受理单 ID',
+    batch_id BIGINT NOT NULL COMMENT '来源批次 ID，受理后为原已转出终态 TRANSFERRED',
+    batch_no VARCHAR(64) NOT NULL COMMENT '来源批次号（受理时快照，便于勾稽复算）',
+    curve_version INT NOT NULL COMMENT '来源批次受理时的工艺曲线版本快照，同一受理单各源必须一致',
+    liters DECIMAL(10,3) NOT NULL COMMENT '完整接收的源登记清酒量，单位升，不做部分转出',
+    CONSTRAINT uk_receipt_item_batch UNIQUE (batch_id),
+    CONSTRAINT uk_receipt_item_receipt_batch UNIQUE (receipt_id, batch_id),
+    CONSTRAINT fk_receipt_item_receipt FOREIGN KEY (receipt_id) REFERENCES merge_receipt (id),
+    CONSTRAINT fk_receipt_item_batch FOREIGN KEY (batch_id) REFERENCES fermentation_batch (id)
+) COMMENT '合批接收来源明细（各源登记量快照，可复算各次接收与来源总升数）';

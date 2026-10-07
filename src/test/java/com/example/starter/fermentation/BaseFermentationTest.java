@@ -8,6 +8,10 @@ import com.example.starter.fermentation.api.BatchDtos.JudgeRequest;
 import com.example.starter.fermentation.api.BatchDtos.StartPhaseRequest;
 import com.example.starter.fermentation.api.BatchDtos.TemperatureReadingRequest;
 import com.example.starter.fermentation.api.BatchDtos.TransferRequest;
+import com.example.starter.fermentation.api.ReceivingDtos.MergeReceiveRequest;
+import com.example.starter.fermentation.api.ReceivingDtos.RegisterSourceLiquorRequest;
+import com.example.starter.fermentation.api.ReceivingDtos.RegisterTankRequest;
+import com.example.starter.fermentation.api.ReceivingDtos.UpdateTankCapacityRequest;
 import com.example.starter.fermentation.api.YeastDtos.PitchYeastRequest;
 import com.example.starter.fermentation.api.YeastDtos.RecoverYeastRequest;
 import com.example.starter.fermentation.api.YeastDtos.RegisterYeastRequest;
@@ -24,6 +28,7 @@ import org.springframework.test.web.servlet.MvcResult;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -54,6 +59,11 @@ public abstract class BaseFermentationTest {
         jdbc.update("DELETE FROM late_event");
         jdbc.update("DELETE FROM temperature_reading");
         jdbc.update("DELETE FROM diacetyl_test");
+        jdbc.update("DELETE FROM merge_receipt_item");
+        jdbc.update("DELETE FROM liquor_writeoff");
+        jdbc.update("DELETE FROM source_liquor_register");
+        jdbc.update("DELETE FROM merge_receipt");
+        jdbc.update("DELETE FROM receiving_tank");
         jdbc.update("DELETE FROM yeast_recovery");
         jdbc.update("DELETE FROM yeast_unit");
         jdbc.update("DELETE FROM idempotency_record");
@@ -179,5 +189,56 @@ public abstract class BaseFermentationTest {
     /** 后熟开始时间（与 {@link #driveToMaturation} 保持一致）。 */
     LocalDateTime maturationStart() {
         return T0.plusHours(15);
+    }
+
+    /**
+     * 驱动批次到“原成熟度已合格待转出（JUDGED）”状态，作为合批接收的受控源批。
+     *
+     * @return 批次 ID；判定时间为后熟开始后恰 7 天
+     */
+    long driveToJudged(String batchNo, String tankCode) throws Exception {
+        long id = driveToMaturation(batchNo, tankCode);
+        assertEquals(200, judge(id, newRequestId(), maturationStart().plusDays(7))
+                .getResponse().getStatus());
+        return id;
+    }
+
+    /** 登记合成接收罐，断言 201 并返回响应 JSON。 */
+    JsonNode registerReceivingTank(String requestId, String tankCode, String capacityLiters)
+            throws Exception {
+        MvcResult result = doPost("/api/receiving-tanks",
+                new RegisterTankRequest(requestId, tankCode, new BigDecimal(capacityLiters)));
+        assertEquals(201, result.getResponse().getStatus(), "登记接收罐应返回 201");
+        return json(result);
+    }
+
+    /** 调整接收罐容量。 */
+    MvcResult updateTankCapacity(String tankCode, String requestId, String capacityLiters,
+                                 int expectedVersion) throws Exception {
+        return doPut("/api/receiving-tanks/" + tankCode + "/capacity",
+                new UpdateTankCapacityRequest(requestId, new BigDecimal(capacityLiters),
+                        expectedVersion));
+    }
+
+    /** 给源批登记一次实际清酒量（登记后冻结）。 */
+    MvcResult registerSourceLiquor(long batchId, String requestId, String liters) throws Exception {
+        return doPost("/api/batches/" + batchId + "/source-liquor",
+                new RegisterSourceLiquorRequest(requestId, new BigDecimal(liters)));
+    }
+
+    /** 合批接收请求。 */
+    MvcResult mergeReceive(String requestId, String tankCode, List<Long> batchIds,
+                           int expectedVersion, LocalDateTime receivedAt) throws Exception {
+        return doPost("/api/merge-receipts",
+                new MergeReceiveRequest(requestId, tankCode, batchIds, expectedVersion,
+                        receivedAt));
+    }
+
+    MvcResult doPut(String url, Object body) throws Exception {
+        return mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .put(url)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(body)))
+                .andReturn();
     }
 }
