@@ -110,6 +110,46 @@ CREATE TABLE IF NOT EXISTS idempotency_record (
     CONSTRAINT uk_idem_request UNIQUE (request_id)
 ) COMMENT '幂等受理记录';
 
+CREATE TABLE IF NOT EXISTS receiving_tank (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    tank_code VARCHAR(64) NOT NULL COMMENT '合成接收罐编号，全局唯一',
+    capacity_liters DECIMAL(12,3) NOT NULL COMMENT '接收罐容量，单位升，正数最多三位小数；调容不得缩到已接收量以下',
+    received_liters DECIMAL(12,3) NOT NULL DEFAULT 0 COMMENT '已接收清酒总量，单位升；等于各合批接收单合计，可复算',
+    version INT NOT NULL COMMENT '台账版本号，从 1 开始，每次成功变更（调容或接收）加 1，旧版 409',
+    created_at TIMESTAMP NOT NULL COMMENT '登记时间（UTC）',
+    CONSTRAINT uk_receiving_tank_code UNIQUE (tank_code)
+) COMMENT '合成清酒接收罐台账';
+
+CREATE TABLE IF NOT EXISTS source_volume (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT NOT NULL COMMENT '源批次 ID，每批仅登记一次',
+    volume_liters DECIMAL(12,3) NOT NULL COMMENT '实际清酒升数，单位升，正数最多三位小数且不超过源发酵罐容量；登记后冻结',
+    version INT NOT NULL COMMENT '台账版本号，从 1 开始；登记后冻结不再变更',
+    created_at TIMESTAMP NOT NULL COMMENT '登记时间（UTC）',
+    CONSTRAINT uk_source_volume_batch UNIQUE (batch_id),
+    CONSTRAINT fk_source_volume_batch FOREIGN KEY (batch_id) REFERENCES fermentation_batch (id)
+) COMMENT '源批实际清酒升数台账（登记一次后冻结，启用一次核销管控）';
+
+CREATE TABLE IF NOT EXISTS merge_receipt (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    receiving_tank_id BIGINT NOT NULL COMMENT '接收罐 ID',
+    curve_code VARCHAR(64) NOT NULL COMMENT '全部来源统一的工艺曲线编码',
+    curve_version INT NOT NULL COMMENT '全部来源统一的工艺曲线版本号',
+    total_liters DECIMAL(12,3) NOT NULL COMMENT '本次接收合计升数，等于各来源登记量之和，可复算',
+    received_at TIMESTAMP NOT NULL COMMENT '接收受理业务时间（由调用方传入）',
+    created_at TIMESTAMP NOT NULL COMMENT '接收单创建时间（UTC）',
+    CONSTRAINT fk_receipt_tank FOREIGN KEY (receiving_tank_id) REFERENCES receiving_tank (id)
+) COMMENT '合批接收单（一次接收 2 至 5 个受控源批，原子核销）';
+
+CREATE TABLE IF NOT EXISTS merge_receipt_source (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    receipt_id BIGINT NOT NULL COMMENT '所属合批接收单 ID',
+    batch_id BIGINT NOT NULL COMMENT '来源批次 ID',
+    volume_liters DECIMAL(12,3) NOT NULL COMMENT '该来源完整接收的登记升数，不做部分转出',
+    CONSTRAINT fk_receipt_source_receipt FOREIGN KEY (receipt_id) REFERENCES merge_receipt (id),
+    CONSTRAINT fk_receipt_source_batch FOREIGN KEY (batch_id) REFERENCES fermentation_batch (id)
+) COMMENT '合批接收来源明细（完整接收各源登记量）';
+
 CREATE TABLE IF NOT EXISTS late_event (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     batch_id BIGINT NOT NULL COMMENT '所属批次 ID',

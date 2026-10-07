@@ -147,6 +147,19 @@ public class BatchRepository {
     }
 
     /**
+     * 唯一核销的条件更新：仅当批次仍为 JUDGED 时核销为 TRANSFERRED 并释放原罐。
+     * 旧单笔转出与合批接收共享此唯一核销；并发或重复核销返回 0，不得重复消费。
+     *
+     * @return 受影响行数；0 表示核销已被消费或批次不满足转出条件
+     */
+    public int tryCompleteTransfer(long id, LocalDateTime transferredAt) {
+        return jdbc.update("UPDATE fermentation_batch SET status = ?, transferred_at = ?,"
+                        + " active_tank_key = NULL WHERE id = ? AND status = ?",
+                BatchStatus.TRANSFERRED.name(), Timestamp.valueOf(transferredAt), id,
+                BatchStatus.JUDGED.name());
+    }
+
+    /**
      * 统计指定罐的进行中批次数（用于测试断言唯一占用）。
      */
     public int countActiveByTankKey(String tankCode) {

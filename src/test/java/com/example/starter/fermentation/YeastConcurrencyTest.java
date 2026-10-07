@@ -51,6 +51,10 @@ class YeastConcurrencyTest {
         jdbc.update("DELETE FROM diacetyl_test");
         jdbc.update("DELETE FROM yeast_recovery");
         jdbc.update("DELETE FROM yeast_unit");
+        jdbc.update("DELETE FROM merge_receipt_source");
+        jdbc.update("DELETE FROM merge_receipt");
+        jdbc.update("DELETE FROM source_volume");
+        jdbc.update("DELETE FROM receiving_tank");
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM fermentation_batch");
         for (int i = 1; i <= 8; i++) {

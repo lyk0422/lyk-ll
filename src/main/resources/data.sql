@@ -12,6 +12,12 @@ INSERT INTO fermentation_tank (tank_code, capacity_liters)
 SELECT 'TANK-2', 5000 WHERE NOT EXISTS (SELECT 1 FROM fermentation_tank WHERE tank_code = 'TANK-2');
 INSERT INTO fermentation_tank (tank_code, capacity_liters)
 SELECT 'TANK-3', 8000 WHERE NOT EXISTS (SELECT 1 FROM fermentation_tank WHERE tank_code = 'TANK-3');
+INSERT INTO fermentation_tank (tank_code, capacity_liters)
+SELECT 'TANK-4', 5000 WHERE NOT EXISTS (SELECT 1 FROM fermentation_tank WHERE tank_code = 'TANK-4');
+INSERT INTO fermentation_tank (tank_code, capacity_liters)
+SELECT 'TANK-5', 5000 WHERE NOT EXISTS (SELECT 1 FROM fermentation_tank WHERE tank_code = 'TANK-5');
+INSERT INTO fermentation_tank (tank_code, capacity_liters)
+SELECT 'TANK-6', 5000 WHERE NOT EXISTS (SELECT 1 FROM fermentation_tank WHERE tank_code = 'TANK-6');
 
 INSERT INTO process_curve (id, curve_code, version, status, created_at)
 SELECT 1, 'LAGER-CURVE', 1, 'ACTIVE', TIMESTAMP '2026-01-01 00:00:00'

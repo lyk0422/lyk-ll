@@ -8,6 +8,7 @@ import com.example.starter.fermentation.api.BatchDtos.JudgeRequest;
 import com.example.starter.fermentation.api.BatchDtos.StartPhaseRequest;
 import com.example.starter.fermentation.api.BatchDtos.TemperatureReadingRequest;
 import com.example.starter.fermentation.api.BatchDtos.TransferRequest;
+import com.example.starter.fermentation.api.ReceivingDtos;
 import com.example.starter.fermentation.api.YeastDtos.PitchYeastRequest;
 import com.example.starter.fermentation.api.YeastDtos.RecoverYeastRequest;
 import com.example.starter.fermentation.api.YeastDtos.RegisterYeastRequest;
@@ -24,6 +25,7 @@ import org.springframework.test.web.servlet.MvcResult;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -56,6 +58,10 @@ public abstract class BaseFermentationTest {
         jdbc.update("DELETE FROM diacetyl_test");
         jdbc.update("DELETE FROM yeast_recovery");
         jdbc.update("DELETE FROM yeast_unit");
+        jdbc.update("DELETE FROM merge_receipt_source");
+        jdbc.update("DELETE FROM merge_receipt");
+        jdbc.update("DELETE FROM source_volume");
+        jdbc.update("DELETE FROM receiving_tank");
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM fermentation_batch");
         jdbc.update("DELETE FROM curve_segment WHERE curve_id IN"
@@ -70,6 +76,19 @@ public abstract class BaseFermentationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(body)))
                 .andReturn();
+    }
+
+    MvcResult doPut(String url, Object body) throws Exception {
+        return mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .put(url)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(body)))
+                .andReturn();
+    }
+
+    JsonNode doGet(String url) throws Exception {
+        return json(mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .get(url)).andReturn());
     }
 
     JsonNode json(MvcResult result) throws Exception {
@@ -179,5 +198,40 @@ public abstract class BaseFermentationTest {
     /** 后熟开始时间（与 {@link #driveToMaturation} 保持一致）。 */
     LocalDateTime maturationStart() {
         return T0.plusHours(15);
+    }
+
+    /** 驱动批次进入 JUDGED：后熟开始恰 7 天后判定合格。 */
+    long driveToJudged(String batchNo, String tankCode) throws Exception {
+        long id = driveToMaturation(batchNo, tankCode);
+        assertEquals(200, judge(id, newRequestId(), maturationStart().plusDays(7))
+                .getResponse().getStatus(), "恰 7 天判定应合格");
+        return id;
+    }
+
+    /** 登记合成接收罐。 */
+    MvcResult registerTank(String requestId, String tankCode, String capacityLiters) throws Exception {
+        return doPost("/api/receiving-tanks", new ReceivingDtos.RegisterReceivingTankRequest(
+                requestId, tankCode, new BigDecimal(capacityLiters)));
+    }
+
+    /** 调整接收罐容量。 */
+    MvcResult updateCapacity(String tankCode, String requestId, int expectedVersion,
+                             String capacityLiters) throws Exception {
+        return doPut("/api/receiving-tanks/" + tankCode + "/capacity",
+                new ReceivingDtos.UpdateCapacityRequest(
+                        requestId, expectedVersion, new BigDecimal(capacityLiters)));
+    }
+
+    /** 登记源批实际清酒升数。 */
+    MvcResult registerVolume(long batchId, String requestId, String volumeLiters) throws Exception {
+        return doPost("/api/batches/" + batchId + "/sake-volume",
+                new ReceivingDtos.RegisterSourceVolumeRequest(requestId, new BigDecimal(volumeLiters)));
+    }
+
+    /** 合批接收。 */
+    MvcResult merge(String requestId, String tankCode, List<Long> sourceBatchIds,
+                    LocalDateTime at) throws Exception {
+        return doPost("/api/merge-receipts", new ReceivingDtos.MergeReceiptRequest(
+                requestId, tankCode, sourceBatchIds, at));
     }
 }

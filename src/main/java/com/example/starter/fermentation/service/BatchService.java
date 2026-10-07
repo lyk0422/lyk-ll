@@ -297,6 +297,7 @@ public class BatchService {
 
     /**
      * 清酒转出：JUDGED → TRANSFERRED（终态）。重复转出返回幂等成功。
+     * 与合批接收共享唯一核销：条件更新保证 JUDGED → TRANSFERRED 仅消费一次。
      */
     @Transactional
     public StoredResponse transfer(long batchId, TransferRequest req) {
@@ -310,7 +311,16 @@ public class BatchService {
                 return new StoredResponse(200, toJson(toResponse(batch)));
             }
             requireStatus(batch, BatchStatus.JUDGED, "仅判定合格批次可清酒转出");
-            batchRepository.completeTransfer(batchId, req.transferredAt());
+            int writtenOff = batchRepository.tryCompleteTransfer(batchId, req.transferredAt());
+            if (writtenOff == 0) {
+                // 核销被并发合批接收或另一转出消费：重读终态，按已转出幂等处理
+                FermentationBatch current = mustFind(batchId);
+                if (current.status() == BatchStatus.TRANSFERRED) {
+                    return new StoredResponse(200, toJson(toResponse(current)));
+                }
+                throw ApiException.unprocessable("批次状态已变更，本次转出未生效（当前状态 "
+                        + current.status() + "）");
+            }
             return new StoredResponse(200, toJson(toResponse(mustFind(batchId))));
         });
     }
