@@ -4,6 +4,7 @@ import com.example.starter.transition.ApiException;
 import com.example.starter.transition.QualityThresholds;
 import com.example.starter.transition.TransitionStatus;
 import com.example.starter.transition.dto.AdjustBlendRatioRequest;
+import com.example.starter.transition.dto.AdjustRecycleQuotaRequest;
 import com.example.starter.transition.dto.ApplyOrderRequest;
 import com.example.starter.transition.dto.BlendReadingRequest;
 import com.example.starter.transition.dto.BlendReadingView;
@@ -11,17 +12,24 @@ import com.example.starter.transition.dto.BlendRecomputeView;
 import com.example.starter.transition.dto.BlendVersionView;
 import com.example.starter.transition.dto.DisposeRollsRequest;
 import com.example.starter.transition.dto.ExecuteOrderRequest;
+import com.example.starter.transition.dto.FeedView;
 import com.example.starter.transition.dto.IdempotentResult;
 import com.example.starter.transition.dto.InspectionRequest;
 import com.example.starter.transition.dto.OrderView;
+import com.example.starter.transition.dto.RecycleQuotaView;
 import com.example.starter.transition.dto.ReexamRequest;
+import com.example.starter.transition.dto.RegisterRecycleQuotaRequest;
 import com.example.starter.transition.dto.ResumeExecutionRequest;
 import com.example.starter.transition.dto.RollView;
+import com.example.starter.transition.dto.SubmitFeedRequest;
 import com.example.starter.transition.dto.TransitionRecomputeView;
 import com.example.starter.transition.model.BlendRatioVersion;
 import com.example.starter.transition.model.BlendReading;
+import com.example.starter.transition.model.FeedBatch;
+import com.example.starter.transition.model.FeedBatchItem;
 import com.example.starter.transition.model.Grade;
 import com.example.starter.transition.model.IdempotentRequest;
+import com.example.starter.transition.model.RecycleQuota;
 import com.example.starter.transition.model.RollInspection;
 import com.example.starter.transition.model.TransitionOrder;
 import com.example.starter.transition.model.TransitionRoll;
@@ -29,10 +37,12 @@ import com.example.starter.transition.repo.BlendControlEventRepository;
 import com.example.starter.transition.repo.BlendRatioVersionRepository;
 import com.example.starter.transition.repo.BlendReadingRepository;
 import com.example.starter.transition.repo.CleaningWindowRepository;
+import com.example.starter.transition.repo.FeedBatchRepository;
 import com.example.starter.transition.repo.GradeRepository;
 import com.example.starter.transition.repo.IdempotentRequestRepository;
 import com.example.starter.transition.repo.LateEventRepository;
 import com.example.starter.transition.repo.MachineSlotRepository;
+import com.example.starter.transition.repo.RecycleQuotaRepository;
 import com.example.starter.transition.repo.RollInspectionRepository;
 import com.example.starter.transition.repo.TransitionOrderRepository;
 import com.example.starter.transition.repo.TransitionRollRepository;
@@ -68,6 +78,9 @@ public class TransitionService {
     static final String BIZ_ADJUST_BLEND = "ADJUST_BLEND_RATIO";
     static final String BIZ_BLEND_READING = "SUBMIT_BLEND_READING";
     static final String BIZ_RESUME = "RESUME_EXECUTION";
+    static final String BIZ_RECYCLE_REGISTER = "REGISTER_RECYCLE_QUOTA";
+    static final String BIZ_RECYCLE_ADJUST = "ADJUST_RECYCLE_QUOTA";
+    static final String BIZ_FEED = "SUBMIT_FEED";
 
     static final String INSPECTION_INITIAL = "INITIAL";
     static final String INSPECTION_REEXAM = "REEXAM";
@@ -92,6 +105,8 @@ public class TransitionService {
     private final BlendRatioVersionRepository blendRatioVersionRepository;
     private final BlendReadingRepository blendReadingRepository;
     private final BlendControlEventRepository blendControlEventRepository;
+    private final RecycleQuotaRepository recycleQuotaRepository;
+    private final FeedBatchRepository feedBatchRepository;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -107,6 +122,8 @@ public class TransitionService {
                              BlendRatioVersionRepository blendRatioVersionRepository,
                              BlendReadingRepository blendReadingRepository,
                              BlendControlEventRepository blendControlEventRepository,
+                             RecycleQuotaRepository recycleQuotaRepository,
+                             FeedBatchRepository feedBatchRepository,
                              ObjectMapper objectMapper,
                              Clock clock) {
         this.gradeRepository = gradeRepository;
@@ -121,6 +138,8 @@ public class TransitionService {
         this.blendRatioVersionRepository = blendRatioVersionRepository;
         this.blendReadingRepository = blendReadingRepository;
         this.blendControlEventRepository = blendControlEventRepository;
+        this.recycleQuotaRepository = recycleQuotaRepository;
+        this.feedBatchRepository = feedBatchRepository;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
@@ -433,6 +452,10 @@ public class TransitionService {
             }
             verdictEventRepository.insert(roll.getRollNo(), "REEXAM_UPGRADED",
                     "DOWNGRADED", "UPGRADED", request.requestId(), eventTime);
+            // 改判正品：未消费回收额度同事务同步失效，已消费凭据保留；
+            // 与投料扣量作用于同一额度行，行锁保证只形成一个一致次序。
+            recycleQuotaRepository.invalidateOnUpgrade(roll.getRollNo(),
+                    RecycleQuota.REASON_REEXAM_UPGRADED, eventTime);
         } else {
             int updated = rollRepository.applyReexamReject(roll.getRollNo());
             if (updated == 0) {
@@ -634,6 +657,225 @@ public class TransitionService {
                 order.getConsecutiveOutOfTolerance(), versions, readings);
     }
 
+    /**
+     * 回收重量登记（requestId 幂等）：每个未改判正品的已登记过渡卷至多登记一次，
+     * 正数且最多三位小数；已改判正品的卷不能新增回收登记。
+     */
+    @Transactional
+    public IdempotentResult<RecycleQuotaView> registerRecycleQuota(RegisterRecycleQuotaRequest request) {
+        String fingerprint = FingerprintUtil.sha256(request.requestId(), request);
+        IdempotentRequest existing = lookupIdempotent(request.requestId(), BIZ_RECYCLE_REGISTER, fingerprint);
+        if (existing != null) {
+            return replay(existing, new TypeReference<RecycleQuotaView>() {
+            });
+        }
+
+        requirePositiveWeight(request.weightKg(), "可回收公斤数");
+        BigDecimal weightKg = TransitionRules.normalizeKg(request.weightKg());
+        // 行锁读取：与复议改判在同一纸卷行上串行化，先改判则此处看到 UPGRADED 拒绝登记。
+        TransitionRoll roll = rollRepository.findByRollNoForUpdate(request.rollNo())
+                .orElseThrow(() -> ApiException.notFound("过渡纸卷不存在: " + request.rollNo()));
+        if ("UPGRADED".equals(roll.getVerdict())) {
+            throw ApiException.conflict("该卷已改判正品，不能新增回收登记: " + request.rollNo());
+        }
+
+        RecycleQuota quota = new RecycleQuota();
+        quota.setRollNo(roll.getRollNo());
+        quota.setInitialKg(weightKg);
+        quota.setRegisteredKg(weightKg);
+        quota.setRequestId(request.requestId());
+        try {
+            recycleQuotaRepository.insert(quota, now());
+        } catch (DuplicateKeyException e) {
+            throw ApiException.conflict("该卷已登记回收重量，每卷至多登记一次: " + request.rollNo());
+        }
+
+        RecycleQuotaView view = getRecycleQuota(roll.getRollNo());
+        registerIdempotent(request.requestId(), BIZ_RECYCLE_REGISTER, fingerprint,
+                roll.getRollNo(), view);
+        return new IdempotentResult<>(request.requestId(), false, view);
+    }
+
+    /**
+     * 回收额度调减（requestId 幂等）：只允许减少尚未消费的额度，不得把累计消费减掉；
+     * 携带 expectedVersion，版本 1 起、成功 +1、过期 409。
+     */
+    @Transactional
+    public IdempotentResult<RecycleQuotaView> adjustRecycleQuota(String rollNo,
+                                                                 AdjustRecycleQuotaRequest request) {
+        // 指纹覆盖路径参数 rollNo 与全部请求字段，避免同键跨卷重放。
+        String fingerprint = FingerprintUtil.sha256(request.requestId() + "#" + rollNo, request);
+        IdempotentRequest existing = lookupIdempotent(request.requestId(), BIZ_RECYCLE_ADJUST, fingerprint);
+        if (existing != null) {
+            return replay(existing, new TypeReference<RecycleQuotaView>() {
+            });
+        }
+
+        requirePositiveWeight(request.newWeightKg(), "调减后的登记额度");
+        BigDecimal newWeightKg = TransitionRules.normalizeKg(request.newWeightKg());
+        RecycleQuota quota = recycleQuotaRepository.findByRollNo(rollNo)
+                .orElseThrow(() -> ApiException.notFound("该卷未登记回收重量: " + rollNo));
+        if (!RecycleQuota.STATUS_ACTIVE.equals(quota.getStatus())) {
+            throw ApiException.conflict("该卷回收额度已失效（" + quota.getInvalidReason()
+                    + "），不得调减: " + rollNo);
+        }
+        if (quota.getVersion() != request.expectedVersion()) {
+            throw ApiException.conflict("额度版本过期：期望 " + request.expectedVersion()
+                    + "，当前 " + quota.getVersion() + "，请重新查询后再调减");
+        }
+        if (newWeightKg.compareTo(quota.getRegisteredKg()) >= 0) {
+            throw ApiException.badRequest("只允许减少尚未消费的额度：新额度须小于当前登记额度 "
+                    + quota.getRegisteredKg() + " kg");
+        }
+        if (newWeightKg.compareTo(quota.getConsumedKg()) < 0) {
+            throw ApiException.conflict("不得把累计消费减掉：新额度 " + newWeightKg
+                    + " kg 小于累计已消费 " + quota.getConsumedKg() + " kg");
+        }
+        if (recycleQuotaRepository.reduceQuota(rollNo, newWeightKg,
+                request.expectedVersion(), now()) == 0) {
+            throw ApiException.conflict("额度已并发变更，调减失败: " + rollNo);
+        }
+
+        RecycleQuotaView view = getRecycleQuota(rollNo);
+        registerIdempotent(request.requestId(), BIZ_RECYCLE_ADJUST, fingerprint, rollNo, view);
+        return new IdempotentResult<>(request.requestId(), false, view);
+    }
+
+    /** 回收额度查询：勾稽原额度、当前额度、累计消费、可用额度与失效原因，含消费凭据。 */
+    public RecycleQuotaView getRecycleQuota(String rollNo) {
+        RecycleQuota quota = recycleQuotaRepository.findByRollNo(rollNo)
+                .orElseThrow(() -> ApiException.notFound("该卷未登记回收重量: " + rollNo));
+        List<RecycleQuotaView.ConsumptionView> consumptions = feedBatchRepository
+                .findConsumptionsByRollNo(rollNo).stream()
+                .map(c -> new RecycleQuotaView.ConsumptionView(
+                        c.feedNo(), c.orderNo(), c.weightKg(), c.createdAt()))
+                .toList();
+        return toQuotaView(quota, consumptions);
+    }
+
+    /**
+     * 投料申请（requestId 幂等）：引用同一执行中订单、当前掺配版本、总浆量及 1 至 10 个不同回收卷。
+     * 回收合计须精确等于 总浆量×该版本目标比例/100；所有卷同时扣额度，任一不足整单回滚。
+     */
+    @Transactional
+    public IdempotentResult<FeedView> submitFeed(SubmitFeedRequest request) {
+        String fingerprint = FingerprintUtil.sha256(request.requestId(), request);
+        IdempotentRequest existing = lookupIdempotent(request.requestId(), BIZ_FEED, fingerprint);
+        if (existing != null) {
+            return replay(existing, new TypeReference<FeedView>() {
+            });
+        }
+
+        // 结构校验：总浆量与各卷重量为正且最多三位小数（统一规范化标度）；批内卷号不得重复。
+        requirePositiveWeight(request.totalPulpKg(), "总浆量");
+        BigDecimal totalPulpKg = TransitionRules.normalizeKg(request.totalPulpKg());
+        List<SubmitFeedRequest.FeedItem> items = request.items().stream()
+                .map(i -> {
+                    requirePositiveWeight(i.weightKg(), "卷 " + i.rollNo() + " 投料公斤数");
+                    return new SubmitFeedRequest.FeedItem(
+                            i.rollNo(), TransitionRules.normalizeKg(i.weightKg()));
+                })
+                .toList();
+        List<String> rollNos = items.stream().map(SubmitFeedRequest.FeedItem::rollNo).toList();
+        if (rollNos.stream().distinct().count() != rollNos.size()) {
+            throw ApiException.badRequest("同一批投料中卷号重复");
+        }
+
+        TransitionOrder order = requireOrder(request.orderNo());
+        if (TransitionStatus.PAUSED.equals(order.getStatus())) {
+            throw ApiException.conflict("改品种单已失控暂停转人工，不得投料: " + request.orderNo());
+        }
+        if (TransitionStatus.ARCHIVED.equals(order.getStatus())) {
+            throw ApiException.conflict("改品种单已归档，不得投料: " + request.orderNo());
+        }
+        requireStatus(order, TransitionStatus.EXECUTED);
+        if (order.getCurrentBlendVersion() == null) {
+            throw ApiException.conflict("改品种单未携带掺配比例维度，不得投料: " + request.orderNo());
+        }
+        if (!order.getCurrentBlendVersion().equals(request.versionNo())) {
+            throw ApiException.conflict("掺配比例版本已换：请求版本 " + request.versionNo()
+                    + "，当前版本 " + order.getCurrentBlendVersion() + "，拒绝投料");
+        }
+        BlendRatioVersion current = blendRatioVersionRepository.findLatest(request.orderNo())
+                .orElseThrow(() -> ApiException.conflict(
+                        "改品种单未携带掺配比例维度，不得投料: " + request.orderNo()));
+
+        // 比例核算：应投 = 总浆量×目标比例/100，按百分数精确计算，超过三位小数精度拒绝该组合。
+        BigDecimal requiredRaw = TransitionRules.requiredRecycleKg(
+                totalPulpKg, current.getTargetRatioPct());
+        if (!TransitionRules.withinWeightPrecision(requiredRaw)) {
+            throw ApiException.badRequest("总浆量 " + totalPulpKg + " kg 与目标比例 "
+                    + current.getTargetRatioPct() + "% 的应投回收量 " + requiredRaw
+                    + " kg 超过三位小数精度，拒绝该组合");
+        }
+        BigDecimal required = TransitionRules.normalizeKg(requiredRaw);
+        BigDecimal actual = items.stream().map(SubmitFeedRequest.FeedItem::weightKg)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        if (actual.compareTo(required) != 0) {
+            throw ApiException.badRequest("回收合计 " + actual + " kg 须精确等于应投回收量 "
+                    + required + " kg（总浆量×目标比例/100）");
+        }
+
+        // 额度预检：卷须已登记且额度有效；正式扣减由原子 UPDATE 守卫。
+        for (String rollNo : rollNos) {
+            requireRoll(rollNo);
+            RecycleQuota quota = recycleQuotaRepository.findByRollNo(rollNo)
+                    .orElseThrow(() -> ApiException.conflict("回收卷未登记回收重量: " + rollNo));
+            if (!RecycleQuota.STATUS_ACTIVE.equals(quota.getStatus())) {
+                throw ApiException.conflict("回收卷额度已失效（" + quota.getInvalidReason()
+                        + "）: " + rollNo);
+            }
+        }
+
+        LocalDateTime now = now();
+        FeedBatch batch = new FeedBatch();
+        batch.setFeedNo(newFeedNo());
+        batch.setOrderNo(request.orderNo());
+        batch.setVersionNo(current.getVersionNo());
+        batch.setTotalPulpKg(totalPulpKg);
+        batch.setTargetRatioPct(current.getTargetRatioPct());
+        batch.setRequiredKg(required);
+        batch.setActualKg(actual);
+        batch.setRollCount(items.size());
+        batch.setRequestId(request.requestId());
+        batch.setCreatedAt(now);
+        feedBatchRepository.insertBatch(batch, now);
+        for (SubmitFeedRequest.FeedItem item : items) {
+            FeedBatchItem record = new FeedBatchItem();
+            record.setFeedNo(batch.getFeedNo());
+            record.setRollNo(item.rollNo());
+            record.setWeightKg(item.weightKg());
+            feedBatchRepository.insertItem(record);
+        }
+
+        // 按卷号排序扣减，避免并发批间死锁；任一不足整单回滚（同事务）。
+        List<SubmitFeedRequest.FeedItem> sorted = items.stream()
+                .sorted(java.util.Comparator.comparing(SubmitFeedRequest.FeedItem::rollNo))
+                .toList();
+        for (SubmitFeedRequest.FeedItem item : sorted) {
+            if (recycleQuotaRepository.consume(item.rollNo(), item.weightKg(), now) == 0) {
+                throw ApiException.conflict(
+                        "回收卷可用额度不足或已失效，整单回滚: " + item.rollNo());
+            }
+        }
+
+        FeedView view = toFeedView(batch, items);
+        registerIdempotent(request.requestId(), BIZ_FEED, fingerprint, batch.getFeedNo(), view);
+        return new IdempotentResult<>(request.requestId(), false, view);
+    }
+
+    /** 投料批查询：总浆量、目标比例快照、应投与实际回收量及明细。 */
+    public FeedView getFeed(String feedNo) {
+        FeedBatch batch = feedBatchRepository.findByFeedNo(feedNo)
+                .orElseThrow(() -> ApiException.notFound("投料批不存在: " + feedNo));
+        List<FeedView.FeedItemView> items = feedBatchRepository.findItemsByFeedNo(feedNo).stream()
+                .map(i -> new FeedView.FeedItemView(i.getRollNo(), i.getWeightKg()))
+                .toList();
+        return new FeedView(batch.getFeedNo(), batch.getOrderNo(), batch.getVersionNo(),
+                batch.getTotalPulpKg(), batch.getTargetRatioPct(), batch.getRequiredKg(),
+                batch.getActualKg(), items, batch.getRequestId(), batch.getCreatedAt());
+    }
+
     // ------------------------------------------------------------------
     // 私有辅助方法（置于作用域末尾）
     // ------------------------------------------------------------------
@@ -788,5 +1030,40 @@ public class TransitionService {
     private BlendReadingView toReadingView(BlendReading r) {
         return new BlendReadingView(r.getOrderNo(), r.getVersionNo(), r.getSampledAt(),
                 r.getActualRatioPct(), r.getDeviationPct(), r.isOutOfTolerance());
+    }
+
+    /** 重量校验：正数且最多三位小数（尾零不计），单位 kg。 */
+    private void requirePositiveWeight(BigDecimal weightKg, String label) {
+        if (weightKg == null || weightKg.signum() <= 0) {
+            throw ApiException.badRequest(label + "须为正数");
+        }
+        if (!TransitionRules.withinWeightPrecision(weightKg)) {
+            throw ApiException.badRequest(label + "最多三位小数: " + weightKg);
+        }
+    }
+
+    private String newFeedNo() {
+        byte[] bytes = new byte[2];
+        RANDOM.nextBytes(bytes);
+        return "FD-" + now().format(NO_FORMAT) + "-" + HexFormat.of().formatHex(bytes);
+    }
+
+    private RecycleQuotaView toQuotaView(RecycleQuota q,
+                                         List<RecycleQuotaView.ConsumptionView> consumptions) {
+        BigDecimal available = RecycleQuota.STATUS_ACTIVE.equals(q.getStatus())
+                ? q.getRegisteredKg().subtract(q.getConsumedKg()) : BigDecimal.ZERO;
+        return new RecycleQuotaView(q.getRollNo(), q.getInitialKg(), q.getRegisteredKg(),
+                q.getConsumedKg(), available, q.getInvalidatedKg(), q.getVersion(),
+                q.getStatus(), q.getInvalidReason(), q.getRequestId(),
+                q.getCreatedAt(), q.getUpdatedAt(), q.getInvalidatedAt(), consumptions);
+    }
+
+    private FeedView toFeedView(FeedBatch batch, List<SubmitFeedRequest.FeedItem> items) {
+        List<FeedView.FeedItemView> itemViews = items.stream()
+                .map(i -> new FeedView.FeedItemView(i.rollNo(), i.weightKg()))
+                .toList();
+        return new FeedView(batch.getFeedNo(), batch.getOrderNo(), batch.getVersionNo(),
+                batch.getTotalPulpKg(), batch.getTargetRatioPct(), batch.getRequiredKg(),
+                batch.getActualKg(), itemViews, batch.getRequestId(), batch.getCreatedAt());
     }
 }

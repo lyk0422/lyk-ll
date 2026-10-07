@@ -57,6 +57,16 @@ public class TransitionRollRepository {
         return list.stream().findFirst();
     }
 
+    /**
+     * 行锁读取：回收登记与复议改判并发时在同一纸卷行上串行化，
+     * 保证"先登记后改判则额度失效、先改判后登记则拒绝"的唯一一致次序。
+     */
+    public Optional<TransitionRoll> findByRollNoForUpdate(String rollNo) {
+        List<TransitionRoll> list = jdbc.query(
+                "SELECT * FROM transition_roll WHERE roll_no = ? FOR UPDATE", MAPPER, rollNo);
+        return list.stream().findFirst();
+    }
+
     public TransitionRoll getByRollNo(String rollNo) {
         return findByRollNo(rollNo).orElseThrow(() ->
                 new IllegalArgumentException("过渡纸卷不存在: " + rollNo));

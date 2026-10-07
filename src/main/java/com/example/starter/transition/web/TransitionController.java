@@ -1,6 +1,7 @@
 package com.example.starter.transition.web;
 
 import com.example.starter.transition.dto.AdjustBlendRatioRequest;
+import com.example.starter.transition.dto.AdjustRecycleQuotaRequest;
 import com.example.starter.transition.dto.ApplyOrderRequest;
 import com.example.starter.transition.dto.BlendReadingRequest;
 import com.example.starter.transition.dto.BlendReadingView;
@@ -8,12 +9,16 @@ import com.example.starter.transition.dto.BlendRecomputeView;
 import com.example.starter.transition.dto.BlendVersionView;
 import com.example.starter.transition.dto.DisposeRollsRequest;
 import com.example.starter.transition.dto.ExecuteOrderRequest;
+import com.example.starter.transition.dto.FeedView;
 import com.example.starter.transition.dto.IdempotentResult;
 import com.example.starter.transition.dto.InspectionRequest;
 import com.example.starter.transition.dto.OrderView;
+import com.example.starter.transition.dto.RecycleQuotaView;
 import com.example.starter.transition.dto.ReexamRequest;
+import com.example.starter.transition.dto.RegisterRecycleQuotaRequest;
 import com.example.starter.transition.dto.ResumeExecutionRequest;
 import com.example.starter.transition.dto.RollView;
+import com.example.starter.transition.dto.SubmitFeedRequest;
 import com.example.starter.transition.dto.TransitionRecomputeView;
 import com.example.starter.transition.service.TransitionService;
 import jakarta.validation.Valid;
@@ -128,5 +133,37 @@ public class TransitionController {
     @GetMapping("/orders/{orderNo}/blend-recompute")
     public BlendRecomputeView recomputeBlend(@PathVariable String orderNo) {
         return service.recomputeBlend(orderNo);
+    }
+
+    @PostMapping("/recycle-quotas")
+    public ResponseEntity<IdempotentResult<RecycleQuotaView>> registerRecycleQuota(
+            @Valid @RequestBody RegisterRecycleQuotaRequest request) {
+        IdempotentResult<RecycleQuotaView> result = service.registerRecycleQuota(request);
+        return ResponseEntity.status(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED).body(result);
+    }
+
+    @PostMapping("/recycle-quotas/{rollNo}/adjust")
+    public ResponseEntity<IdempotentResult<RecycleQuotaView>> adjustRecycleQuota(
+            @PathVariable String rollNo,
+            @Valid @RequestBody AdjustRecycleQuotaRequest request) {
+        IdempotentResult<RecycleQuotaView> result = service.adjustRecycleQuota(rollNo, request);
+        return ResponseEntity.status(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED).body(result);
+    }
+
+    @GetMapping("/recycle-quotas/{rollNo}")
+    public RecycleQuotaView getRecycleQuota(@PathVariable String rollNo) {
+        return service.getRecycleQuota(rollNo);
+    }
+
+    @PostMapping("/feeds")
+    public ResponseEntity<IdempotentResult<FeedView>> submitFeed(
+            @Valid @RequestBody SubmitFeedRequest request) {
+        IdempotentResult<FeedView> result = service.submitFeed(request);
+        return ResponseEntity.status(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED).body(result);
+    }
+
+    @GetMapping("/feeds/{feedNo}")
+    public FeedView getFeed(@PathVariable String feedNo) {
+        return service.getFeed(feedNo);
     }
 }

@@ -127,4 +127,30 @@ class TransitionRulesTest {
         assertFalse(TransitionRules.isBlendOutOfTolerance(
                 TransitionRules.blendDeviationPct(new BigDecimal("25.000"), new BigDecimal("25.000"))));
     }
+
+    @Test
+    @DisplayName("应投回收量=总浆量×目标比例/100 精确计算：100kg×20%=20kg，2.5kg×20%=0.5kg")
+    void requiredRecycleKgExactPercentMath() {
+        assertEquals(0, new BigDecimal("20.00").compareTo(
+                TransitionRules.requiredRecycleKg(new BigDecimal("100"), new BigDecimal("20.000"))));
+        assertEquals(0, new BigDecimal("0.5").compareTo(
+                TransitionRules.requiredRecycleKg(new BigDecimal("2.5"), new BigDecimal("20.000"))));
+        // 超三位小数精度的组合原样暴露（0.001×20%=0.0002），由调用方拒绝
+        BigDecimal overflow = TransitionRules.requiredRecycleKg(
+                new BigDecimal("0.001"), new BigDecimal("20.000"));
+        assertEquals(0, new BigDecimal("0.0002").compareTo(overflow));
+        assertFalse(TransitionRules.withinWeightPrecision(overflow));
+    }
+
+    @Test
+    @DisplayName("重量精度：最多三位小数（尾零不计），四位小数拒绝")
+    void weightPrecisionAtMostThreeDecimals() {
+        assertTrue(TransitionRules.withinWeightPrecision(new BigDecimal("10")));
+        assertTrue(TransitionRules.withinWeightPrecision(new BigDecimal("10.5")));
+        assertTrue(TransitionRules.withinWeightPrecision(new BigDecimal("10.500")));
+        assertTrue(TransitionRules.withinWeightPrecision(new BigDecimal("0.001")));
+        assertTrue(TransitionRules.withinWeightPrecision(new BigDecimal("10.5000")), "尾零不计入精度");
+        assertFalse(TransitionRules.withinWeightPrecision(new BigDecimal("10.0001")));
+        assertFalse(TransitionRules.withinWeightPrecision(new BigDecimal("0.0002")));
+    }
 }

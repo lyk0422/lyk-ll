@@ -23,6 +23,9 @@ public abstract class AbstractIntegrationTest {
     private static final List<String> BUSINESS_TABLES = List.of(
             "late_event",
             "idempotent_request",
+            "feed_batch_item",
+            "feed_batch",
+            "recycle_quota",
             "blend_control_event",
             "blend_reading",
             "blend_ratio_version",

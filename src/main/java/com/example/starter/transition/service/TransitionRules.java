@@ -87,4 +87,22 @@ public final class TransitionRules {
                 && tensileIndex.compareTo(QualityThresholds.TENSILE_MIN) >= 0
                 && weightDeviation.compareTo(QualityThresholds.BASIS_WEIGHT_TOLERANCE_PCT) <= 0;
     }
+
+    /** 重量精度：最多三位小数（尾零不计），单位 kg。 */
+    public static boolean withinWeightPrecision(BigDecimal weightKg) {
+        return weightKg != null && weightKg.stripTrailingZeros().scale() <= 3;
+    }
+
+    /** 重量规范化：统一为三位小数标度（须先通过精度校验，不丢精度），保证与库存储及重放响应一致。 */
+    public static BigDecimal normalizeKg(BigDecimal weightKg) {
+        return weightKg.stripTrailingZeros().setScale(3, RoundingMode.UNNECESSARY);
+    }
+
+    /**
+     * 应投回收量 = 总浆量 × 目标比例% / 100，按百分数精确计算（不做展示舍入）。
+     * 总浆量与比例均为有限小数，乘积左移两位精确可得。
+     */
+    public static BigDecimal requiredRecycleKg(BigDecimal totalPulpKg, BigDecimal targetRatioPct) {
+        return totalPulpKg.multiply(targetRatioPct).movePointLeft(2);
+    }
 }

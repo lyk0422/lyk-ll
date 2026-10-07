@@ -151,10 +151,55 @@ CREATE TABLE IF NOT EXISTS blend_control_event (
     event_time  TIMESTAMP    NOT NULL COMMENT '事件时间'
 );
 
+-- 回收重量登记（投料额度）：每个未改判正品的已登记过渡卷至多一条；
+-- 勾稽不变式：registered_kg = consumed_kg + 可用额度；失效时 invalidated_kg = 失效前未消费额度
+CREATE TABLE IF NOT EXISTS recycle_quota (
+    id             BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    roll_no        VARCHAR(40)  NOT NULL COMMENT '纸卷卷号，每卷至多一条额度登记',
+    initial_kg     DECIMAL(12,3) NOT NULL COMMENT '登记时原额度，单位 kg，正数最多三位小数，登记后不再变化',
+    registered_kg  DECIMAL(12,3) NOT NULL COMMENT '当前有效登记额度，单位 kg，只允许调减且不得小于累计消费',
+    consumed_kg    DECIMAL(12,3) NOT NULL DEFAULT 0 COMMENT '累计已消费公斤数，单位 kg，投料成功时增加',
+    invalidated_kg DECIMAL(12,3) NOT NULL DEFAULT 0 COMMENT '改判正品时失效的未消费额度，单位 kg，未失效为 0',
+    version        INT          NOT NULL DEFAULT 1 COMMENT '额度版本号：登记为 1，每次成功调减/消费/失效 +1',
+    status         VARCHAR(16)  NOT NULL COMMENT '状态：ACTIVE=有效，INVALIDATED=改判正品后未消费额度已失效',
+    invalid_reason VARCHAR(32)  NULL COMMENT '失效原因：REEXAM_UPGRADED=复议改判正品，NULL=未失效',
+    request_id     VARCHAR(64)  NOT NULL COMMENT '登记幂等 requestId',
+    created_at     TIMESTAMP    NOT NULL COMMENT '登记时间（UTC）',
+    updated_at     TIMESTAMP    NOT NULL COMMENT '最近一次额度变动时间（UTC）',
+    invalidated_at TIMESTAMP    NULL COMMENT '失效时间（UTC），NULL=未失效',
+    CONSTRAINT uk_recycle_quota_roll UNIQUE (roll_no)
+);
+
+-- 投料申请单：一次投料引用同一执行中订单、当前掺配版本与总浆量；
+-- 回收合计须精确等于 总浆量×目标比例/100，任一卷额度不足整单回滚
+CREATE TABLE IF NOT EXISTS feed_batch (
+    id               BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    feed_no          VARCHAR(40)  NOT NULL COMMENT '投料批号，业务唯一键',
+    order_no         VARCHAR(40)  NOT NULL COMMENT '改品种单号，投料时须为执行中',
+    version_no       INT          NOT NULL COMMENT '投料时生效的掺配比例版本号',
+    total_pulp_kg    DECIMAL(12,3) NOT NULL COMMENT '总浆量，单位 kg，正数最多三位小数',
+    target_ratio_pct DECIMAL(6,3) NOT NULL COMMENT '投料时版本目标掺配比例快照，单位 %',
+    required_kg      DECIMAL(12,3) NOT NULL COMMENT '应投回收量=总浆量×目标比例/100，单位 kg，超过三位小数精度的组合被拒绝',
+    actual_kg        DECIMAL(12,3) NOT NULL COMMENT '实际回收合计，单位 kg，须精确等于应投回收量',
+    roll_count       INT          NOT NULL COMMENT '回收卷数量，1 至 10 个不同卷',
+    request_id       VARCHAR(64)  NOT NULL COMMENT '投料幂等 requestId',
+    created_at       TIMESTAMP    NOT NULL COMMENT '投料登记时间（UTC）',
+    CONSTRAINT uk_feed_batch_no UNIQUE (feed_no)
+);
+
+-- 投料明细：每卷扣量凭据；卷改判正品后已消费凭据保留可查
+CREATE TABLE IF NOT EXISTS feed_batch_item (
+    id        BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    feed_no   VARCHAR(40)  NOT NULL COMMENT '投料批号',
+    roll_no   VARCHAR(40)  NOT NULL COMMENT '回收卷号，同一批内不得重复',
+    weight_kg DECIMAL(12,3) NOT NULL COMMENT '本卷投料公斤数，单位 kg，正数最多三位小数',
+    CONSTRAINT uk_feed_item_roll UNIQUE (feed_no, roll_no)
+);
+
 -- 幂等请求记录：指纹覆盖 requestId 与全部业务字段
 CREATE TABLE IF NOT EXISTS idempotent_request (
     request_id   VARCHAR(64) NOT NULL PRIMARY KEY COMMENT '幂等键 requestId',
-    biz_type     VARCHAR(24) NOT NULL COMMENT '业务类型：APPLY_ORDER/SUBMIT_INSPECTION/SUBMIT_REEXAM/ADJUST_BLEND_RATIO/SUBMIT_BLEND_READING/RESUME_EXECUTION',
+    biz_type     VARCHAR(24) NOT NULL COMMENT '业务类型：APPLY_ORDER/SUBMIT_INSPECTION/SUBMIT_REEXAM/ADJUST_BLEND_RATIO/SUBMIT_BLEND_READING/RESUME_EXECUTION/REGISTER_RECYCLE_QUOTA/ADJUST_RECYCLE_QUOTA/SUBMIT_FEED',
     fingerprint  VARCHAR(64) NOT NULL COMMENT 'SHA-256 指纹，覆盖 requestId 与全部业务字段',
     result_ref   VARCHAR(40) NULL COMMENT '首次结果引用（单号/卷号）',
     result_json  TEXT        NULL COMMENT '首次响应 JSON 原文，重放原样返回',

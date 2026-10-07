@@ -231,4 +231,146 @@ class TransitionApiTest extends AbstractIntegrationTest {
                 .andExpect(jsonPath("$.readings[0].outOfTolerance").value(false))
                 .andExpect(jsonPath("$.readings[1].outOfTolerance").value(true));
     }
+
+    @Test
+    @DisplayName("HTTP回收投料链路：登记201→重放200→异参409→调减→总浆100kg×20%两卷各10kg投料201→额度勾稽")
+    void recycleFeedHttpFlow() throws Exception {
+        // 旧订单：登记三个过渡卷（强制降级）
+        String applyOld = """
+                {"requestId":"api-rc-old","paperMachine":"PM-WQ1","fromGrade":"G-A4-70","toGrade":"G-A4-77"}
+                """;
+        String oldOrderNo = com.jayway.jsonpath.JsonPath.read(
+                mockMvc.perform(post("/api/transitions/orders")
+                                .contentType(MediaType.APPLICATION_JSON).content(applyOld))
+                        .andExpect(status().isCreated())
+                        .andReturn().getResponse().getContentAsString(), "$.data.orderNo");
+        mockMvc.perform(post("/api/transitions/orders/{no}/decide", oldOrderNo))
+                .andExpect(status().isOk());
+        mockMvc.perform(post("/api/transitions/orders/{no}/execute", oldOrderNo)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"machineSpeedMMin":900.000,"stockConsistencyPct":1.000,"switchTimeSec":60}
+                                """))
+                .andExpect(status().isOk());
+        mockMvc.perform(post("/api/transitions/orders/{no}/dispose", oldOrderNo)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"rolls":[{"rollNo":"RW-Q1","lengthM":800.000},{"rollNo":"RW-Q2","lengthM":840.000},{"rollNo":"RW-Q3","lengthM":820.000}]}
+                                """))
+                .andExpect(status().isOk());
+
+        // 执行中订单：携带 20% 掺配比例
+        String applyNew = """
+                {"requestId":"api-rc-new","paperMachine":"PM-WQ2","fromGrade":"G-A4-70","toGrade":"G-A4-77","targetBlendRatioPct":20.000}
+                """;
+        String feedOrderNo = com.jayway.jsonpath.JsonPath.read(
+                mockMvc.perform(post("/api/transitions/orders")
+                                .contentType(MediaType.APPLICATION_JSON).content(applyNew))
+                        .andExpect(status().isCreated())
+                        .andReturn().getResponse().getContentAsString(), "$.data.orderNo");
+        mockMvc.perform(post("/api/transitions/orders/{no}/execute", feedOrderNo)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"machineSpeedMMin":900.000,"stockConsistencyPct":1.000,"switchTimeSec":60}
+                                """))
+                .andExpect(status().isOk());
+
+        // 回收登记：201，版本 1 起
+        String registerBody = """
+                {"requestId":"api-rq-1","rollNo":"RW-Q1","weightKg":10}
+                """;
+        mockMvc.perform(post("/api/transitions/recycle-quotas")
+                        .contentType(MediaType.APPLICATION_JSON).content(registerBody))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.replayed").value(false))
+                .andExpect(jsonPath("$.data.registeredKg").value(10.000))
+                .andExpect(jsonPath("$.data.availableKg").value(10.000))
+                .andExpect(jsonPath("$.data.version").value(1));
+        // 同键同参重放 200；同键异参 409
+        mockMvc.perform(post("/api/transitions/recycle-quotas")
+                        .contentType(MediaType.APPLICATION_JSON).content(registerBody))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.replayed").value(true));
+        mockMvc.perform(post("/api/transitions/recycle-quotas")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"requestId":"api-rq-1","rollNo":"RW-Q1","weightKg":9}
+                                """))
+                .andExpect(status().isConflict());
+        mockMvc.perform(post("/api/transitions/recycle-quotas")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"requestId":"api-rq-2","rollNo":"RW-Q2","weightKg":10}
+                                """))
+                .andExpect(status().isCreated());
+        mockMvc.perform(post("/api/transitions/recycle-quotas")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"requestId":"api-rq-3","rollNo":"RW-Q3","weightKg":20}
+                                """))
+                .andExpect(status().isCreated());
+
+        // 额度调减：20 → 15，版本 1→2；过期版本 409
+        mockMvc.perform(post("/api/transitions/recycle-quotas/RW-Q3/adjust")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"requestId":"api-adj-1","expectedVersion":1,"newWeightKg":15}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.registeredKg").value(15.000))
+                .andExpect(jsonPath("$.data.version").value(2));
+        mockMvc.perform(post("/api/transitions/recycle-quotas/RW-Q3/adjust")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"requestId":"api-adj-2","expectedVersion":1,"newWeightKg":12}
+                                """))
+                .andExpect(status().isConflict());
+
+        // 投料：总浆 100 kg × 20% = 应投 20 kg，两卷各 10 kg → 201
+        String feedBody = """
+                {"requestId":"api-fd-1","orderNo":"%s","versionNo":1,"totalPulpKg":100,
+                 "items":[{"rollNo":"RW-Q1","weightKg":10},{"rollNo":"RW-Q2","weightKg":10}]}
+                """.formatted(feedOrderNo);
+        String feedResponse = mockMvc.perform(post("/api/transitions/feeds")
+                        .contentType(MediaType.APPLICATION_JSON).content(feedBody))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.requiredKg").value(20.000))
+                .andExpect(jsonPath("$.data.actualKg").value(20.000))
+                .andExpect(jsonPath("$.data.items", hasSize(2)))
+                .andReturn().getResponse().getContentAsString();
+        String feedNo = com.jayway.jsonpath.JsonPath.read(feedResponse, "$.data.feedNo");
+
+        // 同键重放：200，批号一致
+        mockMvc.perform(post("/api/transitions/feeds")
+                        .contentType(MediaType.APPLICATION_JSON).content(feedBody))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.replayed").value(true))
+                .andExpect(jsonPath("$.data.feedNo").value(feedNo));
+
+        // 合计不等于应投量：400
+        mockMvc.perform(post("/api/transitions/feeds")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"requestId":"api-fd-2","orderNo":"%s","versionNo":1,"totalPulpKg":100,
+                                 "items":[{"rollNo":"RW-Q1","weightKg":10},{"rollNo":"RW-Q2","weightKg":9}]}
+                                """.formatted(feedOrderNo)))
+                .andExpect(status().isBadRequest());
+
+        // 额度勾稽：RW-Q1 消费 10、可用 0，消费凭据指向该批
+        mockMvc.perform(get("/api/transitions/recycle-quotas/RW-Q1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.consumedKg").value(10.000))
+                .andExpect(jsonPath("$.availableKg").value(0.000))
+                .andExpect(jsonPath("$.version").value(2))
+                .andExpect(jsonPath("$.consumptions", hasSize(1)))
+                .andExpect(jsonPath("$.consumptions[0].feedNo").value(feedNo))
+                .andExpect(jsonPath("$.consumptions[0].orderNo").value(feedOrderNo));
+
+        // 批查询
+        mockMvc.perform(get("/api/transitions/feeds/{feedNo}", feedNo))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.orderNo").value(feedOrderNo))
+                .andExpect(jsonPath("$.totalPulpKg").value(100.000))
+                .andExpect(jsonPath("$.targetRatioPct").value(20.000));
+    }
 }
