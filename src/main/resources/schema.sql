@@ -85,7 +85,7 @@ COMMENT ON TABLE late_event IS '销记后迟到事件表';
 
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id VARCHAR(64) PRIMARY KEY COMMENT '幂等请求键',
-    operation VARCHAR(32) NOT NULL COMMENT '操作类型：ACCEPT/CONSIST_CHANGE/CONSIST_CHECK/BRAKE_TEST/DEPARTURE/CLOSURE/PRESSURE/EOT_DEVICE_REGISTER/EOT_BIND/EOT_CONFIRM/EOT_UNBIND',
+    operation VARCHAR(32) NOT NULL COMMENT '操作类型：ACCEPT/CONSIST_CHANGE/CONSIST_CHECK/BRAKE_TEST/DEPARTURE/CLOSURE/PRESSURE/EOT_DEVICE_REGISTER/EOT_BIND/EOT_CONFIRM/EOT_UNBIND/INCIDENT_REPORT/EN_ROUTE_TEST/EN_ROUTE_CONFIRM/RESUME',
     fingerprint VARCHAR(64) NOT NULL COMMENT '请求指纹SHA-256，覆盖requestId与全部业务字段（JSON结构化序列化，含分隔符文本亦无歧义）',
     response_body CLOB NOT NULL COMMENT '首次成功响应JSON快照，同键同参重放时原样返回',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间（JVM 时区）'
@@ -137,3 +137,51 @@ CREATE TABLE IF NOT EXISTS eot_consistency_confirmation (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间（UTC存储）'
 );
 COMMENT ON TABLE eot_consistency_confirmation IS '列尾与编组尾车一致性双人确认记录表';
+
+CREATE TABLE IF NOT EXISTS incident (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '处置主键',
+    job_id BIGINT NOT NULL COMMENT '所属作业ID（仅DEPARTURE_CONFIRMED且未销记可登记）',
+    consist_version INT NOT NULL COMMENT '登记时冻结的编组版本（原发车证据，处置期间编组变更不更新）',
+    eot_binding_id BIGINT DEFAULT NULL COMMENT '登记时冻结的生效列尾绑定ID；NULL表示该作业未启用列尾控制',
+    reason VARCHAR(512) NOT NULL COMMENT '途中异常现象说明（合成数据）',
+    status VARCHAR(16) NOT NULL COMMENT '处置状态：OPEN阻断中/RESUMED已续行（仅结束本次阻断，作业仍发车确认态）',
+    version INT NOT NULL DEFAULT 1 COMMENT '处置版本，自1起；途中试验/编组变更/双人确认/续行每次成功变更加1，旧版409',
+    active_job_id BIGINT DEFAULT NULL COMMENT 'OPEN时等于作业ID，RESUMED置NULL；唯一约束保证同作业仅一条活动处置',
+    request_id VARCHAR(64) NOT NULL COMMENT '幂等请求键',
+    resumed_at TIMESTAMP DEFAULT NULL COMMENT '续行许可时刻（UTC存储）；NULL表示仍阻断中',
+    created_at TIMESTAMP NOT NULL COMMENT '登记时刻（UTC存储）',
+    CONSTRAINT uk_incident_active_job UNIQUE (active_job_id)
+);
+COMMENT ON TABLE incident IS '途中异常处置单表（冻结编组/列尾绑定/原发车证据，续行阻断）';
+
+CREATE TABLE IF NOT EXISTS en_route_test (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '途中试验主键',
+    incident_id BIGINT NOT NULL COMMENT '绑定处置单ID',
+    job_id BIGINT NOT NULL COMMENT '所属作业ID',
+    consist_version INT NOT NULL COMMENT '试验对应编组版本；阻断中编组变更后旧版本试验作废',
+    test_type VARCHAR(16) NOT NULL COMMENT '试验类型：SENSITIVITY感度/STABILITY安定',
+    pressure_reduction INT NOT NULL COMMENT '减压量，单位kPa（复用始发规则：感度50/安定140）',
+    pipe_pressure_before INT NOT NULL COMMENT '试验前列车管风压，单位kPa；须恢复至定压500kPa',
+    all_cars_braked BOOLEAN DEFAULT NULL COMMENT '感度试验：全列是否均制动；安定试验为NULL',
+    emergency_occurred BOOLEAN DEFAULT NULL COMMENT '安定试验：是否发生紧急制动；感度试验为NULL',
+    result VARCHAR(8) NOT NULL COMMENT '试验结论：PASS合格/FAIL不合格',
+    voided BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否因阻断中编组变更作废：TRUE已作废',
+    valid_until TIMESTAMP NOT NULL COMMENT '试验有效截止时刻（UTC存储）；续行时UTC下now<该时刻方可续行，恰到即失效',
+    request_id VARCHAR(64) NOT NULL COMMENT '幂等请求键',
+    created_at TIMESTAMP NOT NULL COMMENT '创建时间（UTC存储）'
+);
+COMMENT ON TABLE en_route_test IS '途中制动试验记录表（绑定处置单与新压力曲线，始发曲线不得冒充）';
+
+CREATE TABLE IF NOT EXISTS en_route_confirmation (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '途中确认主键',
+    incident_id BIGINT NOT NULL COMMENT '所属处置单ID',
+    job_id BIGINT NOT NULL COMMENT '所属作业ID',
+    tail_car_no VARCHAR(32) NOT NULL COMMENT '两名人员共同确认时的尾车车辆号',
+    consist_version INT NOT NULL COMMENT '两名人员共同确认时的编组版本',
+    confirmer1 VARCHAR(64) NOT NULL COMMENT '共同确认人1（不得为空，不得与确认人2相同）',
+    confirmer2 VARCHAR(64) NOT NULL COMMENT '共同确认人2（不得为空，不得与确认人1相同）',
+    valid BOOLEAN NOT NULL DEFAULT TRUE COMMENT '是否仍有效：TRUE有效；阻断中编组变更或再次确认时同事务置FALSE',
+    request_id VARCHAR(64) NOT NULL COMMENT '幂等请求键',
+    created_at TIMESTAMP NOT NULL COMMENT '创建时间（UTC存储）'
+);
+COMMENT ON TABLE en_route_confirmation IS '途中新试验与列尾一致性双人确认记录表';

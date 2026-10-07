@@ -58,13 +58,15 @@ public class TrainJobService {
     private final PressureReadingRepository pressureReadingRepository;
     private final IdempotencyService idempotencyService;
     private final EotService eotService;
+    private final IncidentService incidentService;
 
     public TrainJobService(TrainJobRepository jobRepository, TrainCarRepository carRepository,
                            BrakeTestRepository brakeTestRepository,
                            ConsistCheckRepository consistCheckRepository,
                            PressureReadingRepository pressureReadingRepository,
                            IdempotencyService idempotencyService,
-                           EotService eotService) {
+                           EotService eotService,
+                           IncidentService incidentService) {
         this.jobRepository = jobRepository;
         this.carRepository = carRepository;
         this.brakeTestRepository = brakeTestRepository;
@@ -72,6 +74,7 @@ public class TrainJobService {
         this.pressureReadingRepository = pressureReadingRepository;
         this.idempotencyService = idempotencyService;
         this.eotService = eotService;
+        this.incidentService = incidentService;
     }
 
     /**
@@ -151,7 +154,10 @@ public class TrainJobService {
 
     private ConsistChangeResponse doChangeConsist(long jobId, ConsistChangeRequest request) {
         JobRow job = requireJobForUpdate(jobId);
-        if (job.status() != JobStatus.ACCEPTED && job.status() != JobStatus.CHECKED) {
+        // 途中编组变更仅在续行阻断中允许：发车确认态且存在活动处置
+        boolean enRouteBlocked = job.status() == JobStatus.DEPARTURE_CONFIRMED
+                && incidentService.hasActiveIncident(jobId);
+        if (job.status() != JobStatus.ACCEPTED && job.status() != JobStatus.CHECKED && !enRouteBlocked) {
             throw new BusinessException("当前状态不允许摘挂变更：" + job.status());
         }
         for (String carNo : request.detachCarNos()) {
@@ -181,12 +187,22 @@ public class TrainJobService {
         checkClosedCarRatio(active.stream()
                 .map(c -> new CarDto(c.carNo(), c.weightTons(), c.length(), c.valveClosed()))
                 .toList());
-        int voidedTests = brakeTestRepository.voidAllByJobId(jobId);
         BigDecimal totalLength = active.stream().map(CarRow::length).reduce(BigDecimal.ZERO, BigDecimal::add);
         BigDecimal totalWeight = active.stream().map(CarRow::weightTons).reduce(BigDecimal.ZERO, BigDecimal::add);
+        int voidedTests;
         int newVersion = job.consistVersion() + 1;
-        jobRepository.updateConsist(jobId, newVersion, active.size(), totalLength, totalWeight,
-                false, JobStatus.ACCEPTED);
+        if (enRouteBlocked) {
+            // 阻断中摘挂：原发车试验证据冻结不作废，作业保持发车确认态；
+            // 待批准途中试验与双人确认立即失效，处置版本加 1，重做后才能续行
+            voidedTests = 0;
+            jobRepository.updateConsist(jobId, newVersion, active.size(), totalLength, totalWeight,
+                    job.consistChecked(), JobStatus.DEPARTURE_CONFIRMED);
+            incidentService.onConsistChangeDuringBlock(jobId);
+        } else {
+            voidedTests = brakeTestRepository.voidAllByJobId(jobId);
+            jobRepository.updateConsist(jobId, newVersion, active.size(), totalLength, totalWeight,
+                    false, JobStatus.ACCEPTED);
+        }
         // 编组变化（含尾车/版本变化）：列尾绑定保留，但一致性确认立即失效，须重新双人确认
         eotService.invalidateConfirmationsOnConsistChange(jobId);
         return new ConsistChangeResponse(jobId, newVersion, active.size(), totalLength, totalWeight, voidedTests);
@@ -255,6 +271,10 @@ public class TrainJobService {
             throw new BusinessException("作业已销记，不得重复发车确认");
         }
         if (job.status() == JobStatus.DEPARTURE_CONFIRMED) {
+            // 续行阻断中不得经旧发车入口绕过，须走续行许可
+            if (incidentService.hasActiveIncident(jobId)) {
+                throw new BusinessException("续行阻断中，须完成途中试验与续行许可，不得经发车入口绕过");
+            }
             return new DepartureResponse(jobId, true, "已确认发车");
         }
         if (!job.consistChecked()) {
@@ -281,6 +301,10 @@ public class TrainJobService {
         }
         if (job.status() != JobStatus.DEPARTURE_CONFIRMED) {
             throw new BusinessException("未发车确认，不得销记：" + job.status());
+        }
+        // 续行阻断中不得销记：列尾装置继续占用，不得释放
+        if (incidentService.hasActiveIncident(jobId)) {
+            throw new BusinessException("续行阻断中，不得销记释放列尾装置");
         }
         jobRepository.close(jobId);
         // 销记原子解除列尾装置占用、解除绑定并失效确认，绑定历史保留
