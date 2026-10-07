@@ -222,3 +222,68 @@ COMMENT ON COLUMN ground_wire_evidence.created_at IS '证据入库时刻（UTC�
 CREATE UNIQUE INDEX IF NOT EXISTS uk_ground_evidence ON ground_wire_evidence (wire_code, ticket_id, step_seq, action);
 CREATE INDEX IF NOT EXISTS idx_ground_loan_ticket ON ground_wire_loan (ticket_id);
 CREATE INDEX IF NOT EXISTS idx_ground_loan_wire ON ground_wire_loan (wire_code);
+
+-- 余步续票：操作票版本列（从1开始，每次状态变更加1，续票签发时复核原票版本）
+ALTER TABLE switching_ticket ADD COLUMN IF NOT EXISTS version INT NOT NULL DEFAULT 1;
+COMMENT ON COLUMN switching_ticket.version IS '票版本号，从1开始，每次状态变更加1；续票申请时冻结原票版本，签发时复核';
+
+CREATE TABLE IF NOT EXISTS continuation_order (
+    id                     BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id             VARCHAR(64)  NOT NULL,
+    original_ticket_id     BIGINT       NOT NULL,
+    new_ticket_id          BIGINT       NOT NULL,
+    interval_id            VARCHAR(64)  NOT NULL,
+    status                 VARCHAR(16)  NOT NULL,
+    reviewer_a             VARCHAR(64),
+    reviewer_b             VARCHAR(64),
+    original_ticket_version INT         NOT NULL,
+    version                INT          NOT NULL DEFAULT 1,
+    effective_at           TIMESTAMP,
+    created_at             TIMESTAMP    NOT NULL,
+    updated_at             TIMESTAMP    NOT NULL
+);
+COMMENT ON TABLE continuation_order IS '余步续票单据：引用异常/作废原票的剩余步骤续做申请，双审核后生效';
+COMMENT ON COLUMN continuation_order.id IS '主键，自增';
+COMMENT ON COLUMN continuation_order.request_id IS '申请幂等请求号';
+COMMENT ON COLUMN continuation_order.original_ticket_id IS '原操作票主键，申请时须为EXCEPTION或EXPIRED且未归档';
+COMMENT ON COLUMN continuation_order.new_ticket_id IS '续票新票主键，步序/间隔/剩余步骤自原票冻结复制';
+COMMENT ON COLUMN continuation_order.interval_id IS '间隔编号，必须与原票一致，拒绝跨间隔';
+COMMENT ON COLUMN continuation_order.status IS '状态：APPLIED已申请/REVIEWED已双审/EFFECTIVE已生效/WITHDRAWN已撤回';
+COMMENT ON COLUMN continuation_order.reviewer_a IS '审核人甲编号，未审为空';
+COMMENT ON COLUMN continuation_order.reviewer_b IS '审核人乙编号，必须与甲不同，未审为空';
+COMMENT ON COLUMN continuation_order.original_ticket_version IS '申请时冻结的原票版本号，生效时复核，不符拒绝';
+COMMENT ON COLUMN continuation_order.version IS '单据版本号，从1开始，每次成功变更加1，旧版409';
+COMMENT ON COLUMN continuation_order.effective_at IS '生效时刻（UTC），未生效为空';
+COMMENT ON COLUMN continuation_order.created_at IS '创建时刻（UTC）';
+COMMENT ON COLUMN continuation_order.updated_at IS '最近更新时刻（UTC）';
+
+CREATE TABLE IF NOT EXISTS continuation_succession (
+    original_ticket_id BIGINT PRIMARY KEY,
+    continuation_id    BIGINT    NOT NULL,
+    new_ticket_id      BIGINT    NOT NULL,
+    created_at         TIMESTAMP NOT NULL
+);
+COMMENT ON TABLE continuation_succession IS '生效后继登记：每张原票最多一个生效后继，主键约束保证并发只一个成功';
+COMMENT ON COLUMN continuation_succession.original_ticket_id IS '原操作票主键，全表唯一';
+COMMENT ON COLUMN continuation_succession.continuation_id IS '生效的续票单据主键';
+COMMENT ON COLUMN continuation_succession.new_ticket_id IS '生效后继新票主键';
+COMMENT ON COLUMN continuation_succession.created_at IS '登记时刻（UTC）';
+
+CREATE TABLE IF NOT EXISTS ground_wire_inheritance (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    continuation_id BIGINT      NOT NULL,
+    wire_code       VARCHAR(64) NOT NULL,
+    from_ticket_id  BIGINT      NOT NULL,
+    to_ticket_id    BIGINT      NOT NULL,
+    created_at      TIMESTAMP   NOT NULL,
+    CONSTRAINT uk_inherit_wire_chain UNIQUE (wire_code, from_ticket_id, to_ticket_id)
+);
+COMMENT ON TABLE ground_wire_inheritance IS '接地线责任接续关系：续票生效时接管原票未归还实物，续票只能拆除并归还本继承链实物';
+COMMENT ON COLUMN ground_wire_inheritance.continuation_id IS '续票单据主键';
+COMMENT ON COLUMN ground_wire_inheritance.wire_code IS '接地线编号，原借用编号不改';
+COMMENT ON COLUMN ground_wire_inheritance.from_ticket_id IS '原借用操作票主键';
+COMMENT ON COLUMN ground_wire_inheritance.to_ticket_id IS '责任接续的续票新票主键';
+COMMENT ON COLUMN ground_wire_inheritance.created_at IS '接续登记时刻（UTC）';
+
+CREATE INDEX IF NOT EXISTS idx_continuation_new_ticket ON continuation_order (new_ticket_id);
+CREATE INDEX IF NOT EXISTS idx_inherit_to_ticket ON ground_wire_inheritance (to_ticket_id);

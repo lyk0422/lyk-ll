@@ -126,7 +126,8 @@ public class GroundWireService {
 
     /**
      * 批量归还：仓管核对编号，仅核销本票借出且已拆除待归还的实物；
-     * 已挂接或非本票借用的实物一律拒绝，整批回滚。
+     * 续票可核销本继承链接管的原票实物（原借用记录不改，归还信息登记在原借用行）；
+     * 已挂接或非本票及本继承链借用的实物一律拒绝，整批回滚。
      */
     @Transactional
     public WireBatchResult returnWires(long ticketId, ReturnWiresRequest req) {
@@ -138,13 +139,10 @@ public class GroundWireService {
                 throw ApiException.unprocessable("VERSION_MISMATCH",
                         "接地线 " + code + " 期望版本 " + req.expectedVersion() + " 与当前版本 " + wire.version() + " 不符");
             }
-            Long loanId = jdbc.query(
-                            "SELECT id FROM ground_wire_loan WHERE ticket_id = ? AND wire_code = ? AND status = 'BORROWED'",
-                            (rs, n) -> rs.getLong(1), ticketId, code)
-                    .stream().findFirst().orElse(null);
+            Long loanId = findReturnableLoan(ticketId, code);
             if (loanId == null) {
                 throw ApiException.unprocessable("WIRE_NOT_BORROWED_BY_TICKET",
-                        "接地线 " + code + " 非本票借用或已归还，仓管核对拒绝核销");
+                        "接地线 " + code + " 非本票借用或继承且未归还，仓管核对拒绝核销");
             }
             if (wire.occupiedByTicket() == null || wire.occupiedByTicket() != ticketId
                     || !"REMOVED_PENDING_RETURN".equals(wire.status())) {
@@ -154,9 +152,7 @@ public class GroundWireService {
         }
         Instant now = Instant.now(clock);
         for (String code : codes) {
-            long loanId = jdbc.queryForObject(
-                    "SELECT id FROM ground_wire_loan WHERE ticket_id = ? AND wire_code = ? AND status = 'BORROWED'",
-                    Long.class, ticketId, code);
+            long loanId = findReturnableLoan(ticketId, code);
             int updated = jdbc.update(
                     "UPDATE ground_wire SET status = 'AVAILABLE', interval_id = NULL, occupied_by_ticket = NULL,"
                             + " version = version + 1, updated_at = ?"
@@ -173,6 +169,27 @@ public class GroundWireService {
                     Timestamp.from(req.occurredAt()), req.requestId(), req.keeperId(), loanId);
         }
         return new WireBatchResult("RETURNED", (int) (req.expectedVersion() + 1), codes, req.occurredAt());
+    }
+
+    /**
+     * 查找本票可核销的借用行：本票直接借用，或本票作为续票经责任接续接管的原票借用。
+     * 不得代管其他票的线：无借用或继承关系返回 null。
+     */
+    private Long findReturnableLoan(long ticketId, String code) {
+        Long own = jdbc.query(
+                        "SELECT id FROM ground_wire_loan WHERE ticket_id = ? AND wire_code = ? AND status = 'BORROWED'",
+                        (rs, n) -> rs.getLong(1), ticketId, code)
+                .stream().findFirst().orElse(null);
+        if (own != null) {
+            return own;
+        }
+        return jdbc.query(
+                        "SELECT l.id FROM ground_wire_loan l"
+                                + " JOIN ground_wire_inheritance i ON i.wire_code = l.wire_code"
+                                + " AND i.from_ticket_id = l.ticket_id"
+                                + " WHERE i.to_ticket_id = ? AND l.wire_code = ? AND l.status = 'BORROWED'",
+                        (rs, n) -> rs.getLong(1), ticketId, code)
+                .stream().findFirst().orElse(null);
     }
 
     /**
@@ -289,15 +306,17 @@ public class GroundWireService {
         }
     }
 
-    /** 归档前校验：本票借用的实物必须全部归还，历史借用记录保留不删除。 */
+    /** 归档前校验：本票借用及本继承链接管的实物必须全部归还，历史借用记录保留不删除。 */
     @Transactional(readOnly = true)
     public void assertAllLoansReturned(long ticketId) {
         List<String> outstanding = jdbc.query(
-                "SELECT wire_code FROM ground_wire_loan WHERE ticket_id = ? AND status = 'BORROWED'",
-                (rs, n) -> rs.getString(1), ticketId);
+                "SELECT wire_code FROM ground_wire_loan WHERE status = 'BORROWED' AND (ticket_id = ?"
+                        + " OR ticket_id IN (SELECT from_ticket_id FROM ground_wire_inheritance"
+                        + " WHERE to_ticket_id = ?))",
+                (rs, n) -> rs.getString(1), ticketId, ticketId);
         if (!outstanding.isEmpty()) {
             throw ApiException.unprocessable("GROUND_WIRES_NOT_RETURNED",
-                    "本票借用接地线 " + outstanding + " 尚未全部归还，不允许归档");
+                    "本票借用及继承接地线 " + outstanding + " 尚未全部归还，不允许归档");
         }
     }
 
