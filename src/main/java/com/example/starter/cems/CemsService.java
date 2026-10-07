@@ -54,11 +54,14 @@ public class CemsService {
     private final CemsRepository repo;
     private final CemsClock clock;
     private final IdempotencySupport idem;
+    private final MaintenanceService maintenanceService;
 
-    public CemsService(CemsRepository repo, CemsClock clock, IdempotencySupport idem) {
+    public CemsService(CemsRepository repo, CemsClock clock, IdempotencySupport idem,
+                       MaintenanceService maintenanceService) {
         this.repo = repo;
         this.clock = clock;
         this.idem = idem;
+        this.maintenanceService = maintenanceService;
     }
 
     // ---------------- 许可登记 ----------------
@@ -172,6 +175,9 @@ public class CemsService {
         }
 
         repo.markMonitoring(code, now);
+        // 取排口行锁后再写机测：与检修替代提交/复核、有效监测封账串行，
+        // 保证“补机测与日结竞争”不会把同小时计两次或在冻结快照与独立调差间混用版本。
+        repo.lockOutlet(code);
         boolean fresh = repo.insertHourlyReading(code, hour, req.avgValue(), now);
         if (!fresh) {
             // 排口＋时段去重：重复上报不重复评价、不重复触发限排。
@@ -183,6 +189,10 @@ public class CemsService {
                     occupying == null ? null : (String) occupying.get("status"));
         }
         repo.insertEvent(code, "READING", now, false, "HOUR " + hour + " avgValue=" + req.avgValue());
+
+        // 检修替代口径同事务对账：封账前补到合法机测则失效被替代来源并重算新口径，
+        // 封账后补机测仅登记独立调差；均不删除原超标链/缺点告警。
+        maintenanceService.reconcileMachineReading(code, hour);
 
         List<ChainPoint> chain = rebuildHourlyChain(code, hourlyLimit);
         ChainPoint current = chain.stream().filter(p -> p.hour().equals(hour)).findFirst().orElseThrow();

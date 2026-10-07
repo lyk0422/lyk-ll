@@ -249,3 +249,147 @@ COMMENT ON COLUMN overflow_anomaly.permit_version IS '该段所用溢流许可�
 COMMENT ON COLUMN overflow_anomaly.reason IS '专项异常原因说明';
 COMMENT ON COLUMN overflow_anomaly.status IS '异常状态：OPEN 待处置 / CLOSED 已处置';
 COMMENT ON COLUMN overflow_anomaly.created_at IS '登记时刻（Asia/Shanghai 本地时间）';
+
+-- ================= 监测仪检修人工替代证据与有效监测统计（cems-03 新增，合成数据，不用于生产） =================
+-- 补证独立留痕：原机测读数、缺点告警、超标链与限排令不被删除或撤销；替代超标仅追加独立来源。
+
+CREATE TABLE IF NOT EXISTS maintenance_permit (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    outlet_code         VARCHAR(64)  NOT NULL,
+    version             INT          NOT NULL,
+    window_start_utc    TIMESTAMP    NOT NULL,
+    window_end_utc      TIMESTAMP    NOT NULL,
+    confirmer_a         VARCHAR(64)  NOT NULL,
+    confirmer_b         VARCHAR(64)  NOT NULL,
+    status              VARCHAR(16)  NOT NULL,
+    created_at          TIMESTAMP    NOT NULL,
+    confirmed_at        TIMESTAMP    NOT NULL,
+    CONSTRAINT uk_maintenance_permit_version UNIQUE (outlet_code, version),
+    CONSTRAINT chk_maintenance_confirmers_distinct CHECK (confirmer_a <> confirmer_b)
+);
+COMMENT ON COLUMN maintenance_permit.version IS '检修许可版本号：从 1 开始，每次成功变更加 1；同排口内唯一';
+COMMENT ON COLUMN maintenance_permit.window_start_utc IS 'UTC 检修半开窗口起点（含本时刻），秒级精确时刻';
+COMMENT ON COLUMN maintenance_permit.window_end_utc IS 'UTC 检修半开窗口终点（不含本时刻）；替代小时 [hour,hour+1) 必须完整落窗';
+COMMENT ON COLUMN maintenance_permit.confirmer_a IS '确认人 A（合成人员标识），须与确认人 B 不同';
+COMMENT ON COLUMN maintenance_permit.confirmer_b IS '确认人 B（合成人员标识），须与确认人 A 不同';
+COMMENT ON COLUMN maintenance_permit.status IS '许可状态：ACTIVE 现行 / SUPERSEDED 已被新版本取代';
+COMMENT ON COLUMN maintenance_permit.created_at IS '创建时刻（Asia/Shanghai 本地时间，由应用时钟写入）';
+COMMENT ON COLUMN maintenance_permit.confirmed_at IS '双人确认时刻（Asia/Shanghai 本地时间，与创建同事务）';
+
+CREATE TABLE IF NOT EXISTS lab_report (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    report_no           VARCHAR(64)  NOT NULL,
+    outlet_code         VARCHAR(64)  NOT NULL,
+    window_start_utc    TIMESTAMP    NOT NULL,
+    window_end_utc      TIMESTAMP    NOT NULL,
+    created_at          TIMESTAMP    NOT NULL,
+    CONSTRAINT uk_lab_report_no UNIQUE (report_no)
+);
+COMMENT ON COLUMN lab_report.report_no IS '合成检验报告编号，全局唯一；跨排口引用拒绝；同一采样窗口允许不同报告号（对应不同版本检验证据）';
+COMMENT ON COLUMN lab_report.window_start_utc IS '采样 UTC 半开窗口起点（含本时刻）；替代该小时时必须恰等于整点 hour';
+COMMENT ON COLUMN lab_report.window_end_utc IS '采样 UTC 半开窗口终点（不含本时刻）；替代该小时时必须恰等于 hour+1，跨小时报告拒绝';
+COMMENT ON COLUMN lab_report.created_at IS '登记时刻（Asia/Shanghai 本地时间）';
+
+CREATE TABLE IF NOT EXISTS replacement_hour (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    outlet_code         VARCHAR(64)  NOT NULL,
+    hour_utc            TIMESTAMP    NOT NULL,
+    version             INT          NOT NULL,
+    concentration       DECIMAL(18,4) NOT NULL,
+    report_no           VARCHAR(64)  NOT NULL,
+    submitter           VARCHAR(64)  NOT NULL,
+    reviewer            VARCHAR(64),
+    status              VARCHAR(16)  NOT NULL,
+    created_at          TIMESTAMP    NOT NULL,
+    confirmed_at        TIMESTAMP,
+    request_id          VARCHAR(80),
+    active_slot         VARCHAR(64),
+    CONSTRAINT uk_replacement_version UNIQUE (outlet_code, hour_utc, version),
+    CONSTRAINT uk_replacement_active UNIQUE (outlet_code, hour_utc, active_slot)
+);
+COMMENT ON COLUMN replacement_hour.hour_utc IS '被替代的缺机测 UTC 整点（分秒为 0）；排口＋整点＋版本唯一';
+COMMENT ON COLUMN replacement_hour.version IS '该小时替代版本号：从 1 起，每次成功提交（旧版失效后）加 1';
+COMMENT ON COLUMN replacement_hour.concentration IS '人工替代浓度（mg/L，合成）：有限非负数，缺报告不能按零浓度填补';
+COMMENT ON COLUMN replacement_hour.report_no IS '同排口合成检验报告编号；报告窗口必须与该小时精确一致';
+COMMENT ON COLUMN replacement_hour.submitter IS '替代证据提交人（合成人员标识）';
+COMMENT ON COLUMN replacement_hour.reviewer IS '替代复核人（须不同于提交人）；未复核为空';
+COMMENT ON COLUMN replacement_hour.status IS '版本状态：PENDING 待复核 / EFFECTIVE 生效中 / SUPERSEDED 被新版本替代 / INVALIDATED 补到合法机测后失效';
+COMMENT ON COLUMN replacement_hour.confirmed_at IS '复核生效时刻（Asia/Shanghai 本地时间）；未复核为空';
+COMMENT ON COLUMN replacement_hour.request_id IS '提交请求幂等键';
+COMMENT ON COLUMN replacement_hour.active_slot IS '生效中占槽=排口编码，仅 EFFECTIVE 版本非空，SUPERSEDED/INVALIDATED/PENDING 置空；配合唯一约束保证同小时最多一个当前有效版本';
+
+CREATE TABLE IF NOT EXISTS maintenance_review (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    outlet_code         VARCHAR(64)  NOT NULL,
+    day_utc             DATE         NOT NULL,
+    permit_version      INT,
+    effective_avg       DECIMAL(18,4),
+    counted_count       INT          NOT NULL,
+    missing_count       INT          NOT NULL,
+    status              VARCHAR(16)  NOT NULL,
+    frozen_at           TIMESTAMP    NOT NULL,
+    request_id          VARCHAR(80),
+    CONSTRAINT uk_maintenance_review UNIQUE (outlet_code, day_utc)
+);
+COMMENT ON COLUMN maintenance_review.day_utc IS 'UTC 日结日期；同排口每日仅可封账一次';
+COMMENT ON COLUMN maintenance_review.permit_version IS '封账时现行检修许可版本；无许可为 NULL';
+COMMENT ON COLUMN maintenance_review.effective_avg IS '有效监测均值（mg/L）：机测优先、无机测才取有效替代；空集合为 NULL（无结果而非零）';
+COMMENT ON COLUMN maintenance_review.counted_count IS '有效口径分母（计入小时数，机测与有效替代不双计）';
+COMMENT ON COLUMN maintenance_review.missing_count IS '当日缺点数：UTC 日内既无机测也无有效替代的整点数';
+COMMENT ON COLUMN maintenance_review.status IS '快照状态：FROZEN 已冻结（冻结后只能独立调差，不改本快照）';
+COMMENT ON COLUMN maintenance_review.frozen_at IS '封账时刻（Asia/Shanghai 本地时间）';
+COMMENT ON COLUMN maintenance_review.request_id IS '封账请求幂等键';
+
+CREATE TABLE IF NOT EXISTS maintenance_review_item (
+    id                      BIGINT AUTO_INCREMENT PRIMARY KEY,
+    outlet_code             VARCHAR(64)  NOT NULL,
+    day_utc                 DATE         NOT NULL,
+    hour_utc                TIMESTAMP    NOT NULL,
+    source                  VARCHAR(16)  NOT NULL,
+    concentration           DECIMAL(18,4) NOT NULL,
+    replacement_version     INT,
+    report_no               VARCHAR(64),
+    CONSTRAINT uk_maintenance_review_item UNIQUE (outlet_code, day_utc, hour_utc)
+);
+COMMENT ON COLUMN maintenance_review_item.source IS '封账时该小时来源：MACHINE 合法机测 / REPLACEMENT 有效替代（机测优先，两者不双计）';
+COMMENT ON COLUMN maintenance_review_item.replacement_version IS '来源为替代时冻结的替代版本；机测为 NULL';
+COMMENT ON COLUMN maintenance_review_item.report_no IS '来源为替代时冻结的检验报告号；机测为 NULL';
+
+CREATE TABLE IF NOT EXISTS maintenance_adjustment (
+    id                      BIGINT AUTO_INCREMENT PRIMARY KEY,
+    outlet_code             VARCHAR(64)  NOT NULL,
+    day_utc                 DATE         NOT NULL,
+    hour_utc                TIMESTAMP    NOT NULL,
+    change_type             VARCHAR(24)  NOT NULL,
+    old_source              VARCHAR(16),
+    old_value               DECIMAL(18,4),
+    new_source              VARCHAR(16)  NOT NULL,
+    new_value               DECIMAL(18,4) NOT NULL,
+    replacement_version     INT,
+    request_id              VARCHAR(80),
+    created_at              TIMESTAMP    NOT NULL
+);
+COMMENT ON COLUMN maintenance_adjustment.change_type IS '调差类型：MACHINE_BACKFILL 封账后补到合法机测 / REPLACEMENT_CORRECTION 封账后更正替代';
+COMMENT ON COLUMN maintenance_adjustment.old_source IS '冻结时旧来源：MACHINE/REPLACEMENT；原缺点（无来源）为 NULL';
+COMMENT ON COLUMN maintenance_adjustment.old_value IS '冻结时旧值（mg/L）；原缺点为 NULL';
+COMMENT ON COLUMN maintenance_adjustment.new_source IS '调差后新来源：MACHINE/REPLACEMENT';
+COMMENT ON COLUMN maintenance_adjustment.new_value IS '调差后新值（mg/L）';
+COMMENT ON COLUMN maintenance_adjustment.replacement_version IS '调差涉及的替代版本；补机测为 NULL';
+COMMENT ON COLUMN maintenance_adjustment.request_id IS '调差请求幂等键';
+COMMENT ON COLUMN maintenance_adjustment.created_at IS '调差登记时刻（Asia/Shanghai 本地时间）；独立调差不改封账快照';
+
+CREATE TABLE IF NOT EXISTS substitute_exceedance (
+    id                      BIGINT AUTO_INCREMENT PRIMARY KEY,
+    outlet_code             VARCHAR(64)  NOT NULL,
+    hour_utc                TIMESTAMP    NOT NULL,
+    replacement_version     INT          NOT NULL,
+    limit_value             DECIMAL(18,4) NOT NULL,
+    actual_value            DECIMAL(18,4) NOT NULL,
+    status                  VARCHAR(16)  NOT NULL,
+    created_at              TIMESTAMP    NOT NULL,
+    CONSTRAINT uk_substitute_exceedance_version UNIQUE (outlet_code, hour_utc, replacement_version)
+);
+COMMENT ON COLUMN substitute_exceedance.replacement_version IS '产生该替代超标的替代版本；同小时新版本独立追加，不覆盖旧记录';
+COMMENT ON COLUMN substitute_exceedance.limit_value IS '评价所用原排口小时限值（mg/L，含本值达标）';
+COMMENT ON COLUMN substitute_exceedance.actual_value IS '替代浓度实测（mg/L，合成）；严格大于限值才追加';
+COMMENT ON COLUMN substitute_exceedance.status IS '独立来源状态：ACTIVE 随当前替代有效 / SUPERSEDED 被新替代版本取代 / INVALIDATED 因补到机测失效；历史只留证不删除';
