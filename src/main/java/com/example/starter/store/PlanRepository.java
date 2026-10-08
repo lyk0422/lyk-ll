@@ -36,7 +36,8 @@ public class PlanRepository {
             LocalDateTime tideEnd,
             LocalDateTime planStart,
             LocalDateTime planEnd,
-            PlanStatus status) {
+            PlanStatus status,
+            long version) {
     }
 
     /** 资源锁行映射。 */
@@ -49,6 +50,16 @@ public class PlanRepository {
             LocalDateTime lockEnd) {
     }
 
+    /**
+     * 引航员实际责任区间（半开区间）：受控计划按交班责任段计工时，
+     * 未交班计划沿用整段，避免把整计划重复计给两人或清掉各人其他计划工时。
+     */
+    public record ResponsibilitySegment(
+            long planId,
+            LocalDateTime start,
+            LocalDateTime end) {
+    }
+
     private static final RowMapper<PlanRow> PLAN_MAPPER = (rs, n) -> new PlanRow(
             rs.getLong("id"),
             rs.getString("request_id"),
@@ -59,7 +70,8 @@ public class PlanRepository {
             toLdt(rs, "tide_end"),
             toLdt(rs, "plan_start"),
             toLdt(rs, "plan_end"),
-            PlanStatus.valueOf(rs.getString("status")));
+            PlanStatus.valueOf(rs.getString("status")),
+            rs.getLong("version"));
 
     private static final RowMapper<LockRow> LOCK_MAPPER = (rs, n) -> new LockRow(
             rs.getLong("id"),
@@ -132,11 +144,11 @@ public class PlanRepository {
                 PlanStatus.SCHEDULED.name(), Timestamp.valueOf(now), planId);
     }
 
-    /** 改期：更新潮水窗口与计划时间，状态保持不变。 */
+    /** 改期：更新潮水窗口与计划时间，状态保持不变，版本加 1（交班切换据此重查来源版本）。 */
     public void updateReschedule(long planId, LocalDateTime tideStart, LocalDateTime tideEnd,
                                  LocalDateTime planStart, LocalDateTime planEnd, LocalDateTime now) {
         jdbc.update("UPDATE pilot_plan SET tide_start = ?, tide_end = ?,"
-                        + " plan_start = ?, plan_end = ?, updated_at = ? WHERE id = ?",
+                        + " plan_start = ?, plan_end = ?, version = version + 1, updated_at = ? WHERE id = ?",
                 Timestamp.valueOf(tideStart), Timestamp.valueOf(tideEnd),
                 Timestamp.valueOf(planStart), Timestamp.valueOf(planEnd),
                 Timestamp.valueOf(now), planId);
@@ -254,5 +266,69 @@ public class PlanRepository {
         Integer count = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM resource_lock WHERE plan_id = ?", Integer.class, planId);
         return count == null ? 0 : count;
+    }
+
+    /**
+     * 交班切换：乐观锁条件下把计划引航员改为接班员并将版本加 1。
+     * 仅当来源计划版本与申请时记录的版本一致时生效，返回受影响行数（0 表示版本过期）。
+     */
+    public int switchPilotIfVersion(long planId, long newPilotId, long expectedVersion,
+                                    LocalDateTime now) {
+        return jdbc.update("UPDATE pilot_plan SET pilot_id = ?, version = version + 1, updated_at = ?"
+                        + " WHERE id = ? AND version = ?",
+                newPilotId, Timestamp.valueOf(now), planId, expectedVersion);
+    }
+
+    /** 删除某计划指定资源类型的锁（交班切换/撤回时只处理接班预占，保留拖轮与原人锁）。 */
+    public int deleteLocks(long planId, String resourceType, long resourceId) {
+        return jdbc.update(
+                "DELETE FROM resource_lock WHERE plan_id = ? AND resource_type = ? AND resource_id = ?",
+                planId, resourceType, resourceId);
+    }
+
+    /** 交班切换：把出班引航员的整段 PILOT 锁收窄为 [lockStart, newEnd)。 */
+    public int narrowPilotLockEnd(long planId, long pilotId, LocalDateTime newEnd) {
+        return jdbc.update(
+                "UPDATE resource_lock SET lock_end = ? WHERE plan_id = ?"
+                        + " AND resource_type = 'PILOT' AND resource_id = ?",
+                Timestamp.valueOf(newEnd), planId, pilotId);
+    }
+
+    /**
+     * 查询引航员在时间范围内的实际责任区间（半开区间），用于工时统计与交班重查：
+     * <ul>
+     *   <li>未交班计划（无 SWITCHED 交班）：整段 [plan_start, plan_end) 归当前 pilot_id；</li>
+     *   <li>已交班计划：出班员承担 [plan_start, handover_at)，接班员承担 [handover_at, plan_end)，
+     *       不因 plan.pilot_id 改挂接班员而清掉出班员的责任工时；</li>
+     *   <li>PENDING 交班尚未形成责任转移，接班预占不计工时（仅以资源锁参与冲突）。</li>
+     * </ul>
+     */
+    public List<ResponsibilitySegment> findResponsibilitySegments(long pilotId,
+                                                                   LocalDateTime rangeStart,
+                                                                   LocalDateTime rangeEnd) {
+        String active = "'SCHEDULED','CONFIRMED','EXECUTING'";
+        String sql =
+                "SELECT t.plan_id AS id, t.seg_start AS plan_start, t.seg_end AS plan_end FROM ("
+                + " SELECT p.id AS plan_id, p.plan_start AS seg_start, p.plan_end AS seg_end"
+                + " FROM pilot_plan p"
+                + " WHERE p.pilot_id = ? AND p.status IN (" + active + ")"
+                + " AND NOT EXISTS (SELECT 1 FROM pilot_handover h"
+                + " WHERE h.plan_id = p.id AND h.status = 'SWITCHED')"
+                + " UNION ALL"
+                + " SELECT p.id AS plan_id, p.plan_start AS seg_start, h.handover_at AS seg_end"
+                + " FROM pilot_plan p JOIN pilot_handover h ON h.plan_id = p.id"
+                + " WHERE h.status = 'SWITCHED' AND h.from_pilot_id = ? AND p.status IN (" + active + ")"
+                + " UNION ALL"
+                + " SELECT p.id AS plan_id, h.handover_at AS seg_start, p.plan_end AS seg_end"
+                + " FROM pilot_plan p JOIN pilot_handover h ON h.plan_id = p.id"
+                + " WHERE h.status = 'SWITCHED' AND h.to_pilot_id = ? AND p.status IN (" + active + ")"
+                + ") t WHERE t.seg_start < ? AND t.seg_end > ? ORDER BY t.seg_start";
+        return jdbc.query(sql,
+                (rs, n) -> new ResponsibilitySegment(
+                        rs.getLong("id"),
+                        toLdt(rs, "plan_start"),
+                        toLdt(rs, "plan_end")),
+                pilotId, pilotId, pilotId,
+                Timestamp.valueOf(rangeEnd), Timestamp.valueOf(rangeStart));
     }
 }

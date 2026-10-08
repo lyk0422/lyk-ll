@@ -14,6 +14,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.example.starter.domain.PlanStatus;
+import com.example.starter.store.HandoverRepository;
+import com.example.starter.store.HandoverRepository.HandoverRow;
 import com.example.starter.store.IdempotencyRepository;
 import com.example.starter.store.PlanRepository;
 import com.example.starter.store.PlanRepository.PlanRow;
@@ -42,14 +44,17 @@ public class PilotPlanService {
     static final long CANCEL_NOTICE_MINUTES = 2 * 60;
 
     private final PlanRepository plans;
+    private final HandoverRepository handovers;
     private final IdempotencyRepository idem;
     private final TransactionTemplate tx;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
-    public PilotPlanService(PlanRepository plans, IdempotencyRepository idem,
+    public PilotPlanService(PlanRepository plans, HandoverRepository handovers,
+                            IdempotencyRepository idem,
                             TransactionTemplate tx, ObjectMapper objectMapper, Clock clock) {
         this.plans = plans;
+        this.handovers = handovers;
         this.idem = idem;
         this.tx = tx;
         this.objectMapper = objectMapper;
@@ -130,13 +135,25 @@ public class PilotPlanService {
         });
     }
 
-    /** 核销：执行结束后释放资源锁。 */
+    /**
+     * 核销：执行结束后释放资源锁。与切换竞争时，先在同事务关闭未结束交班并释放接班预占，
+     * 保证不会出现“已核销又切入新引航员”。
+     */
     public PlanResponse settle(SettleRequest request) {
         String fingerprint = IdempotencyRepository.fingerprint("settle", request.requestId(),
                 request.planId());
         return idempotent("settle", request.requestId(), fingerprint, () -> {
+            // 先锁未结束交班单再锁计划，与切换的加锁顺序一致，避免竞争死锁
+            List<HandoverRow> pendingHandovers =
+                    handovers.findPendingByPlanForUpdate(request.planId());
             PlanRow plan = lockPlan(request.planId());
             requireStatus(plan, PlanStatus.EXECUTING, "仅执行中的计划可核销");
+            for (HandoverRow pending : pendingHandovers) {
+                // 释放接班预占（拖轮与原人锁随后随核销统一释放）
+                plans.deleteLocks(plan.id(), "PILOT", pending.toPilotId());
+            }
+            // 关闭未结束交班：并发切换随后会因交班单非 PENDING / 计划非执行中而失败
+            handovers.closePendingByPlan(plan.id(), now());
             plans.deleteLocksByPlanId(plan.id());
             plans.updateStatus(plan.id(), PlanStatus.SETTLED, now());
             return toResponse(plans.findById(plan.id()).orElseThrow(), plans.findTugIds(plan.id()), false);
@@ -180,6 +197,10 @@ public class PilotPlanService {
             PlanRow plan = lockPlan(request.planId());
             if (plan.status() != PlanStatus.SCHEDULED && plan.status() != PlanStatus.CONFIRMED) {
                 throw ApiException.conflict("当前状态不可改期: " + plan.status());
+            }
+            // 旧改期入口不能绕过交班占用：存在未结束交班时禁止改期（其接班预占锁不得被重建释放）
+            if (handovers.findPendingByPlan(plan.id()).isPresent()) {
+                throw ApiException.conflict("计划存在未结束交班，不可改期");
             }
             validateTimeRange(request.planStart(), request.planEnd());
             if (request.planStart().isBefore(request.tideStart())
