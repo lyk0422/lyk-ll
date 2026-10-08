@@ -95,4 +95,17 @@ public final class PestDtos {
             LocalDateTime disinfectConfirmedAt, LocalDateTime storageConfirmedAt,
             LocalDateTime releasedAt) {
     }
+
+    /**
+     * 当前观察起点响应。
+     *
+     * @param caseId 处置链主键
+     * @param status 当前状态
+     * @param observationStart 当前观察起点（UTC）：最后一次有效投放/补投与最近新增虫迹中较晚者；
+     *                         空表示观察尚未有效开始（存在未补齐的被召回投放或尚无生效投放）
+     * @param pendingReplacementPlacementIds 待补投的被召回投放列表
+     */
+    public record ObservationResponse(long caseId, String status, LocalDateTime observationStart,
+            java.util.List<Long> pendingReplacementPlacementIds) {
+    }
 }

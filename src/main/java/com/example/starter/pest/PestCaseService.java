@@ -34,6 +34,8 @@ public class PestCaseService {
     public static final String STATUS_CONFIRMED = "CONFIRMED";
     /** 已投放，进入 14 天监测期。 */
     public static final String STATUS_TREATED = "TREATED";
+    /** 待补投：批号召回后存在未补齐投放，观察期未有效开始。 */
+    public static final String STATUS_PENDING_REPLACEMENT = "PENDING_REPLACEMENT";
     /** 已申请解除，待消杀与库房双方确认。 */
     public static final String STATUS_RELEASE_APPLIED = "RELEASE_APPLIED";
     /** 已解除，库区恢复正常。 */
@@ -145,27 +147,32 @@ public class PestCaseService {
     }
 
     /**
-     * 申请解除：须投放后恰满 14 天且监测期内无新增虫迹。
+     * 申请解除：观察起点（最后一次有效投放/补投与最近新增虫迹中较晚者）后恰满 14 天，
+     * 且无召回阻断（不存在待补投投放）方可申请。事务内行锁重查，与召回竞争串行化。
      */
     public PestDtos.CaseResponse applyRelease(long caseId, PestDtos.OperatorRequest request) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("caseId", caseId);
         payload.put("operator", request.operator());
         return idempotent.execute(request.requestId(), payload, PestDtos.CaseResponse.class, () -> {
-            CaseRow row = mustFind(caseId);
+            CaseRow row = mustFindForUpdate(caseId);
+            if (STATUS_PENDING_REPLACEMENT.equals(row.status())) {
+                throw ApiException.conflict("存在待补投的被召回投放，观察期未有效开始，不得申请解除");
+            }
             if (!STATUS_TREATED.equals(row.status())) {
                 throw ApiException.conflict("仅监测期（已投放）状态可申请解除");
             }
-            LocalDateTime now = LocalDateTime.now(clock);
-            LocalDateTime eligibleAt = row.treatedAt().plusDays(MONITOR_DAYS);
-            if (now.isBefore(eligibleAt)) {
-                throw ApiException.badRequest("投放后监测期未满 14 天，不得申请解除");
+            if (countPendingReplacements(caseId) > 0) {
+                throw ApiException.conflict("存在待补投的被召回投放，不得申请解除");
             }
-            long traces = jdbc.sql("SELECT COUNT(*) FROM pest_trace WHERE case_id = ? AND found_at > ?")
-                    .param(caseId).param(row.treatedAt())
-                    .query(Long.class).single();
-            if (traces > 0) {
-                throw ApiException.badRequest("监测期内存在新增虫迹，不得申请解除");
+            LocalDateTime now = LocalDateTime.now(clock);
+            LocalDateTime observationStart = observationStartOf(caseId);
+            if (observationStart == null) {
+                throw ApiException.conflict("无有效投放，观察期未开始，不得申请解除");
+            }
+            LocalDateTime eligibleAt = observationStart.plusDays(MONITOR_DAYS);
+            if (now.isBefore(eligibleAt)) {
+                throw ApiException.badRequest("观察起点后监测期未满 14 天，不得申请解除");
             }
             jdbc.sql("UPDATE pest_case SET status = ?, release_applied_at = ? WHERE id = ?")
                     .param(STATUS_RELEASE_APPLIED).param(now).param(caseId)
@@ -176,15 +183,19 @@ public class PestCaseService {
 
     /**
      * 解除确认：消杀与库房双方均确认后处置链解除，库区恢复出库。
+     * 事务内行锁重查召回阻断，与召回竞争串行化，不得以被召回投放解除。
      */
     public PestDtos.CaseResponse confirmRelease(long caseId, PestDtos.SideRequest request) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("caseId", caseId);
         payload.put("side", request.side());
         return idempotent.execute(request.requestId(), payload, PestDtos.CaseResponse.class, () -> {
-            CaseRow row = mustFind(caseId);
+            CaseRow row = mustFindForUpdate(caseId);
             if (!STATUS_RELEASE_APPLIED.equals(row.status())) {
                 throw ApiException.conflict("须先申请解除后方可确认");
+            }
+            if (countPendingReplacements(caseId) > 0) {
+                throw ApiException.conflict("存在待补投的被召回投放，不得以无效投放解除");
             }
             LocalDateTime now = LocalDateTime.now(clock);
             if ("DISINFECTION".equals(request.side())) {
@@ -249,6 +260,67 @@ public class PestCaseService {
                 .query(CASE_MAPPER)
                 .optional()
                 .orElseThrow(() -> ApiException.notFound("处置链不存在: " + caseId));
+    }
+
+    /**
+     * 行级锁定读取处置链（用于召回、补投、解除等竞争场景在事务内重查状态）。
+     */
+    public CaseRow mustFindForUpdate(long caseId) {
+        return jdbc.sql("SELECT * FROM pest_case WHERE id = ? FOR UPDATE")
+                .param(caseId)
+                .query(CASE_MAPPER)
+                .optional()
+                .orElseThrow(() -> ApiException.notFound("处置链不存在: " + caseId));
+    }
+
+    /**
+     * 当前观察起点查询：最后一次有效投放/补投与最近新增虫迹中较晚者；
+     * 存在待补投投放时观察未有效开始，起点为空。
+     */
+    public PestDtos.ObservationResponse observation(long caseId) {
+        CaseRow row = mustFind(caseId);
+        List<Long> pendingIds = jdbc.sql("SELECT id FROM treatment_placement"
+                        + " WHERE case_id = ? AND recall_status = 'RECALLED' ORDER BY id")
+                .param(caseId)
+                .query(Long.class)
+                .list();
+        LocalDateTime start = pendingIds.isEmpty() ? observationStartOf(caseId) : null;
+        return new PestDtos.ObservationResponse(caseId, row.status(), start, pendingIds);
+    }
+
+    /**
+     * 统计处置链内待补投（已召回未补投）的投放数量。
+     */
+    private long countPendingReplacements(long caseId) {
+        return jdbc.sql("SELECT COUNT(*) FROM treatment_placement"
+                        + " WHERE case_id = ? AND recall_status = 'RECALLED'")
+                .param(caseId)
+                .query(Long.class).single();
+    }
+
+    /**
+     * 计算观察起点：最后一次有效（未召回）投放/补投生效时刻与最近新增虫迹时刻中较晚者；
+     * 无有效投放时返回 null。
+     */
+    private LocalDateTime observationStartOf(long caseId) {
+        List<LocalDateTime> placements = jdbc.sql("SELECT MAX(placed_at) FROM treatment_placement"
+                        + " WHERE case_id = ? AND status = 'EFFECTIVE' AND recall_status = 'NONE'")
+                .param(caseId)
+                .query(LocalDateTime.class)
+                .list();
+        LocalDateTime lastPlacement = placements.isEmpty() ? null : placements.get(0);
+        if (lastPlacement == null) {
+            return null;
+        }
+        List<LocalDateTime> traces = jdbc.sql("SELECT MAX(found_at) FROM pest_trace WHERE case_id = ?")
+                .param(caseId)
+                .query(LocalDateTime.class)
+                .list();
+        LocalDateTime lastTrace = traces.isEmpty() ? null : traces.get(0);
+        if (lastTrace != null && lastTrace.isAfter(lastPlacement)) {
+            return lastTrace;
+        }
+        return lastPlacement;
     }
 
     /**

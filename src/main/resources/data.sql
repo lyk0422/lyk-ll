@@ -11,3 +11,10 @@ INSERT INTO pesticide (name, quantity, unit, safety_line, expiry_date) VALUES
     ('磷化铝片剂', 100.00, '克', 20.00, DATE '2030-12-31'),
     ('溴甲烷溶液', 50.00, '毫升', 10.00, DATE '2030-06-30'),
     ('陈旧熏蒸剂', 30.00, '克', 5.00, DATE '2020-01-01');
+
+-- 药剂批号：各批号库存之和等于药剂总库存；药剂 3 的批号随药剂一并过期
+INSERT INTO pesticide_batch (pesticide_id, batch_no, quantity, expiry_date, status, version, created_at) VALUES
+    (1, 'AL-2026-01', 60.00, DATE '2030-12-31', 'ACTIVE', 1, TIMESTAMP '2026-01-01 00:00:00'),
+    (1, 'AL-2026-02', 40.00, DATE '2030-12-31', 'ACTIVE', 1, TIMESTAMP '2026-01-01 00:00:00'),
+    (2, 'MB-2026-01', 50.00, DATE '2030-06-30', 'ACTIVE', 1, TIMESTAMP '2026-01-01 00:00:00'),
+    (3, 'OLD-2019-01', 30.00, DATE '2020-01-01', 'ACTIVE', 1, TIMESTAMP '2026-01-01 00:00:00');

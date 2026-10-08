@@ -76,6 +76,14 @@ public class PestCaseController {
     }
 
     /**
+     * 当前观察起点：GET /api/cases/{caseId}/observation
+     */
+    @GetMapping("/cases/{caseId}/observation")
+    public PestDtos.ObservationResponse observation(@PathVariable long caseId) {
+        return service.observation(caseId);
+    }
+
+    /**
      * 整体预防性消杀评估列表：GET /api/preventive-evaluations
      */
     @GetMapping("/preventive-evaluations")
