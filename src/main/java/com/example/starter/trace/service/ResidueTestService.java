@@ -8,6 +8,7 @@ import com.example.starter.trace.dto.RetestRequest;
 import com.example.starter.trace.dto.TestSubmissionResponse;
 import com.example.starter.trace.idem.IdempotencyService;
 import com.example.starter.trace.repo.HarvestBatchRepository;
+import com.example.starter.trace.repo.RecallRepository;
 import com.example.starter.trace.repo.ResidueTestRepository;
 import com.example.starter.trace.repo.WarningRepository;
 import org.springframework.stereotype.Service;
@@ -34,17 +35,20 @@ public class ResidueTestService {
     private final HarvestBatchRepository batchRepository;
     private final ResidueTestRepository testRepository;
     private final WarningRepository warningRepository;
+    private final RecallRepository recallRepository;
     private final IdempotencyService idempotency;
     private final Clock clock;
 
     public ResidueTestService(HarvestBatchRepository batchRepository,
                               ResidueTestRepository testRepository,
                               WarningRepository warningRepository,
+                              RecallRepository recallRepository,
                               IdempotencyService idempotency,
                               Clock clock) {
         this.batchRepository = batchRepository;
         this.testRepository = testRepository;
         this.warningRepository = warningRepository;
+        this.recallRepository = recallRepository;
         this.idempotency = idempotency;
         this.clock = clock;
     }
@@ -70,6 +74,7 @@ public class ResidueTestService {
     private TestSubmissionResponse doRapidTest(long batchId, RapidTestRequest request) {
         HarvestBatchRepository.BatchRow batch = batchRepository.findByIdForUpdate(batchId)
                 .orElseThrow(() -> BizException.notFound("采收批不存在: " + batchId));
+        rejectIfRecalled(batchId);
         if (testRepository.findOpenChainId(batchId).isPresent()) {
             throw BizException.conflict("该采收批存在未闭环检测链，同批同时刻只允许一条检测链");
         }
@@ -99,6 +104,7 @@ public class ResidueTestService {
     private TestSubmissionResponse doRetest(long batchId, RetestRequest request) {
         HarvestBatchRepository.BatchRow batch = batchRepository.findByIdForUpdate(batchId)
                 .orElseThrow(() -> BizException.notFound("采收批不存在: " + batchId));
+        rejectIfRecalled(batchId);
         Long chainId = testRepository.findOpenChainId(batchId)
                 .orElseThrow(() -> BizException.conflict("该采收批无进行中的检测链，不能复检"));
         if (batch.status() != BatchStatus.FROZEN) {
@@ -135,5 +141,14 @@ public class ResidueTestService {
                         suspected, now);
             }
         });
+    }
+
+    /**
+     * 事务内重查召回隔离：采收批被任一活动召回隔离时禁止提交快检或复检。
+     */
+    private void rejectIfRecalled(long batchId) {
+        if (recallRepository.countActiveHarvestLinks(batchId) > 0) {
+            throw BizException.conflict("采收批处于活动召回隔离中，禁止提交检测: " + batchId);
+        }
     }
 }

@@ -1,4 +1,7 @@
 -- 每个测试方法前清理业务数据并重建合成蜂场，避免用例间顺序依赖。
+DELETE FROM recall_processing_link;
+DELETE FROM recall_harvest_link;
+DELETE FROM source_recall;
 DELETE FROM processing_batch_ref;
 DELETE FROM processing_batch;
 DELETE FROM idempotency_record;

@@ -7,6 +7,7 @@ import com.example.starter.trace.dto.ProcessingBatchResponse;
 import com.example.starter.trace.idem.IdempotencyService;
 import com.example.starter.trace.repo.HarvestBatchRepository;
 import com.example.starter.trace.repo.ProcessingBatchRepository;
+import com.example.starter.trace.repo.RecallRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,21 +18,25 @@ import java.util.List;
 
 /**
  * 加工批次服务：引用与放行判定在同一事务内校验，冻结批不得被引用。
+ * 受理时在事务内重查活动召回隔离，不得以缓存的放行标志穿透召回。
  */
 @Service
 public class ProcessingBatchService {
 
     private final ProcessingBatchRepository processingRepository;
     private final HarvestBatchRepository batchRepository;
+    private final RecallRepository recallRepository;
     private final IdempotencyService idempotency;
     private final Clock clock;
 
     public ProcessingBatchService(ProcessingBatchRepository processingRepository,
                                   HarvestBatchRepository batchRepository,
+                                  RecallRepository recallRepository,
                                   IdempotencyService idempotency,
                                   Clock clock) {
         this.processingRepository = processingRepository;
         this.batchRepository = batchRepository;
+        this.recallRepository = recallRepository;
         this.idempotency = idempotency;
         this.clock = clock;
     }
@@ -55,6 +60,9 @@ public class ProcessingBatchService {
             }
             if (batch.status() != BatchStatus.RELEASED) {
                 throw BizException.conflict("采收批未放行，不得进入加工: " + harvestBatchId);
+            }
+            if (recallRepository.countActiveHarvestLinks(harvestBatchId) > 0) {
+                throw BizException.conflict("采收批处于活动召回隔离中，不得进入加工: " + harvestBatchId);
             }
         }
         long processingBatchId = processingRepository.insertProcessingBatch(

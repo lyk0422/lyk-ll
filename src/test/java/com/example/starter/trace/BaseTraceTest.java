@@ -6,6 +6,7 @@ import com.example.starter.trace.dto.RapidTestRequest;
 import com.example.starter.trace.dto.TestSubmissionResponse;
 import com.example.starter.trace.service.HarvestBatchService;
 import com.example.starter.trace.service.ProcessingBatchService;
+import com.example.starter.trace.service.RecallService;
 import com.example.starter.trace.service.ResidueTestService;
 import com.example.starter.trace.service.WarningService;
 import org.junit.jupiter.api.BeforeEach;
@@ -40,6 +41,8 @@ public abstract class BaseTraceTest {
     protected ProcessingBatchService processingBatchService;
     @Autowired
     protected WarningService warningService;
+    @Autowired
+    protected RecallService recallService;
 
     private final AtomicInteger batchSeq = new AtomicInteger();
     private final AtomicInteger requestSeq = new AtomicInteger();
@@ -77,6 +80,27 @@ public abstract class BaseTraceTest {
         return residueTestService.submitRapidTest(batchId, new RapidTestRequest(
                 "REQ-RAPID-" + requestSeq.incrementAndGet() + "-" + System.nanoTime(),
                 sampleNo, new BigDecimal(inhibitionRate)));
+    }
+
+    /**
+     * 登记一个蜂场一 60% / 蜂场二 40% 的双来源采收批并返回批次 ID。
+     */
+    protected long newBatch6040() {
+        int seq = batchSeq.incrementAndGet();
+        HarvestBatchResponse response = harvestBatchService.createBatch(new CreateHarvestBatchRequest(
+                "REQ-BATCH-" + seq + "-" + System.nanoTime(),
+                "HB-T-" + seq + "-" + System.nanoTime(),
+                PERIOD,
+                List.of(new CreateHarvestBatchRequest.ContributionItem(1L, new BigDecimal("60.00")),
+                        new CreateHarvestBatchRequest.ContributionItem(2L, new BigDecimal("40.00")))));
+        return response.id();
+    }
+
+    /**
+     * 生成唯一的幂等键。
+     */
+    protected String newRequestId(String prefix) {
+        return prefix + "-" + requestSeq.incrementAndGet() + "-" + System.nanoTime();
     }
 
     /**
