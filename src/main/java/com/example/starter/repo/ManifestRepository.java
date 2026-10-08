@@ -12,7 +12,7 @@ import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Repository;
 
 /**
- * 收运联单、处理回执、异常核查与日结汇总的数据访问。
+ * 收运联单、去向版本链、处理回执、迟到回执证据、异常核查与日结汇总的数据访问。
  */
 @Repository
 public class ManifestRepository {
@@ -25,6 +25,8 @@ public class ManifestRepository {
 
     /**
      * 联单行。重量单位 kg，时间均为 UTC。
+     *
+     * @param destinationVersion 当前去向版本，1 起，每次成功改投加 1
      */
     public record ManifestRow(
             long id,
@@ -37,12 +39,29 @@ public class ManifestRepository {
             BigDecimal tareKg,
             BigDecimal netKg,
             long facilityId,
+            int destinationVersion,
             String status,
             Instant createdAt) {
     }
 
     /**
+     * 去向版本行：版本 1 为进场登记时的初始去向，其余为改投产生。
+     */
+    public record DestinationRow(
+            long id,
+            long manifestId,
+            int version,
+            long facilityId,
+            String requestId,
+            String fingerprint,
+            Instant createdAt) {
+    }
+
+    /**
      * 回执行。
+     *
+     * @param facilityCode       回执声明的设施编码，旧式调用为 null
+     * @param destinationVersion 回执声明的去向版本，旧式调用为 null
      */
     public record ReceiptRow(
             long id,
@@ -52,6 +71,22 @@ public class ManifestRepository {
             BigDecimal netKg,
             BigDecimal deviationPct,
             String result,
+            String facilityCode,
+            Integer destinationVersion,
+            Instant receivedAt) {
+    }
+
+    /**
+     * 迟到回执证据行：仅存证据，不闭环、不增加接收量。
+     */
+    public record LateReceiptRow(
+            long id,
+            String requestId,
+            String fingerprint,
+            long manifestId,
+            String facilityCode,
+            int destinationVersion,
+            BigDecimal netKg,
             Instant receivedAt) {
     }
 
@@ -81,6 +116,7 @@ public class ManifestRepository {
 
     /**
      * 插入联单并返回自增 id；request_id 与 (vehicle_id, open_flag) 唯一约束由数据库保证。
+     * 去向版本初始为 1。
      */
     public long insertManifest(String requestId, String fingerprint, long vehicleId, String community,
                                String category, BigDecimal grossKg, BigDecimal tareKg, BigDecimal netKg,
@@ -89,10 +125,10 @@ public class ManifestRepository {
         jdbc.sql("""
                         INSERT INTO manifest
                             (request_id, fingerprint, vehicle_id, community, category,
-                             gross_kg, tare_kg, net_kg, facility_id, status, open_flag, created_at)
+                             gross_kg, tare_kg, net_kg, facility_id, destination_version, status, open_flag, created_at)
                         VALUES
                             (:requestId, :fingerprint, :vehicleId, :community, :category,
-                             :grossKg, :tareKg, :netKg, :facilityId, :status, :openFlag, :createdAt)
+                             :grossKg, :tareKg, :netKg, :facilityId, 1, :status, :openFlag, :createdAt)
                         """)
                 .param("requestId", requestId)
                 .param("fingerprint", fingerprint)
@@ -117,7 +153,7 @@ public class ManifestRepository {
     public Optional<ManifestRow> findManifestByRequestId(String requestId) {
         return jdbc.sql("""
                         SELECT id, request_id, fingerprint, vehicle_id, community, category,
-                               gross_kg, tare_kg, net_kg, facility_id, status, created_at
+                               gross_kg, tare_kg, net_kg, facility_id, destination_version, status, created_at
                         FROM manifest WHERE request_id = :requestId
                         """)
                 .param("requestId", requestId)
@@ -128,7 +164,7 @@ public class ManifestRepository {
     public Optional<ManifestRow> findManifestById(long id) {
         return jdbc.sql("""
                         SELECT id, request_id, fingerprint, vehicle_id, community, category,
-                               gross_kg, tare_kg, net_kg, facility_id, status, created_at
+                               gross_kg, tare_kg, net_kg, facility_id, destination_version, status, created_at
                         FROM manifest WHERE id = :id
                         """)
                 .param("id", id)
@@ -137,30 +173,99 @@ public class ManifestRepository {
     }
 
     /**
-     * 推进联单状态并清除执行中标记；仅当当前状态匹配时才更新，返回更新行数。
+     * 推进联单状态并清除执行中标记；仅当当前状态与去向版本都匹配时才更新，返回更新行数。
+     * 去向版本条件保证回执入账与并发改投只能先成一个。
      */
-    public int transitionStatus(long manifestId, String fromStatus, String toStatus) {
+    public int transitionStatus(long manifestId, String fromStatus, String toStatus, int destinationVersion) {
         return jdbc.sql("""
                         UPDATE manifest SET status = :toStatus, open_flag = NULL
-                        WHERE id = :id AND status = :fromStatus
+                        WHERE id = :id AND status = :fromStatus AND destination_version = :destinationVersion
                         """)
                 .param("toStatus", toStatus)
                 .param("id", manifestId)
                 .param("fromStatus", fromStatus)
+                .param("destinationVersion", destinationVersion)
                 .update();
+    }
+
+    /**
+     * 改投：仅当联单在途且去向版本等于 expectedVersion 时切换设施并推进版本，返回更新行数。
+     */
+    public int rerouteManifest(long manifestId, int expectedVersion, long newFacilityId) {
+        return jdbc.sql("""
+                        UPDATE manifest
+                        SET facility_id = :newFacilityId, destination_version = destination_version + 1
+                        WHERE id = :id AND status = 'IN_TRANSIT' AND destination_version = :expectedVersion
+                        """)
+                .param("newFacilityId", newFacilityId)
+                .param("id", manifestId)
+                .param("expectedVersion", expectedVersion)
+                .update();
+    }
+
+    /**
+     * 插入去向版本行并返回自增 id；(manifest_id, version) 与 request_id 唯一约束由数据库保证。
+     */
+    public long insertDestination(long manifestId, int version, long facilityId,
+                                  String requestId, String fingerprint, Instant createdAt) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.sql("""
+                        INSERT INTO manifest_destination
+                            (manifest_id, version, facility_id, request_id, fingerprint, created_at)
+                        VALUES
+                            (:manifestId, :version, :facilityId, :requestId, :fingerprint, :createdAt)
+                        """)
+                .param("manifestId", manifestId)
+                .param("version", version)
+                .param("facilityId", facilityId)
+                .param("requestId", requestId)
+                .param("fingerprint", fingerprint)
+                .param("createdAt", Timestamp.from(createdAt))
+                .update(keyHolder);
+        Number key = keyHolder.getKey();
+        if (key == null) {
+            throw new IllegalStateException("去向版本插入未返回自增主键");
+        }
+        return key.longValue();
+    }
+
+    public Optional<DestinationRow> findDestinationByRequestId(String requestId) {
+        return jdbc.sql("""
+                        SELECT id, manifest_id, version, facility_id, request_id, fingerprint, created_at
+                        FROM manifest_destination WHERE request_id = :requestId
+                        """)
+                .param("requestId", requestId)
+                .query(this::mapDestination)
+                .optional();
+    }
+
+    /**
+     * 联单完整去向版本链，按版本升序。
+     */
+    public List<DestinationRow> findDestinations(long manifestId) {
+        return jdbc.sql("""
+                        SELECT id, manifest_id, version, facility_id, request_id, fingerprint, created_at
+                        FROM manifest_destination WHERE manifest_id = :manifestId ORDER BY version
+                        """)
+                .param("manifestId", manifestId)
+                .query(this::mapDestination)
+                .list();
     }
 
     /**
      * 插入回执并返回自增 id；request_id 与 manifest_id 唯一约束由数据库保证。
      */
     public long insertReceipt(String requestId, String fingerprint, long manifestId, BigDecimal netKg,
-                              BigDecimal deviationPct, String result, Instant receivedAt) {
+                              BigDecimal deviationPct, String result, String facilityCode,
+                              Integer destinationVersion, Instant receivedAt) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.sql("""
                         INSERT INTO receipt
-                            (request_id, fingerprint, manifest_id, net_kg, deviation_pct, result, received_at)
+                            (request_id, fingerprint, manifest_id, net_kg, deviation_pct, result,
+                             facility_code, destination_version, received_at)
                         VALUES
-                            (:requestId, :fingerprint, :manifestId, :netKg, :deviationPct, :result, :receivedAt)
+                            (:requestId, :fingerprint, :manifestId, :netKg, :deviationPct, :result,
+                             :facilityCode, :destinationVersion, :receivedAt)
                         """)
                 .param("requestId", requestId)
                 .param("fingerprint", fingerprint)
@@ -168,6 +273,8 @@ public class ManifestRepository {
                 .param("netKg", netKg)
                 .param("deviationPct", deviationPct)
                 .param("result", result)
+                .param("facilityCode", facilityCode)
+                .param("destinationVersion", destinationVersion)
                 .param("receivedAt", Timestamp.from(receivedAt))
                 .update(keyHolder);
         Number key = keyHolder.getKey();
@@ -179,20 +286,77 @@ public class ManifestRepository {
 
     public Optional<ReceiptRow> findReceiptByRequestId(String requestId) {
         return jdbc.sql("""
-                        SELECT id, request_id, fingerprint, manifest_id, net_kg, deviation_pct, result, received_at
+                        SELECT id, request_id, fingerprint, manifest_id, net_kg, deviation_pct, result,
+                               facility_code, destination_version, received_at
                         FROM receipt WHERE request_id = :requestId
                         """)
                 .param("requestId", requestId)
-                .query((rs, rowNum) -> new ReceiptRow(
-                        rs.getLong("id"),
-                        rs.getString("request_id"),
-                        rs.getString("fingerprint"),
-                        rs.getLong("manifest_id"),
-                        rs.getBigDecimal("net_kg"),
-                        rs.getBigDecimal("deviation_pct"),
-                        rs.getString("result"),
-                        rs.getTimestamp("received_at").toInstant()))
+                .query(this::mapReceipt)
                 .optional();
+    }
+
+    public Optional<ReceiptRow> findReceiptByManifestId(long manifestId) {
+        return jdbc.sql("""
+                        SELECT id, request_id, fingerprint, manifest_id, net_kg, deviation_pct, result,
+                               facility_code, destination_version, received_at
+                        FROM receipt WHERE manifest_id = :manifestId
+                        """)
+                .param("manifestId", manifestId)
+                .query(this::mapReceipt)
+                .optional();
+    }
+
+    /**
+     * 插入迟到回执证据并返回自增 id；request_id 唯一约束由数据库保证。
+     */
+    public long insertLateReceipt(String requestId, String fingerprint, long manifestId,
+                                  String facilityCode, int destinationVersion, BigDecimal netKg,
+                                  Instant receivedAt) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.sql("""
+                        INSERT INTO late_receipt
+                            (request_id, fingerprint, manifest_id, facility_code, destination_version, net_kg, received_at)
+                        VALUES
+                            (:requestId, :fingerprint, :manifestId, :facilityCode, :destinationVersion, :netKg, :receivedAt)
+                        """)
+                .param("requestId", requestId)
+                .param("fingerprint", fingerprint)
+                .param("manifestId", manifestId)
+                .param("facilityCode", facilityCode)
+                .param("destinationVersion", destinationVersion)
+                .param("netKg", netKg)
+                .param("receivedAt", Timestamp.from(receivedAt))
+                .update(keyHolder);
+        Number key = keyHolder.getKey();
+        if (key == null) {
+            throw new IllegalStateException("迟到回执证据插入未返回自增主键");
+        }
+        return key.longValue();
+    }
+
+    public Optional<LateReceiptRow> findLateReceiptByRequestId(String requestId) {
+        return jdbc.sql("""
+                        SELECT id, request_id, fingerprint, manifest_id, facility_code, destination_version,
+                               net_kg, received_at
+                        FROM late_receipt WHERE request_id = :requestId
+                        """)
+                .param("requestId", requestId)
+                .query(this::mapLateReceipt)
+                .optional();
+    }
+
+    /**
+     * 联单迟到回执证据链，按留证时间升序。
+     */
+    public List<LateReceiptRow> findLateReceipts(long manifestId) {
+        return jdbc.sql("""
+                        SELECT id, request_id, fingerprint, manifest_id, facility_code, destination_version,
+                               net_kg, received_at
+                        FROM late_receipt WHERE manifest_id = :manifestId ORDER BY received_at, id
+                        """)
+                .param("manifestId", manifestId)
+                .query(this::mapLateReceipt)
+                .list();
     }
 
     /**
@@ -239,8 +403,8 @@ public class ManifestRepository {
     }
 
     /**
-     * 日结汇总：进场量按联单登记时间归日，出场量按回执时间归日，按品类分组。
-     * 直接由联单与回执明细实时复算，重复查询结果稳定。
+     * 日结汇总：进场量按联单登记时间归日，出场量按入账回执时间归日，按品类分组。
+     * 迟到回执证据不计入出场量。直接由联单与回执明细实时复算，重复查询结果稳定。
      */
     public List<SettlementRow> summarizeDaily(Instant dayStart, Instant dayEnd) {
         return jdbc.sql("""
@@ -295,7 +459,46 @@ public class ManifestRepository {
                 rs.getBigDecimal("tare_kg"),
                 rs.getBigDecimal("net_kg"),
                 rs.getLong("facility_id"),
+                rs.getInt("destination_version"),
                 rs.getString("status"),
                 rs.getTimestamp("created_at").toInstant());
+    }
+
+    private DestinationRow mapDestination(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {
+        return new DestinationRow(
+                rs.getLong("id"),
+                rs.getLong("manifest_id"),
+                rs.getInt("version"),
+                rs.getLong("facility_id"),
+                rs.getString("request_id"),
+                rs.getString("fingerprint"),
+                rs.getTimestamp("created_at").toInstant());
+    }
+
+    private ReceiptRow mapReceipt(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {
+        int version = rs.getInt("destination_version");
+        return new ReceiptRow(
+                rs.getLong("id"),
+                rs.getString("request_id"),
+                rs.getString("fingerprint"),
+                rs.getLong("manifest_id"),
+                rs.getBigDecimal("net_kg"),
+                rs.getBigDecimal("deviation_pct"),
+                rs.getString("result"),
+                rs.getString("facility_code"),
+                rs.wasNull() ? null : version,
+                rs.getTimestamp("received_at").toInstant());
+    }
+
+    private LateReceiptRow mapLateReceipt(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {
+        return new LateReceiptRow(
+                rs.getLong("id"),
+                rs.getString("request_id"),
+                rs.getString("fingerprint"),
+                rs.getLong("manifest_id"),
+                rs.getString("facility_code"),
+                rs.getInt("destination_version"),
+                rs.getBigDecimal("net_kg"),
+                rs.getTimestamp("received_at").toInstant());
     }
 }

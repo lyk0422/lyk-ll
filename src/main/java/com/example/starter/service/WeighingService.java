@@ -11,7 +11,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.example.starter.domain.ManifestStatus;
 import com.example.starter.domain.WasteCategory;
-import com.example.starter.repo.FacilityRepository;
 import com.example.starter.repo.ManifestRepository;
 import com.example.starter.repo.VehicleRepository;
 import com.example.starter.support.BizException;
@@ -28,17 +27,17 @@ public class WeighingService {
     static final Duration TARE_VALIDITY = Duration.ofDays(7);
 
     private final VehicleRepository vehicleRepository;
-    private final FacilityRepository facilityRepository;
     private final ManifestRepository manifestRepository;
+    private final FacilityService facilityService;
     private final Clock clock;
 
     public WeighingService(VehicleRepository vehicleRepository,
-                           FacilityRepository facilityRepository,
                            ManifestRepository manifestRepository,
+                           FacilityService facilityService,
                            Clock clock) {
         this.vehicleRepository = vehicleRepository;
-        this.facilityRepository = facilityRepository;
         this.manifestRepository = manifestRepository;
+        this.facilityService = facilityService;
         this.clock = clock;
     }
 
@@ -90,12 +89,11 @@ public class WeighingService {
         WasteCategory category = parseCategory(command.category());
         var vehicle = vehicleRepository.findByPlateNo(command.plateNo())
                 .orElseThrow(() -> BizException.notFound("VEHICLE_NOT_FOUND", "车辆未登记：" + command.plateNo()));
-        var facility = facilityRepository.findByCode(command.facilityCode())
-                .filter(f -> f.active())
-                .orElseThrow(() -> BizException.badRequest("FACILITY_NOT_IN_CATALOG",
-                        "去向设施不在处理设施目录内：" + command.facilityCode()));
 
         Instant now = clock.instant();
+        // 首次联单登记时验收：设施有效、品类可收、当前时刻不在停收区间
+        var facility = facilityService.checkAcceptance(command.facilityCode(), category.name(), now);
+
         BigDecimal tareKg;
         boolean reweighed;
         var latestTare = vehicleRepository.findLatestTare(vehicle.id());
@@ -139,6 +137,10 @@ public class WeighingService {
             throw BizException.conflict("VEHICLE_MANIFEST_IN_FLIGHT",
                     "同一车辆同时刻只允许一条执行中联单：" + command.plateNo());
         }
+
+        // 初始去向版本 1，与联单同事务落库
+        manifestRepository.insertDestination(manifestId, 1, facility.id(),
+                command.requestId(), fingerprint, now);
 
         return new EntryResult(manifestId, command.requestId(), command.plateNo(), command.community(),
                 category.name(), command.grossKg(), tareKg, netKg, facility.code(),

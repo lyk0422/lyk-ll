@@ -79,7 +79,7 @@ public class ReviewService {
             throw BizException.conflict("REVIEW_ALREADY_EXISTS", "该联单已存在核查结论：" + manifestId);
         }
         int updated = manifestRepository.transitionStatus(manifestId, ManifestStatus.EXCEPTION.name(),
-                ManifestStatus.RESOLVED.name());
+                ManifestStatus.RESOLVED.name(), manifest.destinationVersion());
         if (updated != 1) {
             throw BizException.conflict("MANIFEST_NOT_IN_EXCEPTION", "联单状态已变化，核查失败：" + manifestId);
         }

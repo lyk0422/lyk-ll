@@ -33,11 +33,43 @@ public abstract class LedgerTestSupport {
     @BeforeEach
     void cleanLedgerTables() {
         jdbc.sql("DELETE FROM exception_review").update();
+        jdbc.sql("DELETE FROM late_receipt").update();
         jdbc.sql("DELETE FROM receipt").update();
+        jdbc.sql("DELETE FROM manifest_destination").update();
         jdbc.sql("DELETE FROM manifest").update();
         jdbc.sql("DELETE FROM tare_record").update();
         jdbc.sql("DELETE FROM vehicle").update();
+        resetFacilityCatalog();
         clock.setInstant(TestClockConfig.BASE_INSTANT);
+    }
+
+    /**
+     * 将设施目录重置为种子状态：清除停收/改版留痕/品类配置后重建，避免用例间串扰。
+     */
+    private void resetFacilityCatalog() {
+        jdbc.sql("DELETE FROM facility_revision").update();
+        jdbc.sql("DELETE FROM facility_suspension").update();
+        jdbc.sql("DELETE FROM facility_category").update();
+        jdbc.sql("DELETE FROM facility").update();
+        jdbc.sql("""
+                INSERT INTO facility (code, name, active, version) VALUES
+                    ('F-INCINERATION', '区生活垃圾焚烧发电厂', 1, 1),
+                    ('F-INCINERATION-2', '区第二生活垃圾焚烧发电厂', 1, 1),
+                    ('F-KITCHEN', '区厨余垃圾资源化处理站', 1, 1),
+                    ('F-RECYCLING', '区可回收物分拣中心', 1, 1),
+                    ('F-HAZARDOUS', '区有害垃圾暂存转运点', 0, 1)
+                """).update();
+        jdbc.sql("""
+                INSERT INTO facility_category (facility_id, category)
+                SELECT f.id, c.category FROM facility f
+                JOIN (
+                    SELECT 'F-INCINERATION' AS code, 'OTHER' AS category UNION ALL
+                    SELECT 'F-INCINERATION-2', 'OTHER' UNION ALL
+                    SELECT 'F-KITCHEN', 'KITCHEN' UNION ALL
+                    SELECT 'F-RECYCLING', 'RECYCLABLE' UNION ALL
+                    SELECT 'F-HAZARDOUS', 'HAZARDOUS'
+                ) c ON c.code = f.code
+                """).update();
     }
 
     /**
