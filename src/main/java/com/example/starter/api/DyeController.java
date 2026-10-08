@@ -23,6 +23,7 @@ import com.example.starter.api.dto.RegisterBatchRequest;
 import com.example.starter.api.dto.ReviseBatchRequest;
 import com.example.starter.api.dto.ScheduleControlledRequest;
 import com.example.starter.api.dto.ScheduleLotRequest;
+import com.example.starter.api.dto.SplitLotRequest;
 import com.example.starter.service.BatchCompensationService;
 import com.example.starter.service.DyeService;
 import com.example.starter.service.ServiceResult;
@@ -127,6 +128,18 @@ public class DyeController {
     @PostMapping("/judgments")
     public ResponseEntity<Map<String, Object>> judge(@Valid @RequestBody JudgeRequest req) {
         return toResponse(dyeService.judge(req));
+    }
+
+    /** 分缸：已投料未判未归档未分缸的缸次拆到 2~4 个不同空闲缸（requestId 幂等 + expectedVersion）。 */
+    @PostMapping("/lots/split")
+    public ResponseEntity<Map<String, Object>> splitLot(@Valid @RequestBody SplitLotRequest req) {
+        return toResponse(dyeService.splitLot(req));
+    }
+
+    /** 分缸谱系查询：来源只读，返回子缸编号、布重与逐染料守恒分摊耗用。 */
+    @GetMapping("/lots/{lotNo}/lineage")
+    public ResponseEntity<Map<String, Object>> getLineage(@PathVariable String lotNo) {
+        return toResponse(dyeService.getLineage(lotNo));
     }
 
     /** 判定归档：终态，重复归档幂等成功。 */

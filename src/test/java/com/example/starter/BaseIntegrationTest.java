@@ -40,6 +40,9 @@ public abstract class BaseIntegrationTest {
         clock.reset();
         jdbc.update("DELETE FROM late_color_event");
         jdbc.update("DELETE FROM lot_judgment");
+        jdbc.update("DELETE FROM split_weighing");
+        jdbc.update("DELETE FROM lot_split_item");
+        jdbc.update("DELETE FROM lot_split");
         jdbc.update("DELETE FROM weighing");
         jdbc.update("DELETE FROM feeding");
         jdbc.update("DELETE FROM compensation_item");

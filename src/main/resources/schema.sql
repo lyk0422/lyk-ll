@@ -80,6 +80,9 @@ CREATE TABLE IF NOT EXISTS lot (
     fabric_weight_kg DECIMAL(12, 3) NOT NULL,
     merged_into_lot_id BIGINT,
     controlled BOOLEAN NOT NULL DEFAULT FALSE,
+    split_version INT NOT NULL DEFAULT 1,
+    split_parent_lot_id BIGINT,
+    split_seq INT,
     status VARCHAR(24) NOT NULL,
     repair_count INT NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL,
@@ -93,7 +96,10 @@ COMMENT ON COLUMN lot.liquor_ratio IS '浴比L/kg,并缸须同配方同浴比';
 COMMENT ON COLUMN lot.fabric_weight_kg IS '本缸织物重量,单位kg';
 COMMENT ON COLUMN lot.merged_into_lot_id IS '并缸目标缸次;非空表示该缸已并入他缸,空为独立缸';
 COMMENT ON COLUMN lot.controlled IS '是否受控缸次;TRUE投料前须引用已发布配方版本并取得效价补偿批准,FALSE保持旧非受控投料语义';
-COMMENT ON COLUMN lot.status IS '状态:CREATED待投料/FED已投料/REPAIRING回修中/PASSED合格/DOWNGRADED降级/MERGED已并缸/ARCHIVED已归档终态';
+COMMENT ON COLUMN lot.split_version IS '分缸乐观锁版本,从1开始;分缸成功加1,旧版提交409;子缸默认1(子缸日后可独立作为来源分缸)';
+COMMENT ON COLUMN lot.split_parent_lot_id IS '分缸来源缸次主键;非空表示该缸为分缸子缸,空为独立缸;子缸继承来源已投料进度且不得重新首次投料';
+COMMENT ON COLUMN lot.split_seq IS '子缸编号,从1起按分缸请求目标顺序生成;最小耗用余量按编号升序循环分配,空表示非子缸';
+COMMENT ON COLUMN lot.status IS '状态:CREATED待投料/FED已投料/REPAIRING回修中/PASSED合格/DOWNGRADED降级/MERGED已并缸/SPLIT已分缸只读来源/ARCHIVED已归档终态';
 COMMENT ON COLUMN lot.repair_count IS '已回修次数,只允许回修一次';
 
 CREATE TABLE IF NOT EXISTS feeding (
@@ -218,6 +224,64 @@ COMMENT ON COLUMN compensation_item.factor_version IS '冻结的批次系数版�
 COMMENT ON COLUMN compensation_item.potency_factor IS '冻结时刻的效价系数快照,批次修订不影响已投料历史';
 COMMENT ON COLUMN compensation_item.base_target_g IS '补偿前原放大目标克重=浓度*浴比*布重,单位g';
 COMMENT ON COLUMN compensation_item.compensated_target_g IS '补偿目标克重=原目标/系数,十进制计算四舍五入到三位小数,单位g';
+
+-- 分缸单：一次分缸一行；来源缸至多成功一次（lot_split.source_lot_id 唯一）
+CREATE TABLE IF NOT EXISTS lot_split (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    request_id VARCHAR(64) NOT NULL UNIQUE,
+    source_lot_id BIGINT NOT NULL UNIQUE,
+    source_split_version INT NOT NULL,
+    source_fabric_weight_kg DECIMAL(12, 3) NOT NULL,
+    created_at TIMESTAMP NOT NULL
+);
+COMMENT ON COLUMN lot_split.request_id IS '分缸幂等键;同键同参重放首次响应,异参409,失败不占键';
+COMMENT ON COLUMN lot_split.source_lot_id IS '来源缸次主键;唯一约束保证同一来源最多成功分缸一次';
+COMMENT ON COLUMN lot_split.source_split_version IS '本次分缸携带的来源分缸版本(首次为1);成功后来源lot.split_version加1,旧版再提409';
+COMMENT ON COLUMN lot_split.source_fabric_weight_kg IS '分缸时来源布重快照,单位kg,等于各子缸布重合计';
+COMMENT ON COLUMN lot_split.created_at IS '分缸成立时刻UTC留痕,与谱系/占用/耗用及幂等记录同一事务写入';
+
+-- 分缸谱系：每个子缸一行，记录编号、子缸缸次与分摊布重
+CREATE TABLE IF NOT EXISTS lot_split_item (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    split_id BIGINT NOT NULL,
+    seq INT NOT NULL,
+    child_lot_id BIGINT NOT NULL UNIQUE,
+    fabric_weight_kg DECIMAL(12, 3) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    CONSTRAINT uk_split_seq UNIQUE (split_id, seq)
+);
+COMMENT ON COLUMN lot_split_item.split_id IS '所属分缸单';
+COMMENT ON COLUMN lot_split_item.seq IS '子缸编号,从1起按请求目标顺序;最小耗用余量按编号升序循环分配';
+COMMENT ON COLUMN lot_split_item.child_lot_id IS '子缸缸次主键;子缸以FED起步继承投料进度,禁止重新首次投料';
+COMMENT ON COLUMN lot_split_item.fabric_weight_kg IS '该子缸分摊布重,单位kg(正数,最多三位小数);同单合计精确等于来源布重';
+
+-- 分缸耗用分摊：按子缸布重比例分摊来源实际称量，截到0.0001克后余量循环分配，合计逐染料等于来源实际耗用
+CREATE TABLE IF NOT EXISTS split_weighing (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    split_id BIGINT NOT NULL,
+    child_lot_id BIGINT NOT NULL,
+    seq INT NOT NULL,
+    dye_code VARCHAR(64) NOT NULL,
+    source_weighing_id BIGINT NOT NULL,
+    actual_g DECIMAL(14, 4) NOT NULL,
+    target_g DECIMAL(14, 4),
+    base_target_g DECIMAL(14, 4),
+    batch_no VARCHAR(64),
+    factor_version INT,
+    potency_factor DECIMAL(12, 6),
+    CONSTRAINT uk_split_child_dye UNIQUE (split_id, child_lot_id, dye_code)
+);
+COMMENT ON COLUMN split_weighing.split_id IS '所属分缸单';
+COMMENT ON COLUMN split_weighing.child_lot_id IS '耗用归属子缸';
+COMMENT ON COLUMN split_weighing.seq IS '子缸编号冗余,便于按编号核查循环分配结果';
+COMMENT ON COLUMN split_weighing.dye_code IS '染化料编码';
+COMMENT ON COLUMN split_weighing.source_weighing_id IS '来源实际称量行主键,指向原证据链;分缸不复制扣减,批次/染料库存保持不变';
+COMMENT ON COLUMN split_weighing.actual_g IS '分摊给该子缸的实际耗用,单位g,0.0001的整数倍;同染料各子缸合计精确等于来源actual_g,不按效价重算';
+COMMENT ON COLUMN split_weighing.target_g IS '受控来源补偿目标快照(继承原证据链),非受控来源为空';
+COMMENT ON COLUMN split_weighing.base_target_g IS '受控来源补偿前原放大目标快照,非受控来源为空';
+COMMENT ON COLUMN split_weighing.batch_no IS '受控来源冻结批次号快照,非受控来源为空';
+COMMENT ON COLUMN split_weighing.factor_version IS '受控来源冻结批次系数版本快照,非受控来源为空';
+COMMENT ON COLUMN split_weighing.potency_factor IS '受控来源冻结效价系数快照,非受控来源为空';
 
 -- 合成基础染化料库存（克）
 INSERT INTO dye (code, name, stock_g, created_at) VALUES

@@ -30,6 +30,8 @@ import com.example.starter.api.dto.MergeLotsRequest;
 import com.example.starter.api.dto.RecipeItemInput;
 import com.example.starter.api.dto.ScheduleControlledRequest;
 import com.example.starter.api.dto.ScheduleLotRequest;
+import com.example.starter.api.dto.SplitLotRequest;
+import com.example.starter.api.dto.SplitLotTargetInput;
 import com.example.starter.api.dto.WeighingInput;
 import com.example.starter.domain.CompensationStatus;
 import com.example.starter.domain.LotStatus;
@@ -444,6 +446,341 @@ public class DyeService {
     }
 
     // ---------------------------------------------------------------------
+    // 分缸：已投料来源缸只读拆分到 2~4 个空闲缸；耗用按布重比例守恒分摊，库存/补偿不重扣
+    // ---------------------------------------------------------------------
+
+    @Transactional
+    public ServiceResult splitLot(SplitLotRequest req) {
+        // 目标提交顺序即子缸编号（余量按编号升序循环分配），顺序属于业务参数，指纹保序。
+        List<Map<String, Object>> targetPayload = new ArrayList<>();
+        for (SplitLotTargetInput t : req.targets()) {
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("lotNo", t.lotNo());
+            entry.put("vatNo", t.vatNo());
+            entry.put("fabricWeightKg", t.fabricWeightKg());
+            targetPayload.add(entry);
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("sourceLotNo", req.sourceLotNo());
+        payload.put("expectedVersion", req.expectedVersion());
+        payload.put("targets", targetPayload);
+
+        return idempotency.execute(req.requestId(), "SPLIT", payload, () -> doSplit(req, targetPayload));
+    }
+
+    private ServiceResult doSplit(SplitLotRequest req, List<Map<String, Object>> targetPayload) {
+        // 先锁来源缸次行：与出缸判定互斥，判色先成则分缸拒绝、分缸先成则来源判色拒绝。
+        Map<String, Object> source = lockLot(req.sourceLotNo());
+        int currentVersion = ((Number) source.get("split_version")).intValue();
+        if (req.expectedVersion() == null || req.expectedVersion() != currentVersion) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "分缸版本冲突：expectedVersion=" + req.expectedVersion() + "，来源缸当前分缸版本=" + currentVersion);
+        }
+        if (!LotStatus.FED.name().equals(source.get("status"))) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "仅已成功投料（FED）缸次允许分缸；来源缸 " + req.sourceLotNo() + " 当前状态 "
+                            + source.get("status"));
+        }
+        Long judgmentCount = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM lot_judgment WHERE lot_id = ?", Long.class, source.get("id"));
+        if (judgmentCount != null && judgmentCount > 0) {
+            // 判色竞争中判色事务先提交：来源已色判，分缸拒绝。
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "来源缸 " + req.sourceLotNo() + " 已色判，未色判缸次才允许分缸");
+        }
+        Long priorSplit = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM lot_split WHERE source_lot_id = ?", Long.class, source.get("id"));
+        if (priorSplit != null && priorSplit > 0) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "来源缸 " + req.sourceLotNo() + " 已分缸，同一来源最多成功分缸一次");
+        }
+
+        List<SplitLotTargetInput> targets = req.targets();
+        if (targets.size() < 2 || targets.size() > 4) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "一次分缸须拆成 2 至 4 个目标缸，实际 " + targets.size());
+        }
+        Set<String> lotNos = new LinkedHashSet<>();
+        Set<String> vatNos = new LinkedHashSet<>();
+        BigDecimal weightSum = BigDecimal.ZERO;
+        for (SplitLotTargetInput t : targets) {
+            if (t.fabricWeightKg() == null || t.fabricWeightKg().signum() <= 0) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "子缸 " + t.lotNo() + " 布重必须为正公斤数");
+            }
+            if (t.fabricWeightKg().stripTrailingZeros().scale() > 3) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "子缸 " + t.lotNo() + " 布重最多三位小数，实际 " + t.fabricWeightKg().toPlainString());
+            }
+            if (!lotNos.add(t.lotNo())) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "目标子缸缸次号重复：" + t.lotNo());
+            }
+            if (!vatNos.add(t.vatNo())) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "目标染缸重复占用：" + t.vatNo());
+            }
+            weightSum = weightSum.add(t.fabricWeightKg());
+        }
+        BigDecimal sourceWeight = (BigDecimal) source.get("fabric_weight_kg");
+        if (weightSum.compareTo(sourceWeight) != 0) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    "子缸布重合计 " + weightSum.toPlainString() + "kg 必须精确等于来源布重 "
+                            + sourceWeight.toPlainString() + "kg，整单拒绝");
+        }
+        for (SplitLotTargetInput t : targets) {
+            Integer lotExists = jdbc.query("SELECT 1 FROM lot WHERE lot_no = ?",
+                    rs -> rs.next() ? 1 : null, t.lotNo());
+            if (lotExists != null) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "目标子缸缸次号 " + t.lotNo() + " 已存在，整单拒绝");
+            }
+            // 行存在即占用：来源缸此刻仍占原缸，指向原缸也会在此被拦截。
+            Integer vatBusy = jdbc.query("SELECT 1 FROM vat_active WHERE vat_no = ?",
+                    rs -> rs.next() ? 1 : null, t.vatNo());
+            if (vatBusy != null) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "目标染缸 " + t.vatNo() + " 已被占用，非空闲缸整单拒绝");
+            }
+        }
+
+        // 来源实际称量即原证据链：分缸只按实际克重守恒分摊，不按效价重算，不触碰批次/染料库存。
+        List<Map<String, Object>> sourceWeighings = jdbc.queryForList(
+                "SELECT w.id, w.dye_code, w.target_g, w.actual_g, w.base_target_g, w.batch_no, "
+                        + "w.factor_version, w.potency_factor "
+                        + "FROM weighing w JOIN feeding f ON f.id = w.feeding_id "
+                        + "WHERE f.lot_id = ? ORDER BY w.dye_code", source.get("id"));
+        if (sourceWeighings.isEmpty()) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "来源缸 " + req.sourceLotNo() + " 缺少实际称量证据，拒绝分缸");
+        }
+        List<BigDecimal> childWeights = new ArrayList<>();
+        for (SplitLotTargetInput t : targets) {
+            childWeights.add(t.fabricWeightKg());
+        }
+        // dyeCode -> 按子缸编号对齐的分摊克重
+        Map<String, List<BigDecimal>> allocatedByDye = new LinkedHashMap<>();
+        for (Map<String, Object> w : sourceWeighings) {
+            String dyeCode = (String) w.get("dye_code");
+            BigDecimal actual = (BigDecimal) w.get("actual_g");
+            List<BigDecimal> parts = SplitAllocation.allocate(actual, childWeights);
+            BigDecimal partsSum = parts.stream().reduce(BigDecimal.ZERO, BigDecimal::add);
+            if (partsSum.compareTo(actual) != 0) {
+                throw new IllegalStateException("染料 " + dyeCode + " 分摊合计 " + partsSum
+                        + " 不等于来源实际耗用 " + actual);
+            }
+            allocatedByDye.put(dyeCode, parts);
+        }
+
+        Timestamp now = nowTs();
+        try {
+            jdbc.update("INSERT INTO lot_split (request_id, source_lot_id, source_split_version, "
+                    + "source_fabric_weight_kg, created_at) VALUES (?, ?, ?, ?, ?)",
+                    req.requestId(), source.get("id"), currentVersion, sourceWeight, now);
+        } catch (DuplicateKeyException concurrentSplit) {
+            // 并发两次拆同源：唯一约束保证最多一次成功，败方整单拒绝。
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "来源缸 " + req.sourceLotNo() + " 并发分缸冲突，同一来源最多成功分缸一次");
+        }
+        Long splitId = jdbc.queryForObject(
+                "SELECT id FROM lot_split WHERE request_id = ?", Long.class, req.requestId());
+
+        for (int i = 0; i < targets.size(); i++) {
+            SplitLotTargetInput t = targets.get(i);
+            int seq = i + 1;
+            try {
+                jdbc.update("INSERT INTO lot (lot_no, vat_no, recipe_code, recipe_version, liquor_ratio, "
+                        + "fabric_weight_kg, controlled, split_version, split_parent_lot_id, split_seq, "
+                        + "status, repair_count, created_at, updated_at) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 0, ?, ?)",
+                        t.lotNo(), t.vatNo(), source.get("recipe_code"), source.get("recipe_version"),
+                        source.get("liquor_ratio"), t.fabricWeightKg(), source.get("controlled"),
+                        source.get("id"), seq, LotStatus.FED.name(), now, now);
+            } catch (DuplicateKeyException dupLot) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "目标子缸缸次号 " + t.lotNo() + " 并发冲突，整单回滚");
+            }
+            Long childLotId = jdbc.queryForObject(
+                    "SELECT id FROM lot WHERE lot_no = ?", Long.class, t.lotNo());
+            try {
+                // 所有目标占用同事务建立：主键冲突拦截并发占用同一空闲缸的竞态。
+                jdbc.update("INSERT INTO vat_active (vat_no, lot_id, since) VALUES (?, ?, ?)",
+                        t.vatNo(), childLotId, now);
+            } catch (DuplicateKeyException dupVat) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "目标染缸 " + t.vatNo() + " 并发占用冲突，整单回滚");
+            }
+            jdbc.update("INSERT INTO lot_split_item (split_id, seq, child_lot_id, fabric_weight_kg, created_at) "
+                    + "VALUES (?, ?, ?, ?, ?)", splitId, seq, childLotId, t.fabricWeightKg(), now);
+        }
+
+        for (Map<String, Object> w : sourceWeighings) {
+            String dyeCode = (String) w.get("dye_code");
+            List<BigDecimal> parts = allocatedByDye.get(dyeCode);
+            for (int i = 0; i < targets.size(); i++) {
+                Long childLotId = jdbc.queryForObject(
+                        "SELECT id FROM lot WHERE lot_no = ?", Long.class, targets.get(i).lotNo());
+                jdbc.update("INSERT INTO split_weighing (split_id, child_lot_id, seq, dye_code, "
+                        + "source_weighing_id, actual_g, target_g, base_target_g, batch_no, factor_version, "
+                        + "potency_factor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        splitId, childLotId, i + 1, dyeCode, w.get("id"), parts.get(i),
+                        w.get("target_g"), w.get("base_target_g"), w.get("batch_no"),
+                        w.get("factor_version"), w.get("potency_factor"));
+            }
+        }
+
+        int newVersion = currentVersion + 1;
+        // 持锁状态下再以状态+版本做条件更新：判色并发改状态或版本过期时更新 0 行，整单回滚。
+        int updated = jdbc.update(
+                "UPDATE lot SET status = ?, split_version = ?, updated_at = ? "
+                        + "WHERE id = ? AND status = ? AND split_version = ?",
+                LotStatus.SPLIT.name(), newVersion, now,
+                source.get("id"), LotStatus.FED.name(), currentVersion);
+        if (updated != 1) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "来源缸 " + req.sourceLotNo() + " 在分缸并发中状态/版本变化，整单回滚");
+        }
+        // 源缸转已分缸只读并释放原缸。
+        jdbc.update("DELETE FROM vat_active WHERE vat_no = ? AND lot_id = ?",
+                source.get("vat_no"), source.get("id"));
+
+        return ServiceResult.ok(splitView(req.sourceLotNo(), splitId, newVersion, now, targets,
+                sourceWeighings, allocatedByDye));
+    }
+
+    /** 组装分缸成功响应：子缸编号、布重、逐染料分摊耗用与守恒结果。 */
+    private Map<String, Object> splitView(String sourceLotNo, Long splitId, int newVersion, Timestamp now,
+                                          List<SplitLotTargetInput> targets,
+                                          List<Map<String, Object>> sourceWeighings,
+                                          Map<String, List<BigDecimal>> allocatedByDye) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("sourceLotNo", sourceLotNo);
+        body.put("splitVersion", newVersion);
+        body.put("status", LotStatus.SPLIT.name());
+        body.put("splitId", splitId);
+        body.put("createdAt", now.toInstant().toString());
+        List<Map<String, Object>> children = new ArrayList<>();
+        for (int i = 0; i < targets.size(); i++) {
+            SplitLotTargetInput t = targets.get(i);
+            Map<String, Object> child = new LinkedHashMap<>();
+            child.put("seq", i + 1);
+            child.put("lotNo", t.lotNo());
+            child.put("vatNo", t.vatNo());
+            child.put("fabricWeightKg", t.fabricWeightKg());
+            child.put("status", LotStatus.FED.name());
+            List<Map<String, Object>> usage = new ArrayList<>();
+            for (Map<String, Object> w : sourceWeighings) {
+                String dyeCode = (String) w.get("dye_code");
+                Map<String, Object> u = new LinkedHashMap<>();
+                u.put("dyeCode", dyeCode);
+                u.put("actualG", allocatedByDye.get(dyeCode).get(i));
+                if (w.get("batch_no") != null) {
+                    u.put("batchNo", w.get("batch_no"));
+                    u.put("factorVersion", w.get("factor_version"));
+                }
+                usage.add(u);
+            }
+            child.put("weighings", usage);
+            children.add(child);
+        }
+        body.put("children", children);
+        List<Map<String, Object>> conservation = new ArrayList<>();
+        for (Map<String, Object> w : sourceWeighings) {
+            String dyeCode = (String) w.get("dye_code");
+            BigDecimal sum = allocatedByDye.get(dyeCode).stream().reduce(BigDecimal.ZERO, BigDecimal::add);
+            BigDecimal sourceActual = (BigDecimal) w.get("actual_g");
+            Map<String, Object> c = new LinkedHashMap<>();
+            c.put("dyeCode", dyeCode);
+            c.put("sourceActualG", sourceActual);
+            c.put("childrenSumG", sum);
+            c.put("conserved", sum.compareTo(sourceActual) == 0);
+            conservation.add(c);
+        }
+        body.put("conservation", conservation);
+        body.put("batchStockChanged", false);
+        return body;
+    }
+
+    /** 分缸谱系查询：来源只读，展示子缸编号、布重与各染料分摊耗用及守恒核对。 */
+    @Transactional(readOnly = true)
+    public ServiceResult getLineage(String lotNo) {
+        Map<String, Object> lot = requireLot(lotNo);
+        Long sourceLotId = (Long) lot.get("id");
+        if (lot.get("split_parent_lot_id") != null) {
+            // 子缸查询：回到其来源缸的谱系。
+            sourceLotId = ((Number) lot.get("split_parent_lot_id")).longValue();
+        }
+        List<Map<String, Object>> splitRows = jdbc.queryForList(
+                "SELECT * FROM lot_split WHERE source_lot_id = ?", sourceLotId);
+        if (splitRows.isEmpty()) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "缸次 " + lotNo + " 无分缸谱系");
+        }
+        Map<String, Object> split = splitRows.get(0);
+        Map<String, Object> source = jdbc.queryForMap("SELECT * FROM lot WHERE id = ?", sourceLotId);
+
+        List<Map<String, Object>> items = jdbc.queryForList(
+                "SELECT i.seq, i.fabric_weight_kg, l.lot_no, l.vat_no, l.status AS child_status "
+                        + "FROM lot_split_item i JOIN lot l ON l.id = i.child_lot_id "
+                        + "WHERE i.split_id = ? ORDER BY i.seq", split.get("id"));
+        List<Map<String, Object>> sourceWeighings = jdbc.queryForList(
+                "SELECT w.id, w.dye_code, w.actual_g FROM weighing w JOIN feeding f ON f.id = w.feeding_id "
+                        + "WHERE f.lot_id = ? ORDER BY w.dye_code", sourceLotId);
+
+        List<Map<String, Object>> children = new ArrayList<>();
+        for (Map<String, Object> item : items) {
+            Map<String, Object> child = new LinkedHashMap<>();
+            int seq = ((Number) item.get("seq")).intValue();
+            child.put("seq", seq);
+            child.put("lotNo", item.get("lot_no"));
+            child.put("vatNo", item.get("vat_no"));
+            child.put("fabricWeightKg", item.get("fabric_weight_kg"));
+            child.put("status", item.get("child_status"));
+            List<Map<String, Object>> usage = new ArrayList<>();
+            jdbc.query("SELECT dye_code, actual_g, target_g, base_target_g, batch_no, factor_version, "
+                    + "potency_factor FROM split_weighing WHERE split_id = ? AND seq = ? ORDER BY dye_code", rs -> {
+                Map<String, Object> u = new LinkedHashMap<>();
+                u.put("dyeCode", rs.getString("dye_code"));
+                u.put("actualG", rs.getBigDecimal("actual_g"));
+                String batchNo = rs.getString("batch_no");
+                if (batchNo != null) {
+                    u.put("batchNo", batchNo);
+                    u.put("factorVersion", rs.getInt("factor_version"));
+                    u.put("potencyFactor", rs.getBigDecimal("potency_factor"));
+                    u.put("targetG", rs.getBigDecimal("target_g"));
+                    u.put("baseTargetG", rs.getBigDecimal("base_target_g"));
+                }
+                usage.add(u);
+            }, split.get("id"), seq);
+            child.put("weighings", usage);
+            children.add(child);
+        }
+
+        List<Map<String, Object>> conservation = new ArrayList<>();
+        for (Map<String, Object> w : sourceWeighings) {
+            String dyeCode = (String) w.get("dye_code");
+            BigDecimal childSum = jdbc.queryForObject(
+                    "SELECT COALESCE(SUM(actual_g), 0) FROM split_weighing WHERE split_id = ? AND dye_code = ?",
+                    BigDecimal.class, split.get("id"), dyeCode);
+            BigDecimal sourceActual = (BigDecimal) w.get("actual_g");
+            Map<String, Object> c = new LinkedHashMap<>();
+            c.put("dyeCode", dyeCode);
+            c.put("sourceActualG", sourceActual);
+            c.put("childrenSumG", childSum);
+            c.put("conserved", childSum.compareTo(sourceActual) == 0);
+            conservation.add(c);
+        }
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("sourceLotNo", source.get("lot_no"));
+        body.put("sourceStatus", source.get("status"));
+        body.put("sourceFabricWeightKg", source.get("fabric_weight_kg"));
+        body.put("splitVersion", source.get("split_version"));
+        body.put("requestId", split.get("request_id"));
+        body.put("createdAt", ((Timestamp) split.get("created_at")).toInstant().toString());
+        body.put("queriedLotNo", lotNo);
+        body.put("queriedIsChild", lot.get("split_parent_lot_id") != null);
+        body.put("children", children);
+        body.put("conservation", conservation);
+        return ServiceResult.ok(body);
+    }
+
+    // ---------------------------------------------------------------------
     // 投料：放大换算 → 偏差校验 → 称量记录与库存扣减同一事务原子完成
     // ---------------------------------------------------------------------
 
@@ -464,6 +801,11 @@ public class DyeService {
 
         return idempotency.execute(req.requestId(), "FEED", payload, () -> {
             Map<String, Object> lot = requireLot(req.lotNo());
+            if (lot.get("split_parent_lot_id") != null) {
+                // 子缸继承来源已投料进度与证据链，禁止重新调用首次投料重复扣批次/染料余量。
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "子缸 " + req.lotNo() + " 已继承来源投料进度，不允许重新首次投料（不得重复扣减余量）");
+            }
             requireStatus(lot, LotStatus.CREATED);
             if (Boolean.TRUE.equals(lot.get("controlled"))) {
                 return feedControlled(req, lot);
@@ -762,7 +1104,8 @@ public class DyeService {
         payload.put("deltaE", req.deltaE());
         payload.put("referenceLotNo", req.referenceLotNo() == null ? "" : req.referenceLotNo());
         return idempotency.execute(req.requestId(), "JUDGE", payload, () -> {
-            Map<String, Object> lot = requireLot(req.lotNo());
+            // 锁定被判定缸次：与分缸竞争来源缸行锁，分缸先成则状态为 SPLIT，判色拒绝。
+            Map<String, Object> lot = lockLot(req.lotNo());
             String status = (String) lot.get("status");
             int round;
             if (LotStatus.FED.name().equals(status)) {
@@ -849,9 +1192,10 @@ public class DyeService {
         boolean replayed = LotStatus.ARCHIVED.name().equals(status);
         if (!replayed) {
             if (LotStatus.CREATED.name().equals(status) || LotStatus.FED.name().equals(status)
-                    || LotStatus.REPAIRING.name().equals(status) || LotStatus.MERGED.name().equals(status)) {
+                    || LotStatus.REPAIRING.name().equals(status) || LotStatus.MERGED.name().equals(status)
+                    || LotStatus.SPLIT.name().equals(status)) {
                 throw new ApiException(HttpStatus.CONFLICT,
-                        "缸次 " + lotNo + " 状态 " + status + "，未出缸判定不得归档");
+                        "缸次 " + lotNo + " 状态 " + status + "，不允许归档（已分缸来源只读，仅查谱系）");
             }
             Timestamp now = nowTs();
             jdbc.update("UPDATE lot SET status = ?, updated_at = ? WHERE id = ?",
@@ -1087,6 +1431,16 @@ public class DyeService {
         return rows.get(0);
     }
 
+    /** 读取并锁定缸次行（FOR UPDATE）：分缸与来源判色借此互斥，先成交者让后者拒绝。 */
+    private Map<String, Object> lockLot(String lotNo) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT * FROM lot WHERE lot_no = ? FOR UPDATE", lotNo);
+        if (rows.isEmpty()) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "缸次 " + lotNo + " 不存在");
+        }
+        return rows.get(0);
+    }
+
     private void requireStatus(Map<String, Object> lot, LotStatus expected) {
         if (!expected.name().equals(lot.get("status"))) {
             throw new ApiException(HttpStatus.CONFLICT,
@@ -1139,8 +1493,15 @@ public class DyeService {
         view.put("fabricWeightKg", lot.get("fabric_weight_kg"));
         view.put("mergedIntoLotId", lot.get("merged_into_lot_id"));
         view.put("controlled", lot.get("controlled"));
+        view.put("splitVersion", lot.get("split_version"));
+        view.put("splitSeq", lot.get("split_seq"));
         view.put("status", lot.get("status"));
         view.put("repairCount", lot.get("repair_count"));
+        if (lot.get("split_parent_lot_id") != null) {
+            Map<String, Object> parent = jdbc.queryForMap(
+                    "SELECT lot_no FROM lot WHERE id = ?", lot.get("split_parent_lot_id"));
+            view.put("splitParentLotNo", parent.get("lot_no"));
+        }
         view.put("createdAt", ((Timestamp) lot.get("created_at")).toInstant().toString());
         view.put("updatedAt", ((Timestamp) lot.get("updated_at")).toInstant().toString());
 
@@ -1166,6 +1527,28 @@ public class DyeService {
                 weighings.add(w);
             }, feedingId);
             view.put("weighings", weighings);
+        }
+        if (feedingId == null && lot.get("split_parent_lot_id") != null) {
+            // 子缸无独立投料：展示从来源证据链按布重守恒分摊继承的实际耗用（不重新扣减余量）。
+            List<Map<String, Object>> inherited = new ArrayList<>();
+            jdbc.query("SELECT dye_code, actual_g, target_g, base_target_g, batch_no, factor_version, "
+                    + "potency_factor FROM split_weighing WHERE child_lot_id = ? ORDER BY dye_code", rs -> {
+                Map<String, Object> u = new LinkedHashMap<>();
+                u.put("dyeCode", rs.getString("dye_code"));
+                u.put("actualG", rs.getBigDecimal("actual_g"));
+                String batchNo = rs.getString("batch_no");
+                if (batchNo != null) {
+                    u.put("batchNo", batchNo);
+                    u.put("factorVersion", rs.getInt("factor_version"));
+                    u.put("potencyFactor", rs.getBigDecimal("potency_factor"));
+                    u.put("targetG", rs.getBigDecimal("target_g"));
+                    u.put("baseTargetG", rs.getBigDecimal("base_target_g"));
+                }
+                inherited.add(u);
+            }, lot.get("id"));
+            if (!inherited.isEmpty()) {
+                view.put("inheritedWeighings", inherited);
+            }
         }
         Map<String, Object> compRow = jdbc.queryForList(
                 "SELECT id, request_id, status, invalid_reason, version FROM compensation WHERE lot_id = ?",
@@ -1205,6 +1588,16 @@ public class DyeService {
             judgments.add(j);
         }, lot.get("id"));
         view.put("judgments", judgments);
+
+        List<Map<String, Object>> childRows = jdbc.queryForList(
+                "SELECT i.seq, l.lot_no, l.vat_no, i.fabric_weight_kg, l.status AS child_status "
+                        + "FROM lot_split s JOIN lot_split_item i ON i.split_id = s.id "
+                        + "JOIN lot l ON l.id = i.child_lot_id WHERE s.source_lot_id = ? ORDER BY i.seq",
+                lot.get("id"));
+        if (!childRows.isEmpty()) {
+            // 已分缸来源只读：lot 视图只附谱系指针，耗用明细走 /lineage。
+            view.put("splitChildren", childRows);
+        }
         return view;
     }
 }
