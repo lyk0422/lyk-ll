@@ -38,6 +38,17 @@ public class ApiaryRepository {
     }
 
     /**
+     * 按 ID 查询并加行级写锁，用于序列化召回创建与含该来源采收批的登记。
+     */
+    public Optional<ApiaryRow> findByIdForUpdate(long apiaryId) {
+        return jdbc.query(
+                        "SELECT id, code, name FROM apiary WHERE id = ? FOR UPDATE",
+                        (rs, i) -> new ApiaryRow(rs.getLong("id"), rs.getString("code"), rs.getString("name")),
+                        apiaryId)
+                .stream().findFirst();
+    }
+
+    /**
      * 蜂场行记录。
      */
     public record ApiaryRow(Long id, String code, String name) {

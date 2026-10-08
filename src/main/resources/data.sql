@@ -18,3 +18,10 @@ INSERT INTO test_chain (id, batch_id, status, created_at, closed_at) VALUES
 
 INSERT INTO residue_test (chain_id, batch_id, test_type, sample_no, inhibition_rate, conclusion, created_at) VALUES
     (1, 1, 'RAPID', 'SMP-SEED-001', 12.50, 'PASS', '2026-05-10 09:00:00');
+
+-- 已受理的合成加工批：引用采收批 1，用于演示召回对既有加工批加隔离标记。
+INSERT INTO processing_batch (id, batch_no, created_at) VALUES
+    (1, 'PB-SEED-001', '2026-05-11 08:00:00');
+
+INSERT INTO processing_batch_ref (processing_batch_id, harvest_batch_id) VALUES
+    (1, 1);

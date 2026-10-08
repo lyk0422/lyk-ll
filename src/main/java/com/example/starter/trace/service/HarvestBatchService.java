@@ -8,15 +8,18 @@ import com.example.starter.trace.idem.IdempotencyService;
 import com.example.starter.trace.repo.ApiaryRepository;
 import com.example.starter.trace.repo.HarvestBatchRepository;
 import com.example.starter.trace.repo.ResidueTestRepository;
+import com.example.starter.trace.repo.SourceRecallRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * 采收批登记与查询。贡献比例保留两位小数且合计恰等于 100.00。
@@ -29,17 +32,20 @@ public class HarvestBatchService {
     private final HarvestBatchRepository batchRepository;
     private final ApiaryRepository apiaryRepository;
     private final ResidueTestRepository testRepository;
+    private final SourceRecallRepository recallRepository;
     private final IdempotencyService idempotency;
     private final Clock clock;
 
     public HarvestBatchService(HarvestBatchRepository batchRepository,
                                ApiaryRepository apiaryRepository,
                                ResidueTestRepository testRepository,
+                               SourceRecallRepository recallRepository,
                                IdempotencyService idempotency,
                                Clock clock) {
         this.batchRepository = batchRepository;
         this.apiaryRepository = apiaryRepository;
         this.testRepository = testRepository;
+        this.recallRepository = recallRepository;
         this.idempotency = idempotency;
         this.clock = clock;
     }
@@ -70,10 +76,12 @@ public class HarvestBatchService {
             if (!seenApiaries.add(item.apiaryId())) {
                 throw BizException.badRequest("同一蜂场在同一采收批中重复出现: " + item.apiaryId());
             }
-            if (!apiaryRepository.existsById(item.apiaryId())) {
-                throw BizException.badRequest("蜂场不存在: " + item.apiaryId());
-            }
             total = total.add(item.ratio());
+        }
+        // 按蜂场 ID 升序加行锁，与来源召回创建串行化，避免快照与追加关联互相漏批
+        for (Long apiaryId : new TreeSet<>(seenApiaries)) {
+            apiaryRepository.findByIdForUpdate(apiaryId)
+                    .orElseThrow(() -> BizException.badRequest("蜂场不存在: " + apiaryId));
         }
         if (total.compareTo(HUNDRED) != 0) {
             throw BizException.badRequest("贡献比例合计须恰等于 100.00，实际为 " + total);
@@ -82,6 +90,12 @@ public class HarvestBatchService {
                 BatchStatus.REGISTERED, LocalDateTime.now(clock));
         for (CreateHarvestBatchRequest.ContributionItem item : request.contributions()) {
             batchRepository.insertContribution(batchId, item.apiaryId(), item.ratio());
+        }
+        // 后来登记的含活动召回来源的批自动追加隔离关联（不影响首次冻结清单）
+        LocalDateTime nowUtc = LocalDateTime.now(clock.withZone(ZoneOffset.UTC));
+        for (Long apiaryId : seenApiaries) {
+            recallRepository.findActiveRecallId(apiaryId, request.flowerPeriod())
+                    .ifPresent(recallId -> recallRepository.insertLink(recallId, batchId, false, nowUtc));
         }
         return toResponse(batchRepository.findById(batchId).orElseThrow());
     }

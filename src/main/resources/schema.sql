@@ -2,6 +2,10 @@
 -- 时间字段均为 Asia/Shanghai 本地时间；比例与抑制率字段单位为百分比，保留两位小数。
 -- 内存库随 JVM 生命周期保留，重复初始化时先按外键依赖逆序重建。
 
+DROP TABLE IF EXISTS processing_recall_mark;
+DROP TABLE IF EXISTS source_recall_link;
+DROP TABLE IF EXISTS active_source_recall;
+DROP TABLE IF EXISTS source_recall;
 DROP TABLE IF EXISTS processing_batch_ref;
 DROP TABLE IF EXISTS processing_batch;
 DROP TABLE IF EXISTS idempotency_record;
@@ -93,6 +97,51 @@ CREATE TABLE IF NOT EXISTS processing_batch_ref (
     CONSTRAINT fk_ref_processing FOREIGN KEY (processing_batch_id) REFERENCES processing_batch (id),
     CONSTRAINT fk_ref_harvest FOREIGN KEY (harvest_batch_id) REFERENCES harvest_batch (id)
 ) COMMENT '加工批次对采收批的引用，引用与放行判定同事务校验';
+
+CREATE TABLE IF NOT EXISTS source_recall (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    apiary_id BIGINT NOT NULL COMMENT '蜂场 ID',
+    flower_period VARCHAR(64) NOT NULL COMMENT '花期标识，精确匹配',
+    reason VARCHAR(512) NOT NULL COMMENT '召回原因',
+    credential VARCHAR(128) NOT NULL COMMENT '创建合成凭据，仅用于演示',
+    inspector VARCHAR(64) NOT NULL COMMENT '创建质检员',
+    status VARCHAR(16) NOT NULL COMMENT '状态：ACTIVE 活动中 / WITHDRAWN 已撤回',
+    version INT NOT NULL COMMENT '乐观锁版本，新增为 1，每次成功修改加 1',
+    created_at TIMESTAMP NOT NULL COMMENT '创建时间，UTC',
+    withdrawn_at TIMESTAMP NULL COMMENT '撤回时间，UTC；未撤回为 NULL',
+    CONSTRAINT fk_recall_apiary FOREIGN KEY (apiary_id) REFERENCES apiary (id)
+) COMMENT '来源召回单：按蜂场加精确花期召回全部相关采收批与加工批';
+
+CREATE TABLE IF NOT EXISTS active_source_recall (
+    apiary_id BIGINT NOT NULL COMMENT '蜂场 ID',
+    flower_period VARCHAR(64) NOT NULL COMMENT '花期标识',
+    recall_id BIGINT NOT NULL COMMENT '活动召回单 ID',
+    CONSTRAINT pk_active_recall PRIMARY KEY (apiary_id, flower_period),
+    CONSTRAINT fk_active_recall FOREIGN KEY (recall_id) REFERENCES source_recall (id)
+) COMMENT '活动召回占用表：主键保证同蜂场同花期最多一条 ACTIVE 召回，撤回时删除';
+
+CREATE TABLE IF NOT EXISTS source_recall_link (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    recall_id BIGINT NOT NULL COMMENT '召回单 ID',
+    harvest_batch_id BIGINT NOT NULL COMMENT '被隔离的采收批 ID',
+    initial_snapshot BOOLEAN NOT NULL COMMENT 'TRUE 首次冻结清单 / FALSE 后来追加关联',
+    status VARCHAR(16) NOT NULL COMMENT 'ACTIVE 隔离中 / RELEASED 已随召回撤回失效',
+    created_at TIMESTAMP NOT NULL COMMENT '关联建立时间，UTC',
+    CONSTRAINT uk_recall_link UNIQUE (recall_id, harvest_batch_id),
+    CONSTRAINT fk_link_recall FOREIGN KEY (recall_id) REFERENCES source_recall (id),
+    CONSTRAINT fk_link_batch FOREIGN KEY (harvest_batch_id) REFERENCES harvest_batch (id)
+) COMMENT '召回隔离关联：创建时快照与后来登记批次追加，撤回仅使本召回关联失效';
+
+CREATE TABLE IF NOT EXISTS processing_recall_mark (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    recall_id BIGINT NOT NULL COMMENT '召回单 ID',
+    processing_batch_id BIGINT NOT NULL COMMENT '被标记的加工批次 ID',
+    status VARCHAR(16) NOT NULL COMMENT 'ACTIVE 隔离标记中 / RELEASED 已随召回撤回失效',
+    created_at TIMESTAMP NOT NULL COMMENT '标记时间，UTC',
+    CONSTRAINT uk_recall_mark UNIQUE (recall_id, processing_batch_id),
+    CONSTRAINT fk_mark_recall FOREIGN KEY (recall_id) REFERENCES source_recall (id),
+    CONSTRAINT fk_mark_processing FOREIGN KEY (processing_batch_id) REFERENCES processing_batch (id)
+) COMMENT '加工批召回隔离标记：仅加标记，不删除原加工证据';
 
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id VARCHAR(64) PRIMARY KEY COMMENT '幂等键',

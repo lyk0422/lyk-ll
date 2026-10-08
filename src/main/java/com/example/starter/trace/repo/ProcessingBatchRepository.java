@@ -57,4 +57,18 @@ public class ProcessingBatchRepository {
                 "SELECT harvest_batch_id FROM processing_batch_ref WHERE processing_batch_id = ? ORDER BY id",
                 (rs, i) -> rs.getLong("harvest_batch_id"), processingBatchId);
     }
+
+    /**
+     * 查询引用了任一指定采收批的加工批次 ID，按 ID 升序去重。
+     */
+    public List<Long> findProcessingIdsByHarvestBatchIds(List<Long> harvestBatchIds) {
+        if (harvestBatchIds.isEmpty()) {
+            return List.of();
+        }
+        String placeholders = String.join(", ", harvestBatchIds.stream().map(id -> "?").toList());
+        return jdbc.query(
+                "SELECT DISTINCT processing_batch_id FROM processing_batch_ref"
+                        + " WHERE harvest_batch_id IN (" + placeholders + ") ORDER BY processing_batch_id",
+                (rs, i) -> rs.getLong("processing_batch_id"), harvestBatchIds.toArray());
+    }
 }

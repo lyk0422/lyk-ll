@@ -13,6 +13,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
 import org.springframework.test.context.jdbc.Sql;
 
@@ -27,6 +28,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 追溯服务测试基类：独立 H2 内存库、固定可控时钟、每个用例前清理数据。
  */
 @SpringBootTest
+@Import(BaseTraceTest.FixedClockTestConfig.class)
 @Sql(scripts = "/cleanup.sql", executionPhase = Sql.ExecutionPhase.BEFORE_TEST_METHOD)
 public abstract class BaseTraceTest {
 
