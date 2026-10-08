@@ -127,12 +127,12 @@ public class GeneratorTruckService {
     }
 
     /**
-     * 容量及车占用台账：全部车辆的容量、可用状态与当前未结束占用。
+     * 容量及车占用台账：全部车辆的容量、可用状态与当前未结束占用，区分供电占用与热备预占。
      */
     public List<TruckLedgerEntry> ledger() {
         return jdbc.query(
                 "SELECT t.id, t.capacity_kw, t.feeder_id, t.available, t.version,"
-                + " o.dispatch_id, d.work_order_id, o.occupied_at"
+                + " o.dispatch_id, d.work_order_id, o.replacement_id, o.occupation_type, o.occupied_at"
                 + " FROM generator_truck t"
                 + " LEFT JOIN active_occupation o ON o.truck_id = t.id"
                 + " LEFT JOIN generator_dispatch d ON d.id = o.dispatch_id"
@@ -142,9 +142,12 @@ public class GeneratorTruckService {
                     Long dispatch = rs.wasNull() ? null : dispatchId;
                     long workOrderId = rs.getLong(7);
                     Long workOrder = rs.wasNull() ? null : workOrderId;
-                    Timestamp occupiedAt = rs.getTimestamp(8);
+                    long replacementId = rs.getLong(8);
+                    Long replacement = rs.wasNull() ? null : replacementId;
+                    Timestamp occupiedAt = rs.getTimestamp(10);
                     return new TruckLedgerEntry(rs.getLong(1), rs.getInt(2), rs.getString(3),
-                            rs.getBoolean(4), rs.getInt(5), dispatch, workOrder,
+                            rs.getBoolean(4), rs.getInt(5), dispatch, workOrder, replacement,
+                            rs.getString(9),
                             occupiedAt == null ? null : occupiedAt.toLocalDateTime());
                 });
     }

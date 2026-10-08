@@ -141,8 +141,59 @@ CREATE TABLE IF NOT EXISTS dispatch_truck (
 
 CREATE TABLE IF NOT EXISTS active_occupation (
     truck_id BIGINT PRIMARY KEY COMMENT '发电车ID，主键保证一车仅一个未结束占用',
-    dispatch_id BIGINT NOT NULL COMMENT '占用该车的调度单ID',
+    dispatch_id BIGINT NULL COMMENT '供电占用的调度单ID；热备预占时为空',
+    replacement_id BIGINT NULL COMMENT '热备预占的接替单ID；供电占用时为空',
+    occupation_type VARCHAR(16) NOT NULL DEFAULT 'SUPPLY' COMMENT '占用类型：SUPPLY供电占用/STANDBY热备预占',
     occupied_at TIMESTAMP NOT NULL COMMENT '占用开始时间'
+);
+
+-- 热备接替：SUPPLYING调度单引用一辆正在供电旧车与1至3辆未占用同馈线新车，
+-- 创建即全量预占新车（STANDBY），旧车继续供电；到齐且双操作员确认后原子切换供电组合。
+CREATE TABLE IF NOT EXISTS standby_replacement (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    dispatch_id BIGINT NOT NULL COMMENT '被接替的SUPPLYING调度单ID',
+    work_order_id BIGINT NOT NULL COMMENT '工单ID，冗余便于复电/合并按单关闭',
+    old_truck_id BIGINT NOT NULL COMMENT '被换下的正在供电旧车ID',
+    feeder_id VARCHAR(64) NOT NULL COMMENT '新旧车共同馈线编号',
+    frozen_order_version INT NOT NULL COMMENT '创建时冻结的原调度工单版本号',
+    frozen_load_kw INT NOT NULL COMMENT '创建时冻结的调度单合计负荷，单位kW',
+    old_capacity_kw INT NOT NULL COMMENT '旧车容量证据，单位kW（合成正整数）',
+    new_capacity_kw INT NOT NULL COMMENT '新车容量之和证据，单位kW，不少于旧车容量（恰等合法）',
+    status VARCHAR(16) NOT NULL COMMENT 'WAITING待切换/SWITCHED已切换/REVOKED已撤回/CANCELLED已取消（复电或合并）',
+    version INT NOT NULL COMMENT '接替单版本号，从1开始，成功变更加1，旧版本修改409',
+    created_at TIMESTAMP NOT NULL COMMENT '接替单创建时间（UTC时刻传入后转换存储）'
+);
+
+CREATE TABLE IF NOT EXISTS replacement_truck (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    replacement_id BIGINT NOT NULL COMMENT '接替单ID',
+    truck_id BIGINT NOT NULL COMMENT '热备新车ID',
+    capacity_kw INT NOT NULL COMMENT '新车容量证据，单位kW（合成正整数）',
+    arrived_at TIMESTAMP NULL COMMENT '新车到场时刻，空表示未到场；逐车唯一登记',
+    CONSTRAINT uk_replacement_truck UNIQUE (replacement_id, truck_id)
+);
+
+CREATE TABLE IF NOT EXISTS replacement_confirmation (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    replacement_id BIGINT NOT NULL COMMENT '接替单ID',
+    request_id VARCHAR(64) NOT NULL COMMENT '幂等请求号',
+    confirmer VARCHAR(64) NOT NULL COMMENT '合成操作员，两个不同人员齐备方可切换',
+    confirmed_at TIMESTAMP NOT NULL COMMENT '确认时间（UTC时刻传入后转换存储）',
+    CONSTRAINT uk_replacement_confirm_request UNIQUE (request_id),
+    CONSTRAINT uk_replacement_confirmer UNIQUE (replacement_id, confirmer)
+);
+
+CREATE TABLE IF NOT EXISTS replacement_switch_evidence (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    replacement_id BIGINT NOT NULL COMMENT '接替单ID',
+    dispatch_id BIGINT NOT NULL COMMENT '调度单ID',
+    before_truck_ids VARCHAR(256) NOT NULL COMMENT '切换前供电组合车辆ID，逗号分隔',
+    before_capacity_kw INT NOT NULL COMMENT '切换前供电组合总容量，单位kW，覆盖冻结负荷',
+    after_truck_ids VARCHAR(256) NOT NULL COMMENT '切换后供电组合车辆ID，逗号分隔',
+    after_capacity_kw INT NOT NULL COMMENT '切换后供电组合总容量，单位kW，覆盖冻结负荷',
+    frozen_load_kw INT NOT NULL COMMENT '被冻结负荷，单位kW，切换前后均覆盖',
+    switched_at TIMESTAMP NOT NULL COMMENT '原子切换时刻',
+    CONSTRAINT uk_switch_replacement UNIQUE (replacement_id)
 );
 
 CREATE TABLE IF NOT EXISTS supply_evidence (
@@ -157,7 +208,7 @@ CREATE TABLE IF NOT EXISTS supply_evidence (
 CREATE TABLE IF NOT EXISTS gen_idempotency (
     request_id VARCHAR(64) PRIMARY KEY COMMENT '幂等请求号',
     fingerprint VARCHAR(128) NOT NULL COMMENT '结构化幂等指纹：长度前缀编码的SHA-256',
-    op VARCHAR(32) NOT NULL COMMENT '操作类型：TRUCK_REGISTER/TRUCK_AVAILABILITY/DISPATCH_CREATE/DISPATCH_ARRIVAL/DISPATCH_REASSIGN',
+    op VARCHAR(32) NOT NULL COMMENT '操作类型：TRUCK_REGISTER/TRUCK_AVAILABILITY/DISPATCH_CREATE/DISPATCH_ARRIVAL/DISPATCH_REASSIGN/REPLACEMENT_CREATE/REPLACEMENT_ARRIVAL/REPLACEMENT_SWITCH/REPLACEMENT_REVOKE',
     entity_id BIGINT NOT NULL COMMENT '主实体ID（车辆或调度单）',
     outcome CLOB NOT NULL COMMENT '首次冻结结果JSON，同键同参重放',
     created_at TIMESTAMP NOT NULL COMMENT '首次成功时间'

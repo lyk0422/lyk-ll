@@ -18,10 +18,12 @@ import com.example.starter.service.FaultReportService;
 import com.example.starter.service.GeneratorDispatchService;
 import com.example.starter.service.GeneratorTruckService;
 import com.example.starter.service.RestoreService;
+import com.example.starter.service.StandbyReplacementService;
 import com.example.starter.service.WorkOrderService;
 import com.example.starter.web.dto.ArrivalRequest;
 import com.example.starter.web.dto.ArrivalResponse;
 import com.example.starter.web.dto.CreateGeneratorDispatchRequest;
+import com.example.starter.web.dto.CreateReplacementRequest;
 import com.example.starter.web.dto.DispatchRequest;
 import com.example.starter.web.dto.DispatchResponse;
 import com.example.starter.web.dto.FaultReportRequest;
@@ -33,6 +35,13 @@ import com.example.starter.web.dto.QueueEntry;
 import com.example.starter.web.dto.ReassignRequest;
 import com.example.starter.web.dto.ReassignResponse;
 import com.example.starter.web.dto.RegisterTruckRequest;
+import com.example.starter.web.dto.ReplacementArrivalRequest;
+import com.example.starter.web.dto.ReplacementArrivalResponse;
+import com.example.starter.web.dto.ReplacementRevokeRequest;
+import com.example.starter.web.dto.ReplacementRevokeResponse;
+import com.example.starter.web.dto.ReplacementSwitchRequest;
+import com.example.starter.web.dto.ReplacementSwitchResponse;
+import com.example.starter.web.dto.ReplacementView;
 import com.example.starter.web.dto.RestoreChainView;
 import com.example.starter.web.dto.RestoreConfirmRequest;
 import com.example.starter.web.dto.RestoreConfirmResponse;
@@ -56,10 +65,12 @@ public class RepairController {
     private final EscalationService escalation;
     private final GeneratorTruckService generatorTrucks;
     private final GeneratorDispatchService generatorDispatches;
+    private final StandbyReplacementService standbyReplacements;
 
     public RepairController(FaultReportService faultReports, DispatchService dispatch,
             RestoreService restore, WorkOrderService workOrders, EscalationService escalation,
-            GeneratorTruckService generatorTrucks, GeneratorDispatchService generatorDispatches) {
+            GeneratorTruckService generatorTrucks, GeneratorDispatchService generatorDispatches,
+            StandbyReplacementService standbyReplacements) {
         this.faultReports = faultReports;
         this.dispatch = dispatch;
         this.restore = restore;
@@ -67,6 +78,7 @@ public class RepairController {
         this.escalation = escalation;
         this.generatorTrucks = generatorTrucks;
         this.generatorDispatches = generatorDispatches;
+        this.standbyReplacements = standbyReplacements;
     }
 
     /** 故障接报（含自动研判建单/归并），requestId 幂等。 */
@@ -177,5 +189,45 @@ public class RepairController {
     @GetMapping("/work-orders/{id}/generator-dispatches")
     public List<GeneratorDispatchView> generatorDispatchesOf(@PathVariable long id) {
         return generatorDispatches.listByWorkOrder(id);
+    }
+
+    /** 申请热备接替：全量预占新车，旧车继续供电，requestId 幂等。 */
+    @PostMapping("/generator-dispatches/{id}/replacements")
+    public ReplacementView createReplacement(@PathVariable long id,
+            @Validated @RequestBody CreateReplacementRequest req) {
+        return standbyReplacements.create(id, req);
+    }
+
+    /** 接替单详情（含冻结信息、新车到场、确认名单与切换证据）。 */
+    @GetMapping("/replacements/{id}")
+    public ReplacementView replacementView(@PathVariable long id) {
+        return standbyReplacements.view(id);
+    }
+
+    /** 调度单视角的接替单列表。 */
+    @GetMapping("/generator-dispatches/{id}/replacements")
+    public List<ReplacementView> replacementsOf(@PathVariable long id) {
+        return standbyReplacements.listByDispatch(id);
+    }
+
+    /** 热备新车到场登记，逐车唯一，requestId 幂等。 */
+    @PostMapping("/replacements/{id}/arrivals")
+    public ReplacementArrivalResponse replacementArrive(@PathVariable long id,
+            @Validated @RequestBody ReplacementArrivalRequest conf) {
+        return standbyReplacements.arrive(id, conf);
+    }
+
+    /** 热备切换双确认：到齐且两个不同操作员确认后原子切换。 */
+    @PostMapping("/replacements/{id}/switch-confirmations")
+    public ReplacementSwitchResponse replacementSwitch(@PathVariable long id,
+            @Validated @RequestBody ReplacementSwitchRequest conf) {
+        return standbyReplacements.confirmSwitch(id, conf);
+    }
+
+    /** 未切换撤回：释放全部新车预占，保留旧车供电。 */
+    @PostMapping("/replacements/{id}/revoke")
+    public ReplacementRevokeResponse replacementRevoke(@PathVariable long id,
+            @Validated @RequestBody ReplacementRevokeRequest conf) {
+        return standbyReplacements.revoke(id, conf);
     }
 }

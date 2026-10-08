@@ -59,15 +59,18 @@ public class GeneratorDispatchService {
     private final WorkOrderStore store;
     private final GeneratorTruckService trucks;
     private final GenIdempotency idem;
+    private final StandbyReplacementService replacements;
     private final TransactionTemplate tx;
 
     public GeneratorDispatchService(JdbcTemplate jdbc, AppClock clock, WorkOrderStore store,
-            GeneratorTruckService trucks, GenIdempotency idem, PlatformTransactionManager txManager) {
+            GeneratorTruckService trucks, GenIdempotency idem, StandbyReplacementService replacements,
+            PlatformTransactionManager txManager) {
         this.jdbc = jdbc;
         this.clock = clock;
         this.store = store;
         this.trucks = trucks;
         this.idem = idem;
+        this.replacements = replacements;
         this.tx = new TransactionTemplate(txManager);
     }
 
@@ -369,6 +372,9 @@ public class GeneratorDispatchService {
                 + " AND status IN ('IN_PROGRESS','SUPPLYING','TIMED_OUT') FOR UPDATE",
                 ROW_MAPPER, workOrderId);
         for (DispatchRow row : open) {
+            // 先关闭未结束热备接替：未切换的新车为热备预占（不挂调度单），须在此显式释放；
+            // 切换后的新车已是本单供电占用，随下方按调度单删除一并释放，避免孤立占用。
+            replacements.cancelForLockedDispatch(row.id(), workOrderId, reason);
             jdbc.update("UPDATE generator_dispatch SET status = 'CANCELLED', version = version + 1"
                     + " WHERE id = ?", row.id());
             jdbc.update("DELETE FROM active_occupation WHERE dispatch_id = ?", row.id());
