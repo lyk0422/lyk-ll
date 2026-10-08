@@ -67,4 +67,29 @@ public final class Requests {
             @NotNull LocalDateTime tideStart,
             @NotNull LocalDateTime tideEnd) {
     }
+
+    /** 交班申请：绑定执行中计划、当前引航员、不同接班员与潮窗内部交班时刻。 */
+    public record HandoverApplyRequest(
+            @NotBlank String requestId,
+            @NotNull Long planId,
+            @NotNull Long outPilotId,
+            @NotNull Long inPilotId,
+            @NotNull LocalDateTime handoverAt) {
+    }
+
+    /** 交班签认：身份须为交班双方之一，携带期望版本。 */
+    public record HandoverAckRequest(
+            @NotBlank String requestId,
+            @NotNull Long handoverId,
+            @NotNull Long pilotId,
+            String comment,
+            @NotNull Long expectedVersion) {
+    }
+
+    /** 交班撤回：仅切换前可撤回，携带期望版本。 */
+    public record HandoverWithdrawRequest(
+            @NotBlank String requestId,
+            @NotNull Long handoverId,
+            @NotNull Long expectedVersion) {
+    }
 }

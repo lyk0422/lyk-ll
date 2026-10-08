@@ -2,12 +2,15 @@ package com.example.starter.web;
 
 import jakarta.validation.Valid;
 
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.example.starter.service.PilotPlanService;
+import com.example.starter.web.dto.PlanDetailResponse;
 import com.example.starter.web.dto.PlanResponse;
 import com.example.starter.web.dto.Requests.ApplyRequest;
 import com.example.starter.web.dto.Requests.CancelRequest;
@@ -63,5 +66,11 @@ public class PilotPlanController {
     @PostMapping("/reschedule")
     public PlanResponse reschedule(@Valid @RequestBody RescheduleRequest request) {
         return service.reschedule(request);
+    }
+
+    /** 计划详情：展示实际责任区间、最新交班（含双方意见与接班预占）。 */
+    @GetMapping("/{planId}")
+    public PlanDetailResponse detail(@PathVariable long planId) {
+        return service.getDetail(planId);
     }
 }

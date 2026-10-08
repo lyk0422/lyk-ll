@@ -4,20 +4,17 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.function.Supplier;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
-import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.support.TransactionTemplate;
 
+import com.example.starter.domain.HandoverStatus;
 import com.example.starter.domain.PlanStatus;
 import com.example.starter.store.IdempotencyRepository;
 import com.example.starter.store.PlanRepository;
 import com.example.starter.store.PlanRepository.PlanRow;
 import com.example.starter.web.ApiException;
+import com.example.starter.web.dto.HandoverResponse;
+import com.example.starter.web.dto.PlanDetailResponse;
 import com.example.starter.web.dto.PlanResponse;
 import com.example.starter.web.dto.Requests.ApplyRequest;
 import com.example.starter.web.dto.Requests.CancelRequest;
@@ -42,17 +39,15 @@ public class PilotPlanService {
     static final long CANCEL_NOTICE_MINUTES = 2 * 60;
 
     private final PlanRepository plans;
-    private final IdempotencyRepository idem;
-    private final TransactionTemplate tx;
-    private final ObjectMapper objectMapper;
+    private final IdempotentExecutor idem;
+    private final AssignmentValidator assignmentValidator;
     private final Clock clock;
 
-    public PilotPlanService(PlanRepository plans, IdempotencyRepository idem,
-                            TransactionTemplate tx, ObjectMapper objectMapper, Clock clock) {
+    public PilotPlanService(PlanRepository plans, IdempotentExecutor idem,
+                            AssignmentValidator assignmentValidator, Clock clock) {
         this.plans = plans;
         this.idem = idem;
-        this.tx = tx;
-        this.objectMapper = objectMapper;
+        this.assignmentValidator = assignmentValidator;
         this.clock = clock;
     }
 
@@ -60,12 +55,12 @@ public class PilotPlanService {
     public PlanResponse apply(ApplyRequest request) {
         String fingerprint = IdempotencyRepository.fingerprint("apply", request.requestId(),
                 request.applicant(), request.shipName(), request.planStart(), request.planEnd());
-        return idempotent("apply", request.requestId(), fingerprint, () -> {
+        return idem.execute("apply", request.requestId(), fingerprint, () -> {
             validateTimeRange(request.planStart(), request.planEnd());
             long planId = plans.insertPlan(request.requestId(), request.applicant(),
                     request.shipName(), request.planStart(), request.planEnd(), now());
             return toResponse(plans.findById(planId).orElseThrow(), List.of(), false);
-        });
+        }, PlanResponse.class);
     }
 
     /** 编排：绑定引航员、拖轮组合与潮水窗口，校验窗口包含关系与工时规则。 */
@@ -73,7 +68,7 @@ public class PilotPlanService {
         String fingerprint = IdempotencyRepository.fingerprint("schedule", request.requestId(),
                 request.planId(), request.pilotId(), request.tugIds(),
                 request.tideStart(), request.tideEnd());
-        return idempotent("schedule", request.requestId(), fingerprint, () -> {
+        return idem.execute("schedule", request.requestId(), fingerprint, () -> {
             PlanRow plan = lockPlan(request.planId());
             requireStatus(plan, PlanStatus.APPLIED, "仅申请状态的计划可编排");
             validateWindow(plan, request.tideStart(), request.tideEnd());
@@ -90,14 +85,14 @@ public class PilotPlanService {
                     plan.planStart(), plan.planEnd(), now());
             plans.replacePlanTugs(plan.id(), request.tugIds());
             return toResponse(plans.findById(plan.id()).orElseThrow(), request.tugIds(), false);
-        });
+        }, PlanResponse.class);
     }
 
     /** 确认：校验资源占用后，引航员与拖轮在同一事务内同时锁定。 */
     public PlanResponse confirm(ConfirmRequest request) {
         String fingerprint = IdempotencyRepository.fingerprint("confirm", request.requestId(),
                 request.planId());
-        return idempotent("confirm", request.requestId(), fingerprint, () -> {
+        return idem.execute("confirm", request.requestId(), fingerprint, () -> {
             PlanRow plan = lockPlan(request.planId());
             requireStatus(plan, PlanStatus.SCHEDULED, "仅已编排的计划可确认");
             List<Long> tugIds = plans.findTugIds(plan.id());
@@ -112,14 +107,14 @@ public class PilotPlanService {
             }
             plans.updateStatus(plan.id(), PlanStatus.CONFIRMED, now());
             return toResponse(plans.findById(plan.id()).orElseThrow(), tugIds, false);
-        });
+        }, PlanResponse.class);
     }
 
     /** 开始执行：同一引航员同时刻只允许一条执行中计划。 */
     public PlanResponse start(StartRequest request) {
         String fingerprint = IdempotencyRepository.fingerprint("start", request.requestId(),
                 request.planId());
-        return idempotent("start", request.requestId(), fingerprint, () -> {
+        return idem.execute("start", request.requestId(), fingerprint, () -> {
             PlanRow plan = lockPlan(request.planId());
             requireStatus(plan, PlanStatus.CONFIRMED, "仅已确认的计划可开始执行");
             if (plans.existsExecutingOverlap(plan.pilotId(), plan.planStart(), plan.planEnd(), plan.id())) {
@@ -127,20 +122,24 @@ public class PilotPlanService {
             }
             plans.updateStatus(plan.id(), PlanStatus.EXECUTING, now());
             return toResponse(plans.findById(plan.id()).orElseThrow(), plans.findTugIds(plan.id()), false);
-        });
+        }, PlanResponse.class);
     }
 
-    /** 核销：执行结束后释放资源锁。 */
+    /** 核销：执行结束后释放资源锁；与切换竞争时关闭未结束交班并释放接班预占。 */
     public PlanResponse settle(SettleRequest request) {
         String fingerprint = IdempotencyRepository.fingerprint("settle", request.requestId(),
                 request.planId());
-        return idempotent("settle", request.requestId(), fingerprint, () -> {
+        return idem.execute("settle", request.requestId(), fingerprint, () -> {
             PlanRow plan = lockPlan(request.planId());
             requireStatus(plan, PlanStatus.EXECUTING, "仅执行中的计划可核销");
+            // 计划行锁串行化核销与切换竞争：核销先提交则交班关闭，不可再切入新引航员
+            plans.findOpenHandoverForPlan(plan.id()).ifPresent(handover ->
+                    plans.updateHandoverStatus(handover.id(), HandoverStatus.CLOSED,
+                            handover.version() + 1, now()));
             plans.deleteLocksByPlanId(plan.id());
             plans.updateStatus(plan.id(), PlanStatus.SETTLED, now());
             return toResponse(plans.findById(plan.id()).orElseThrow(), plans.findTugIds(plan.id()), false);
-        });
+        }, PlanResponse.class);
     }
 
     /**
@@ -150,7 +149,7 @@ public class PilotPlanService {
     public PlanResponse cancel(CancelRequest request) {
         String fingerprint = IdempotencyRepository.fingerprint("cancel", request.requestId(),
                 request.planId());
-        return idempotent("cancel", request.requestId(), fingerprint, () -> {
+        return idem.execute("cancel", request.requestId(), fingerprint, () -> {
             PlanRow plan = lockPlan(request.planId());
             if (plan.status() != PlanStatus.APPLIED && plan.status() != PlanStatus.SCHEDULED
                     && plan.status() != PlanStatus.CONFIRMED) {
@@ -168,7 +167,7 @@ public class PilotPlanService {
             plans.updateStatus(plan.id(), PlanStatus.CANCELLED, now());
             return toResponse(plans.findById(plan.id()).orElseThrow(),
                     plans.findTugIds(plan.id()), violation);
-        });
+        }, PlanResponse.class);
     }
 
     /** 改期：重新校验工时与拖轮占用，结论与重新锁定在同一事务内完成。 */
@@ -176,7 +175,7 @@ public class PilotPlanService {
         String fingerprint = IdempotencyRepository.fingerprint("reschedule", request.requestId(),
                 request.planId(), request.planStart(), request.planEnd(),
                 request.tideStart(), request.tideEnd());
-        return idempotent("reschedule", request.requestId(), fingerprint, () -> {
+        return idem.execute("reschedule", request.requestId(), fingerprint, () -> {
             PlanRow plan = lockPlan(request.planId());
             if (plan.status() != PlanStatus.SCHEDULED && plan.status() != PlanStatus.CONFIRMED) {
                 throw ApiException.conflict("当前状态不可改期: " + plan.status());
@@ -211,59 +210,13 @@ public class PilotPlanService {
             plans.updateReschedule(plan.id(), request.tideStart(), request.tideEnd(),
                     request.planStart(), request.planEnd(), now());
             return toResponse(plans.findById(plan.id()).orElseThrow(), tugIds, false);
-        });
+        }, PlanResponse.class);
     }
 
     // ---------- 内部通用逻辑 ----------
 
     private LocalDateTime now() {
         return LocalDateTime.now(clock);
-    }
-
-    /**
-     * 幂等执行框架：同事务内先落幂等记录再执行业务，并发同键由主键串行化；
-     * 后到者捕获唯一键冲突后重放首次结果，同键异参返回 409。
-     */
-    private PlanResponse idempotent(String operation, String requestId, String fingerprint,
-                                    Supplier<PlanResponse> action) {
-        try {
-            return tx.execute(status -> {
-                var existing = idem.find(requestId);
-                if (existing.isPresent()) {
-                    return replay(existing.get(), fingerprint);
-                }
-                idem.insert(requestId, operation, fingerprint, "", now());
-                PlanResponse response = action.get();
-                idem.updateResponse(requestId, toJson(response));
-                return response;
-            });
-        } catch (DuplicateKeyException e) {
-            var existing = idem.find(requestId);
-            if (existing.isPresent()) {
-                return replay(existing.get(), fingerprint);
-            }
-            throw ApiException.conflict("幂等冲突，请重试");
-        }
-    }
-
-    /** 重放首次结果；指纹不一致（同键异参）返回 409。 */
-    private PlanResponse replay(IdempotencyRepository.IdemRow existing, String fingerprint) {
-        if (!existing.fingerprint().equals(fingerprint)) {
-            throw ApiException.conflict("requestId 已存在且业务参数不一致");
-        }
-        try {
-            return objectMapper.readValue(existing.responseBody(), PlanResponse.class);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("幂等响应反序列化失败", e);
-        }
-    }
-
-    private String toJson(PlanResponse response) {
-        try {
-            return objectMapper.writeValueAsString(response);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("幂等响应序列化失败", e);
-        }
     }
 
     private PlanRow lockPlan(long planId) {
@@ -293,26 +246,10 @@ public class PilotPlanService {
         }
     }
 
-    /**
-     * 校验引航员可排：时段不与既有计划重叠，且满足连续作业 4 小时强制休息 1 小时、
-     * 单日累计不超过 10 小时的工时规则。
-     */
+    /** 校验引航员可排：委托给共享的责任段/工时校验组件。 */
     private void validatePilotAssignable(long pilotId, LocalDateTime start, LocalDateTime end,
                                          long excludePlanId) {
-        List<PlanRow> active = plans.findActivePlansForPilot(pilotId,
-                start.minusDays(2), end.plusDays(2), excludePlanId);
-        for (PlanRow other : active) {
-            if (other.planStart().isBefore(end) && other.planEnd().isAfter(start)) {
-                throw ApiException.conflict("引航员在该时段已有计划: " + other.id());
-            }
-        }
-        List<WorkHourValidator.Interval> intervals = active.stream()
-                .map(p -> new WorkHourValidator.Interval(p.planStart(), p.planEnd()))
-                .toList();
-        WorkHourValidator.validate(intervals, new WorkHourValidator.Interval(start, end))
-                .ifPresent(message -> {
-                    throw ApiException.conflict(message);
-                });
+        assignmentValidator.validatePilotAssignable(pilotId, start, end, excludePlanId);
     }
 
     /**
@@ -340,5 +277,37 @@ public class PilotPlanService {
     private PlanResponse toResponse(PlanRow plan, List<Long> tugIds, boolean violationCreated) {
         return new PlanResponse(plan.id(), plan.status().name(), plan.pilotId(), tugIds,
                 plan.planStart(), plan.planEnd(), plan.tideStart(), plan.tideEnd(), violationCreated);
+    }
+
+    /**
+     * 计划详情查询：展示各引航员实际责任区间（工时按此分段计算）与最新交班信息
+     * （含双方签认意见与接班预占）。未使用交班的计划责任区间与计划时段一致。
+     */
+    public PlanDetailResponse getDetail(long planId) {
+        PlanRow plan = plans.findById(planId)
+                .orElseThrow(() -> ApiException.notFound("计划不存在: " + planId));
+        List<Long> tugIds = plans.findTugIds(planId);
+        List<PlanDetailResponse.ResponsibilitySegment> responsibilities;
+        var switched = plans.findSwitchedHandoverForPlan(planId);
+        if (switched.isPresent()) {
+            // 已切换：出班方责任段截止到交班时刻，接班方承担剩余段
+            PlanRepository.HandoverRow handover = switched.get();
+            responsibilities = List.of(
+                    new PlanDetailResponse.ResponsibilitySegment(
+                            handover.outPilotId(), plan.planStart(), handover.handoverAt()),
+                    new PlanDetailResponse.ResponsibilitySegment(
+                            handover.inPilotId(), handover.handoverAt(), plan.planEnd()));
+        } else if (plan.pilotId() != null) {
+            responsibilities = List.of(new PlanDetailResponse.ResponsibilitySegment(
+                    plan.pilotId(), plan.planStart(), plan.planEnd()));
+        } else {
+            responsibilities = List.of();
+        }
+        HandoverResponse handover = plans.findLatestHandoverForPlan(planId)
+                .map(row -> HandoverService.toResponse(row, plan))
+                .orElse(null);
+        return new PlanDetailResponse(plan.id(), plan.status().name(), plan.pilotId(), tugIds,
+                plan.planStart(), plan.planEnd(), plan.tideStart(), plan.tideEnd(),
+                responsibilities, handover);
     }
 }
