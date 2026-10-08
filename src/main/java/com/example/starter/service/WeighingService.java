@@ -96,6 +96,14 @@ public class WeighingService {
                         "去向设施不在处理设施目录内：" + command.facilityCode()));
 
         Instant now = clock.instant();
+        if (!facilityRepository.acceptsCategory(facility.id(), category.name())) {
+            throw BizException.badRequest("FACILITY_CATEGORY_REJECTED",
+                    "设施不接收该品类：" + command.facilityCode() + " / " + category.name());
+        }
+        if (facilityRepository.isSuspendedAt(facility.id(), now)) {
+            throw BizException.badRequest("FACILITY_SUSPENDED",
+                    "设施当前处于停收区间：" + command.facilityCode());
+        }
         BigDecimal tareKg;
         boolean reweighed;
         var latestTare = vehicleRepository.findLatestTare(vehicle.id());
@@ -139,6 +147,8 @@ public class WeighingService {
             throw BizException.conflict("VEHICLE_MANIFEST_IN_FLIGHT",
                     "同一车辆同时刻只允许一条执行中联单：" + command.plateNo());
         }
+        // 初始去向版本 1：与联单同事务写入去向链
+        manifestRepository.insertDestination(manifestId, 1, facility.id(), null, null, now);
 
         return new EntryResult(manifestId, command.requestId(), command.plateNo(), command.community(),
                 category.name(), command.grossKg(), tareKg, netKg, facility.code(),

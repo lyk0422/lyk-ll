@@ -34,9 +34,15 @@ public abstract class LedgerTestSupport {
     void cleanLedgerTables() {
         jdbc.sql("DELETE FROM exception_review").update();
         jdbc.sql("DELETE FROM receipt").update();
+        jdbc.sql("DELETE FROM late_receipt").update();
+        jdbc.sql("DELETE FROM manifest_destination").update();
         jdbc.sql("DELETE FROM manifest").update();
         jdbc.sql("DELETE FROM tare_record").update();
         jdbc.sql("DELETE FROM vehicle").update();
+        jdbc.sql("DELETE FROM facility_revision").update();
+        jdbc.sql("DELETE FROM facility_suspension").update();
+        jdbc.sql("DELETE FROM facility_category").update();
+        jdbc.sql("UPDATE facility SET version = 1").update();
         clock.setInstant(TestClockConfig.BASE_INSTANT);
     }
 

@@ -3,9 +3,24 @@
 
 MERGE INTO facility (code, name, active) KEY(code) VALUES
     ('F-INCINERATION', '区生活垃圾焚烧发电厂', 1),
+    ('F-INCINERATION-2', '区第二生活垃圾焚烧发电厂', 1),
     ('F-KITCHEN', '区厨余垃圾资源化处理站', 1),
     ('F-RECYCLING', '区可回收物分拣中心', 1),
     ('F-HAZARDOUS', '区有害垃圾暂存转运点', 0);
+
+-- 设施可接收品类（合成数据）：焚烧厂收其他垃圾，厨余站收厨余，分拣中心收可回收物，有害暂存点收有害垃圾。
+INSERT INTO facility_category (facility_id, category)
+SELECT f.id, c.category FROM facility f
+JOIN (
+    SELECT 'F-INCINERATION' AS code, 'OTHER' AS category
+    UNION ALL SELECT 'F-INCINERATION-2', 'OTHER'
+    UNION ALL SELECT 'F-KITCHEN', 'KITCHEN'
+    UNION ALL SELECT 'F-RECYCLING', 'RECYCLABLE'
+    UNION ALL SELECT 'F-HAZARDOUS', 'HAZARDOUS'
+) c ON c.code = f.code
+WHERE NOT EXISTS (
+    SELECT 1 FROM facility_category fc WHERE fc.facility_id = f.id AND fc.category = c.category
+);
 
 MERGE INTO vehicle (plate_no) KEY(plate_no) VALUES
     ('沪A10001'),
