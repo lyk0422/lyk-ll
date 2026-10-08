@@ -1,6 +1,8 @@
 package com.example.starter;
 
+import com.example.starter.service.ControlClock;
 import com.example.starter.service.ControlEventService;
+import com.example.starter.service.MaintenanceService;
 import com.example.starter.service.WindIngestionService;
 import com.example.starter.web.dto.WindReadingRequest;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -37,6 +39,10 @@ public abstract class BaseIntegrationTest {
     protected static final long SEGMENT_2 = 2L;
     protected static final long SEGMENT_3 = 3L;
 
+    /** 第二条合成线路及唯一分段（见 data.sql） */
+    protected static final long LINE_2 = 2L;
+    protected static final long SEGMENT_4 = 4L;
+
     protected static final Instant T0 = Instant.parse("2026-10-06T00:00:00Z");
 
     @Autowired
@@ -45,6 +51,10 @@ public abstract class BaseIntegrationTest {
     protected WindIngestionService windIngestionService;
     @Autowired
     protected ControlEventService controlEventService;
+    @Autowired
+    protected MaintenanceService maintenanceService;
+    @Autowired
+    protected ControlClock clock;
     @Autowired
     protected ObjectMapper objectMapper;
 
@@ -55,10 +65,15 @@ public abstract class BaseIntegrationTest {
         jdbc.update("DELETE FROM cabin_release");
         jdbc.update("DELETE FROM segment_clearance");
         jdbc.update("DELETE FROM reopen_confirmation");
+        jdbc.update("DELETE FROM maintenance_acceptance");
+        jdbc.update("DELETE FROM maintenance_clearance");
+        jdbc.update("DELETE FROM maintenance_segment");
+        jdbc.update("DELETE FROM maintenance_order");
         jdbc.update("DELETE FROM idempotency_record");
         jdbc.update("DELETE FROM wind_reading");
         jdbc.update("DELETE FROM control_event");
         jdbc.update("UPDATE wind_line SET status = 'NORMAL' WHERE id = ?", LINE_ID);
+        clock.reset();
     }
 
     /**

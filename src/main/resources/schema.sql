@@ -135,7 +135,7 @@ CREATE TABLE IF NOT EXISTS boarding (
     line_id BIGINT NOT NULL,
     request_id VARCHAR(64) NOT NULL,
     passenger_count INT NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE boarding IS '上客记录，管制期间禁止上客';
 COMMENT ON COLUMN boarding.line_id IS '线路 id';
@@ -161,6 +161,79 @@ COMMENT ON COLUMN late_data_event.measured_at IS '测量时刻（UTC）';
 COMMENT ON COLUMN late_data_event.speed_ms IS '风速，单位 m/s';
 COMMENT ON COLUMN late_data_event.reason IS '迟到原因说明';
 COMMENT ON COLUMN late_data_event.created_at IS '记录时间（UTC）';
+
+CREATE TABLE IF NOT EXISTS maintenance_order (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    line_id BIGINT NOT NULL,
+    version INT NOT NULL DEFAULT 1,
+    status VARCHAR(32) NOT NULL DEFAULT 'SCHEDULED',
+    start_at TIMESTAMP(6) NOT NULL,
+    end_at TIMESTAMP(6) NOT NULL,
+    reason VARCHAR(256) NOT NULL,
+    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP(6),
+    cancelled_at TIMESTAMP(6)
+);
+COMMENT ON TABLE maintenance_order IS '检修封锁单，与风速管制相互独立的第二类阻断；窗口 [start_at,end_at) 为 UTC';
+COMMENT ON COLUMN maintenance_order.line_id IS '绑定线路 id';
+COMMENT ON COLUMN maintenance_order.version IS '乐观锁版本：新建为 1，修改/取消/验收完成成功后加 1；旧版本提交返回 409';
+COMMENT ON COLUMN maintenance_order.status IS '状态：SCHEDULED 未终态（未生效或生效封锁中，按 start_at 与当前时刻计算生效态）/ COMPLETED 双验收完成仅解除自身阻断 / CANCELLED 未生效取消';
+COMMENT ON COLUMN maintenance_order.start_at IS '检修窗口起点（UTC，含）：到达该时刻即阻断整条线路上客';
+COMMENT ON COLUMN maintenance_order.end_at IS '检修窗口终点（UTC，不含）：验收不得早于该时刻，到点未验收仍封锁';
+COMMENT ON COLUMN maintenance_order.reason IS '检修原因说明（合成数据）';
+COMMENT ON COLUMN maintenance_order.created_at IS '登记时间（UTC）';
+COMMENT ON COLUMN maintenance_order.completed_at IS '验收完成时间（UTC），NULL 表示未完成';
+COMMENT ON COLUMN maintenance_order.cancelled_at IS '取消时间（UTC），NULL 表示未取消';
+
+CREATE INDEX IF NOT EXISTS idx_maintenance_order_line ON maintenance_order (line_id, status);
+
+CREATE TABLE IF NOT EXISTS maintenance_segment (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id BIGINT NOT NULL,
+    segment_id BIGINT NOT NULL
+);
+COMMENT ON TABLE maintenance_segment IS '检修单涉及分段清单，不允许为空或跨线路';
+COMMENT ON COLUMN maintenance_segment.order_id IS '检修单 id';
+COMMENT ON COLUMN maintenance_segment.segment_id IS '分段 id，同一检修单内唯一';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_maintenance_segment_order_segment
+    ON maintenance_segment (order_id, segment_id);
+
+CREATE TABLE IF NOT EXISTS maintenance_clearance (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id BIGINT NOT NULL,
+    segment_id BIGINT NOT NULL,
+    operator_id VARCHAR(64) NOT NULL,
+    opinion VARCHAR(256) NOT NULL,
+    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE maintenance_clearance IS '检修分段清空证据：按原能力逐段疏散清空后登记，登记检修单不会自动宣称已清空';
+COMMENT ON COLUMN maintenance_clearance.order_id IS '检修单 id';
+COMMENT ON COLUMN maintenance_clearance.segment_id IS '已清空分段 id，同一检修单内每分段仅一条证据';
+COMMENT ON COLUMN maintenance_clearance.operator_id IS '清空确认人标识（合成人员）';
+COMMENT ON COLUMN maintenance_clearance.opinion IS '清空情况说明（人员意见）';
+COMMENT ON COLUMN maintenance_clearance.created_at IS '证据登记时间（UTC）';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_maintenance_clearance_order_segment
+    ON maintenance_clearance (order_id, segment_id);
+
+CREATE TABLE IF NOT EXISTS maintenance_acceptance (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    order_id BIGINT NOT NULL,
+    role VARCHAR(32) NOT NULL,
+    operator_id VARCHAR(64) NOT NULL,
+    opinion VARCHAR(256) NOT NULL,
+    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE maintenance_acceptance IS '检修验收意见：机务与检修两个不同人员各完成一次，且不得早于窗口 end';
+COMMENT ON COLUMN maintenance_acceptance.order_id IS '检修单 id';
+COMMENT ON COLUMN maintenance_acceptance.role IS '验收岗位：MECHANICAL 机务 / REPAIR 检修，同一检修单每岗位仅一次';
+COMMENT ON COLUMN maintenance_acceptance.operator_id IS '验收人员标识（合成人员）；两个岗位不得为同一人';
+COMMENT ON COLUMN maintenance_acceptance.opinion IS '验收人员意见';
+COMMENT ON COLUMN maintenance_acceptance.created_at IS '验收时间（UTC），不得早于检修窗口 end';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_maintenance_acceptance_order_role
+    ON maintenance_acceptance (order_id, role);
 
 CREATE TABLE IF NOT EXISTS idempotency_record (
     request_id VARCHAR(64) PRIMARY KEY,
